@@ -168,6 +168,15 @@ fn is_ancestor(root: &Path, ancestor: &str, of: &str) -> bool {
     run(root, &["merge-base", "--is-ancestor", ancestor, of]).is_ok()
 }
 
+/// How many commits `base` has that HEAD does not.
+pub fn behind(root: &Path, base: &str) -> Option<usize> {
+    run(root, &["rev-list", "--count", &format!("HEAD..{base}")])
+        .ok()
+        .and_then(first_line)?
+        .parse()
+        .ok()
+}
+
 /// Short commit id and branch name of HEAD, when there are any.
 pub fn head(root: &Path) -> (Option<String>, Option<String>) {
     let commit = run(root, &["rev-parse", "--short", "HEAD"])

@@ -25,7 +25,7 @@ Limits live in `dgf.toml` (`[limits] warn`, `fail`, per-path `[[limits.overrides
 | Complex and untested code | `dgf analyze --coverage <report or folder> --format agent` |
 | Trend over saved runs | `dgf history --format agent` |
 
-If `dgf` is not found in PowerShell, run `$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"`. Exit code 1 only means something is above `fail`; the output is still complete. Exit code 2 is a usage or `dgf.toml` error: read the message.
+If `dgf` is not found in PowerShell, run `$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"`. Exit code 1 only means something is above `fail`; the output is still complete. Exit code 2 is a usage or `dgf.toml` error: read the message. With `--format agent` the last line says the same (`exit: N (meaning)`), and `warning:` lines under the first lines (base fallback, a dgf.toml that differs from the base branch's) change what the counts mean: read them before trusting the result. `dgf mutate --format agent` starts with a `scope:` block (the dgf.toml it follows and what its excludes left out, the base and how it was chosen, how far HEAD is behind it, and after `--run` the test projects that ran): check it first.
 
 ## Reading `--format agent` output
 

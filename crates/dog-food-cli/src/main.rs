@@ -296,12 +296,30 @@ fn io(message: String) -> Failure {
     (EXIT_IO, message)
 }
 
-fn exit_code(failed: bool) -> ExitCode {
+fn fail_code(failed: bool) -> u8 {
     if failed {
-        ExitCode::from(EXIT_FAIL)
+        EXIT_FAIL
     } else {
-        ExitCode::SUCCESS
+        0
     }
+}
+
+/// Writes the report; agent output ends with the exit code and what it
+/// means, so an agent that reads only the text still knows how the run ended.
+fn finish(mut text: String, out: &OutputArgs, code: u8) -> Result<(), Failure> {
+    if out.format == Format::Agent {
+        let meaning = match code {
+            0 => "pass: nothing above the fail limit",
+            EXIT_FAIL => "fail: something is above the fail limit or the mutation score is below break; the report above is complete",
+            EXIT_BUDGET => "budget: --max-minutes ran out; run the same command again to test the rest (results so far are cached)",
+            _ => "see the exit codes in the README",
+        };
+        text.push_str(&format!(
+            "exit: {code} ({meaning})
+"
+        ));
+    }
+    write_report(&text, out)
 }
 
 fn init() -> Result<ExitCode, Failure> {
@@ -369,12 +387,13 @@ fn analyze(args: AnalyzeArgs) -> Result<ExitCode, Failure> {
         warnings,
     };
 
-    write_report(&report::render(&run, args.out.format, top), &args.out)?;
+    let code = fail_code(run.count(Status::Fail) > 0);
+    finish(report::render(&run, args.out.format, top), &args.out, code)?;
     print_warnings(&run.warnings, args.out.format);
     if args.save_history {
         save_history(&run, &settings.config_dir, &settings.history_dir)?;
     }
-    Ok(exit_code(run.count(Status::Fail) > 0))
+    Ok(ExitCode::from(code))
 }
 
 /// Finds and analyzes the files under `paths`.
@@ -457,7 +476,7 @@ fn compare(args: ChangesArgs) -> Result<ExitCode, Failure> {
     let settings = load_settings(&args.limits)?;
     let root = git::root(&settings.cwd).map_err(usage)?;
     let staged_base = args.staged.then(|| "HEAD".to_string());
-    let (base, fallback) = base_for(args.base.clone().or(staged_base), &settings, &root)?;
+    let (base, base_warnings) = base_for(args.base.clone().or(staged_base), &settings, &root)?;
     let mut run = changes::collect(changes::Request {
         base,
         root: &root,
@@ -474,11 +493,16 @@ fn compare(args: ChangesArgs) -> Result<ExitCode, Failure> {
         limits: &settings.limits,
     })
     .map_err(usage)?;
-    run.warnings.splice(0..0, fallback);
+    run.warnings.splice(0..0, base_warnings);
 
-    write_report(&report::changes::render(&run, args.out.format), &args.out)?;
+    let code = fail_code(run.verdict() == Status::Fail);
+    finish(
+        report::changes::render(&run, args.out.format),
+        &args.out,
+        code,
+    )?;
     print_warnings(&run.warnings, args.out.format);
-    Ok(exit_code(run.verdict() == Status::Fail))
+    Ok(ExitCode::from(code))
 }
 
 /// `chosen` (`--base`, or HEAD for staged changes), else `[changes] base`,
@@ -488,9 +512,10 @@ fn base_for(
     chosen: Option<String>,
     settings: &Settings,
     root: &Path,
-) -> Result<(String, Option<String>), Failure> {
+) -> Result<(String, Vec<String>), Failure> {
     if let Some(base) = chosen.or_else(|| settings.config.changes.base.clone()) {
-        return Ok((base, None));
+        let warnings = config_differs(settings, root, &base).into_iter().collect();
+        return Ok((base, warnings));
     }
     let base = git::default_base(root).ok_or_else(|| {
         usage("no `main` or `master` branch to compare with; pass --base".to_string())
@@ -499,10 +524,35 @@ fn base_for(
         || "no dgf.toml was found".to_string(),
         |path| format!("{} has no [changes] base", path.display()),
     );
-    let warning = format!(
+    let mut warnings = vec![format!(
         "{place}, so this compares with `{base}`, the default; pass --base or set [changes] base if work merges into another branch"
-    );
-    Ok((base, Some(warning)))
+    )];
+    warnings.extend(config_differs(settings, root, &base));
+    Ok((base, warnings))
+}
+
+/// A branch cut before dgf.toml last changed carries an older copy: its
+/// excludes, base and limits are not the ones the base branch uses.
+fn config_differs(settings: &Settings, root: &Path, base: &str) -> Option<String> {
+    let path = settings.config_path.as_ref()?;
+    let relative = path
+        .strip_prefix(root)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let ours = std::fs::read_to_string(path).ok()?;
+    let theirs = git::show(root, base, &relative);
+    let same = |a: &str, b: &str| a.lines().eq(b.lines());
+    match theirs {
+        Some(theirs) if same(&ours, &theirs) => None,
+        Some(_) => Some(format!(
+            "{} differs from `{base}`'s copy; this run follows the one here (bring in `{base}`'s with `git checkout {base} -- {relative}` if this branch is older)",
+            path.display()
+        )),
+        None => Some(format!(
+            "`{base}` has no {relative}; this run follows the one here, which the base branch does not use"
+        )),
+    }
 }
 
 /// `dgf history`
@@ -559,8 +609,9 @@ fn mutation(args: MutateArgs) -> Result<ExitCode, Failure> {
     never
         .add(&settings.config_dir, &settings.config.mutate.exclude)
         .map_err(usage)?;
+    let mut scope = Vec::new();
     let wanted = if args.changes {
-        changed_functions(&args, &settings)?
+        changed_functions(&args, &settings, &mut scope)?
     } else {
         let (reports, _) = scan(&args.paths, std::mem::take(&mut settings.excludes))?;
         mutate::from_reports(&reports, args.min_complexity, display_path)
@@ -571,7 +622,7 @@ fn mutation(args: MutateArgs) -> Result<ExitCode, Failure> {
         .filter(|w| !never.is_excluded(&w.path, false))
         .collect();
     if !args.limits.no_config {
-        eprintln!("{}", config_used(&settings, found - wanted.len()));
+        scope.insert(0, config_used(&settings, found - wanted.len()));
     }
     let (targets, warnings) =
         mutate::targets(wanted, &mutator_settings(&args, &settings)?).map_err(usage)?;
@@ -579,11 +630,27 @@ fn mutation(args: MutateArgs) -> Result<ExitCode, Failure> {
     mutate::check_named_tests(&targets, &root).map_err(usage)?;
     print_warnings(&warnings, args.out.format);
     if args.run {
-        return run_mutants(targets, &args, &settings);
+        return run_mutants(targets, &args, &settings, scope);
     }
     let text = mutate::render(&targets, args.out.format, args.show).map_err(usage)?;
-    write_report(&text, &args.out)?;
+    write_report(&with_scope(text, &scope, args.out.format), &args.out)?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// What a mutation run covers, first: agents check it before trusting the
+/// score. In agent output it heads the report; elsewhere it goes to stderr.
+fn with_scope(text: String, scope: &[String], format: Format) -> String {
+    if format != Format::Agent {
+        for line in scope {
+            eprintln!("{line}");
+        }
+        return text;
+    }
+    let mut out = String::from("scope:\n");
+    for line in scope {
+        out.push_str(&format!("  {line}\n"));
+    }
+    out + &text
 }
 
 /// Which dgf.toml a mutation run follows and what its excludes left out, so
@@ -592,7 +659,7 @@ fn mutation(args: MutateArgs) -> Result<ExitCode, Failure> {
 fn config_used(settings: &Settings, left_out: usize) -> String {
     match &settings.config_path {
         Some(path) => format!(
-            "note: following {}; [mutate] exclude left out {left_out} functions",
+            "config: {}; [mutate] exclude left out {left_out} functions",
             path.display()
         ),
         None => format!(
@@ -692,6 +759,7 @@ fn run_mutants(
     mut targets: Vec<mutate::Target>,
     args: &MutateArgs,
     settings: &Settings,
+    mut scope: Vec<String>,
 ) -> Result<ExitCode, Failure> {
     let others = targets
         .iter()
@@ -717,17 +785,26 @@ fn run_mutants(
     thresholds.fail = args.fail_under.or(thresholds.fail);
     let text =
         mutate::render_run(&targets, &result, args.out.format, &thresholds).map_err(usage)?;
-    write_report(&text, &args.out)?;
-    if result.budget_hit() {
-        return Ok(ExitCode::from(EXIT_BUDGET));
+    if !result.test_projects.is_empty() {
+        scope.push(format!(
+            "test projects run: {}",
+            result.test_projects.join(", ")
+        ));
     }
+    let text = with_scope(text, &scope, args.out.format);
     // Below `break` fails; no score at all never does.
     let score = mutate::overall(&targets, &result);
-    Ok(exit_code(
-        thresholds
-            .fail
-            .is_some_and(|limit| score.is_some_and(|s| s < limit)),
-    ))
+    let code = if result.budget_hit() {
+        EXIT_BUDGET
+    } else {
+        fail_code(
+            thresholds
+                .fail
+                .is_some_and(|limit| score.is_some_and(|s| s < limit)),
+        )
+    };
+    finish(text, &args.out, code)?;
+    Ok(ExitCode::from(code))
 }
 
 /// A branch that only changes tests changes what the mutants of the code
@@ -764,12 +841,17 @@ fn add_tested_by_changed_tests(
 fn changed_functions(
     args: &MutateArgs,
     settings: &Settings,
+    scope: &mut Vec<String>,
 ) -> Result<Vec<mutate::Wanted>, Failure> {
     let root = git::root(&settings.cwd).map_err(usage)?;
-    let (base, fallback) = base_for(args.base.clone(), settings, &root)?;
-    if let Some(warning) = fallback {
-        eprintln!("warning: {warning}");
-    }
+    let how = if args.base.is_some() {
+        "--base"
+    } else if settings.config.changes.base.is_some() {
+        "[changes] base"
+    } else {
+        "the default"
+    };
+    let (base, base_warnings) = base_for(args.base.clone(), settings, &root)?;
     let run = changes::collect(changes::Request {
         root: &root,
         base,
@@ -780,9 +862,18 @@ fn changed_functions(
         limits: &settings.limits,
     })
     .map_err(usage)?;
-    for warning in &run.warnings {
-        eprintln!("warning: {warning}");
-    }
+    let behind = git::behind(&root, &run.base)
+        .filter(|n| *n > 0)
+        .map(|n| format!("; HEAD is {n} commits behind it"))
+        .unwrap_or_default();
+    scope.push(format!(
+        "base: {} (from {how}), merge base {}{behind}; {} changed source files",
+        run.base,
+        run.base_commit,
+        run.files.len()
+    ));
+    let warnings = base_warnings.iter().chain(&run.warnings);
+    scope.extend(warnings.map(|w| format!("warning: {w}")));
     let mut wanted = mutate::from_changes(&run, &root, args.min_complexity);
     add_tested_by_changed_tests(&mut wanted, &root, &run.base_commit, settings)?;
     if args.scope == Some(mutate::Scope::Lines) {

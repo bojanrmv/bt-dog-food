@@ -161,6 +161,8 @@ dgf history --format html -o dgf-history.html
 | 3 | A path does not exist or a file could not be written |
 | 4 | `dgf mutate --max-minutes` ran out before every mutant was tested |
 
+With `--format agent`, the last line repeats the code and what it means, such as `exit: 4 (budget: ... run the same command again ...)`.
+
 ## Settings: `dgf.toml`
 
 `dgf` finds `dgf.toml` in the current folder or a parent, like cargo finds `Cargo.toml`. Paths in it are relative to the file. Every section is optional; unknown keys are an error, so typos show up.
