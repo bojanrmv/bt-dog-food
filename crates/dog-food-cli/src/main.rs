@@ -456,8 +456,10 @@ fn compare(args: ChangesArgs) -> Result<ExitCode, Failure> {
     only_for_mutate(args.out.format)?;
     let settings = load_settings(&args.limits)?;
     let root = git::root(&settings.cwd).map_err(usage)?;
-    let run = changes::collect(changes::Request {
-        base: base_for(&args, &settings.config, &root)?,
+    let staged_base = args.staged.then(|| "HEAD".to_string());
+    let (base, fallback) = base_for(args.base.clone().or(staged_base), &settings, &root)?;
+    let mut run = changes::collect(changes::Request {
+        base,
         root: &root,
         staged: args.staged,
         scope: args
@@ -472,23 +474,35 @@ fn compare(args: ChangesArgs) -> Result<ExitCode, Failure> {
         limits: &settings.limits,
     })
     .map_err(usage)?;
+    run.warnings.splice(0..0, fallback);
 
     write_report(&report::changes::render(&run, args.out.format), &args.out)?;
     print_warnings(&run.warnings, args.out.format);
     Ok(exit_code(run.verdict() == Status::Fail))
 }
 
-/// `--base`, else HEAD for staged changes, else `[changes] base`, else main or master.
-fn base_for(args: &ChangesArgs, config: &Config, root: &Path) -> Result<String, Failure> {
-    let staged_base = args.staged.then(|| "HEAD".to_string());
-    args.base
-        .clone()
-        .or(staged_base)
-        .or_else(|| config.changes.base.clone())
-        .or_else(|| git::default_base(root))
-        .ok_or_else(|| {
-            usage("no `main` or `master` branch to compare with; pass --base".to_string())
-        })
+/// `chosen` (`--base`, or HEAD for staged changes), else `[changes] base`,
+/// else main or master, with a warning: a repository whose work merges into
+/// another branch would otherwise be compared with the wrong one in silence.
+fn base_for(
+    chosen: Option<String>,
+    settings: &Settings,
+    root: &Path,
+) -> Result<(String, Option<String>), Failure> {
+    if let Some(base) = chosen.or_else(|| settings.config.changes.base.clone()) {
+        return Ok((base, None));
+    }
+    let base = git::default_base(root).ok_or_else(|| {
+        usage("no `main` or `master` branch to compare with; pass --base".to_string())
+    })?;
+    let place = settings.config_path.as_ref().map_or_else(
+        || "no dgf.toml was found".to_string(),
+        |path| format!("{} has no [changes] base", path.display()),
+    );
+    let warning = format!(
+        "{place}, so this compares with `{base}`, the default; pass --base or set [changes] base if work merges into another branch"
+    );
+    Ok((base, Some(warning)))
 }
 
 /// `dgf history`
@@ -752,14 +766,10 @@ fn changed_functions(
     settings: &Settings,
 ) -> Result<Vec<mutate::Wanted>, Failure> {
     let root = git::root(&settings.cwd).map_err(usage)?;
-    let base = args
-        .base
-        .clone()
-        .or_else(|| settings.config.changes.base.clone())
-        .or_else(|| git::default_base(&root))
-        .ok_or_else(|| {
-            usage("no `main` or `master` branch to compare with; pass --base".to_string())
-        })?;
+    let (base, fallback) = base_for(args.base.clone(), settings, &root)?;
+    if let Some(warning) = fallback {
+        eprintln!("warning: {warning}");
+    }
     let run = changes::collect(changes::Request {
         root: &root,
         base,

@@ -44,6 +44,10 @@ fn agent(run: &ChangesRun) -> String {
         "dgf changes: {result}. {why}\n{}\n",
         context(run).replace('`', "")
     );
+    // Before the counts: a warning such as a fallback base changes what they mean.
+    for warning in &run.warnings {
+        let _ = writeln!(out, "warning: {warning}");
+    }
     let _ = writeln!(
         out,
         "counts: {}\nrule: {rule}; limits: cyclomatic {}",
@@ -361,6 +365,18 @@ mod tests {
             elapsed: Duration::from_millis(5),
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn agent_output_shows_warnings_before_the_counts() {
+        let mut run = run(vec![row("Cart.Add", Change::New, None, Some(3), true)]);
+        run.warnings
+            .push("dgf.toml has no [changes] base, so this compares with `main`".into());
+        let text = agent(&run);
+        let warning = text
+            .find("warning: dgf.toml has no [changes] base")
+            .unwrap();
+        assert!(warning < text.find("counts:").unwrap(), "{text}");
     }
 
     #[test]
