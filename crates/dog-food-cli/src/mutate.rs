@@ -975,6 +975,7 @@ fn run_json(targets: &[Target], result: &RunResult, thresholds: &Thresholds) -> 
             "mutantsMs": result.mutants.as_millis(),
             "testRuns": result.test_runs,
             "jobs": result.jobs,
+            "fromCacheOf": result.timings_from,
         },
         "cached": result.cached.len(),
         "testProjects": result.test_projects,

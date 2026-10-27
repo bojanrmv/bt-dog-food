@@ -39,11 +39,31 @@ const KEEP_DAYS: u64 = 30;
 pub struct Cache {
     schema_version: u32,
     functions: HashMap<String, Entry>,
+    /// Phase timings of the last run that tested a set of functions, by `run_key`.
+    #[serde(default)]
+    runs: HashMap<String, Timings>,
     #[serde(skip)]
     dir: PathBuf,
+    /// Timings this run recorded: saved over what is on disk.
+    #[serde(skip)]
+    new_runs: HashMap<String, Timings>,
     /// Entries this run read or wrote: saved over what is on disk.
     #[serde(skip)]
     touched: HashSet<String>,
+}
+
+/// How long the phases of a run took, so a later run that takes every
+/// result from the cache can still report them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Timings {
+    pub prepare_ms: u64,
+    pub build_ms: u64,
+    pub baseline_ms: u64,
+    pub mutants_ms: u64,
+    pub test_runs: usize,
+    /// Seconds since 1970 when the run ended.
+    pub at: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -226,11 +246,25 @@ impl Cache {
                 merge(&mut entry.mutants, ours.mutants.clone());
                 entry.used = today();
             }
+            on_disk.runs.extend(self.new_runs.clone());
             let oldest = today().saturating_sub(KEEP_DAYS);
             on_disk.functions.retain(|_, e| e.used >= oldest);
+            on_disk.runs.retain(|_, t| t.at / 86_400 >= oldest);
             on_disk.schema_version = SCHEMA;
             write(&self.dir, &on_disk)
         })
+    }
+
+    /// The timings of the last run that tested exactly the functions of `key`.
+    pub fn timings(&self, key: &str) -> Option<Timings> {
+        self.new_runs
+            .get(key)
+            .or_else(|| self.runs.get(key))
+            .copied()
+    }
+
+    pub fn remember_timings(&mut self, key: String, timings: Timings) {
+        self.new_runs.insert(key, timings);
     }
 
     /// Functions (file, stable name) with a mutant that a test in one of
@@ -375,6 +409,19 @@ fn key(relative_file: &str, name: &str, function: u64) -> String {
     )
 }
 
+/// One key for a set of functions (their cache keys, in order): `None` when
+/// a function's file cannot be read.
+pub fn run_key(targets: &[Target], root: &Path) -> Option<String> {
+    let mut keys = targets
+        .iter()
+        .filter(|t| !t.mutants.is_empty())
+        .map(|t| identify(t, root).map(|(key, _)| key))
+        .collect::<Option<Vec<String>>>()?;
+    keys.sort();
+    let parts: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes()).collect();
+    Some(format!("{:016x}", super::fnv(&parts)))
+}
+
 /// The cache key, and the byte where the function's first line starts.
 fn identify(target: &Target, root: &Path) -> Option<(String, usize)> {
     let source = std::fs::read_to_string(&target.path).ok()?;
@@ -516,6 +563,33 @@ mod tests {
         assert!(cache
             .lookup(&[&changed], &scope(root.path(), 1, 7))
             .is_empty());
+    }
+
+    #[test]
+    fn timings_of_a_run_are_kept_for_the_same_functions() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("cache");
+        let one = target(
+            root.path(),
+            "One.cs",
+            "class C {\n  int F(int a) { return a + 1; }\n}\n",
+        );
+        let key = run_key(std::slice::from_ref(&one), root.path()).unwrap();
+        let timings = Timings {
+            build_ms: 1200,
+            test_runs: 3,
+            at: crate::report::now(),
+            ..Timings::default()
+        };
+        let mut cache = Cache::load(&dir);
+        cache.remember_timings(key.clone(), timings);
+        cache.save().unwrap();
+        assert_eq!(Cache::load(&dir).timings(&key), Some(timings));
+        let changed = target_with(&one, "class C {\n  int F(int a) { return a + 2; }\n}\n");
+        assert_ne!(
+            run_key(std::slice::from_ref(&changed), root.path()),
+            Some(key)
+        );
     }
 
     fn target_with(old: &Target, source: &str) -> Target {

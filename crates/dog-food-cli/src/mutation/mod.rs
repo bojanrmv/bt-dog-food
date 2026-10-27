@@ -192,6 +192,9 @@ pub struct RunResult {
     /// Per tested mutant, the files of every test that reaches it.
     pub reached_files: HashMap<usize, BTreeSet<String>>,
     pub jobs: usize,
+    /// When every result came from the cache: when the run whose timings
+    /// are reported ended (seconds since 1970).
+    pub timings_from: Option<u64>,
 }
 
 impl RunResult {
@@ -424,8 +427,50 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
             &result.reached,
         );
     }
+    timings(targets, options, &mut cache, &mut result);
     cache.save()?;
     Ok(result)
+}
+
+/// Remembers how long a run that tested everything itself took; a run that
+/// took everything from the cache reports those timings instead of zeros.
+fn timings(
+    targets: &[Target],
+    options: &Options,
+    cache: &mut cache::Cache,
+    result: &mut RunResult,
+) {
+    let Some(key) = cache::run_key(targets, &options.root) else {
+        return;
+    };
+    let ms = |d: Duration| d.as_millis() as u64;
+    if result.sandboxes.is_empty() {
+        let Some(earlier) = cache.timings(&key).filter(|_| !result.cached.is_empty()) else {
+            return;
+        };
+        result.prepare = Duration::from_millis(earlier.prepare_ms);
+        result.build = Duration::from_millis(earlier.build_ms);
+        result.baseline = Duration::from_millis(earlier.baseline_ms);
+        result.mutants = Duration::from_millis(earlier.mutants_ms);
+        result.test_runs = earlier.test_runs;
+        result.timings_from = Some(earlier.at);
+        result.notes.push(format!(
+            "every result came from the cache; the timings are those of the run that tested them ({} UTC)",
+            crate::history::utc(earlier.at)
+        ));
+    } else if result.cached.is_empty() && !result.budget_hit() {
+        cache.remember_timings(
+            key,
+            cache::Timings {
+                prepare_ms: ms(result.prepare),
+                build_ms: ms(result.build),
+                baseline_ms: ms(result.baseline),
+                mutants_ms: ms(result.mutants),
+                test_runs: result.test_runs,
+                at: crate::report::now(),
+            },
+        );
+    }
 }
 
 /// The TypeScript/JavaScript targets that have a Vitest or Jest package
