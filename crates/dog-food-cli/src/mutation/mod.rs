@@ -164,6 +164,8 @@ pub enum Untested {
     Baseline,
     /// The mutant's own test runs had not started or finished.
     TestRuns,
+    /// No Vitest or Jest package above the file: nothing can test it.
+    NoRunner,
 }
 
 #[derive(Default)]
@@ -195,7 +197,9 @@ pub struct RunResult {
 impl RunResult {
     /// Whether `--max-minutes` stopped the run.
     pub fn budget_hit(&self) -> bool {
-        !self.untested.is_empty()
+        self.untested
+            .values()
+            .any(|step| *step != Untested::NoRunner)
     }
 }
 
@@ -373,10 +377,13 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
     result.outcomes.extend(ignored(targets));
     let mut cache = cache::Cache::load(&options.cache_dir);
     for language in [sandbox::Kind::CSharp, sandbox::Kind::Node] {
-        let pending: Vec<&Target> = targets
+        let mut pending: Vec<&Target> = targets
             .iter()
             .filter(|t| sandbox::Kind::of(&t.path) == Some(language))
             .collect();
+        if language == sandbox::Kind::Node {
+            pending = with_runner(pending, options, &mut result);
+        }
         if pending.is_empty() {
             continue;
         }
@@ -388,6 +395,9 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
                     && !(options.rerun_survivors && outcome.undetected())
             });
             result.cached.extend(found.keys().copied());
+            let mut tests = cache.reached_tests(&pending, &scope);
+            tests.retain(|id, _| found.contains_key(id));
+            result.reached.extend(tests);
             result.outcomes.extend(found);
         }
         let open = pending
@@ -405,10 +415,49 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
             .filter(|(id, _)| !result.cached.contains(id))
             .map(|(id, outcome)| (*id, *outcome))
             .collect();
-        cache.store(&pending, &scope, &fresh, &killed_by, &result.reached_files);
+        cache.store(
+            &pending,
+            &scope,
+            &fresh,
+            &killed_by,
+            &result.reached_files,
+            &result.reached,
+        );
     }
     cache.save()?;
     Ok(result)
+}
+
+/// The TypeScript/JavaScript targets that have a Vitest or Jest package
+/// above them. The others cannot be tested: their mutants are left untested,
+/// with a note per file, and the rest of the run goes on.
+fn with_runner<'a>(
+    pending: Vec<&'a Target>,
+    options: &Options,
+    result: &mut RunResult,
+) -> Vec<&'a Target> {
+    let root = crate::discover::absolute(&options.root);
+    let (kept, orphans): (Vec<&Target>, Vec<&Target>) = pending
+        .into_iter()
+        .partition(|t| node::package_of(&crate::discover::absolute(&t.path), &root).is_some());
+    let mut per_file: BTreeMap<&str, usize> = BTreeMap::new();
+    for mutant in orphans
+        .iter()
+        .flat_map(|t| t.mutants.iter().map(move |m| (t.file.as_str(), m)))
+        .filter(|(_, m)| !result.outcomes.contains_key(&m.id))
+        .map(|(file, m)| {
+            *per_file.entry(file).or_default() += 1;
+            m
+        })
+    {
+        result.untested.insert(mutant.id, Untested::NoRunner);
+    }
+    for (file, count) in per_file {
+        result.notes.push(format!(
+            "{file}: no package.json with vitest or jest above it, so its {count} mutants were not tested"
+        ));
+    }
+    kept
 }
 
 /// Mutants turned off in the code or the settings: never tested.
@@ -773,18 +822,26 @@ fn other_tests(survivors: &[usize], reach: &Reach, first: &Reach) -> Reach {
 /// Up to three tests that reach `mutant`, with their files: where a test
 /// that notices it would go.
 fn reaching_tests(reach: &Reach, mutant: usize) -> Vec<String> {
-    let Some(tests) = reach.by_mutant.get(&mutant) else {
-        return Vec::new();
-    };
-    tests
-        .iter()
+    let mut found: Vec<String> = reach
+        .by_mutant
+        .get(&mutant)
+        .into_iter()
+        .flatten()
         .take(3)
         .map(|test| match reach.files.get(test).and_then(|f| f.first()) {
             Some(file) => format!("{test} ({file})"),
             None => test.clone(),
         })
-        .collect()
+        .collect();
+    if reach.outside.contains(&mutant) {
+        found.push(OUTSIDE.to_string());
+    }
+    found
 }
+
+/// What reaches a mutant that runs outside any test.
+const OUTSIDE: &str =
+    "setup outside any test (static constructor, field initializer or module load), so every test runs it";
 
 /// The files of the tests that reach `mutant`.
 fn reaching_files(reach: &Reach, mutant: usize) -> BTreeSet<String> {
@@ -1182,6 +1239,65 @@ mod tests {
         let files = killer_files(killers, &reach);
         assert_eq!(files[&1], ["tests/A.cs"]);
         assert!(files[&2].is_empty());
+    }
+
+    #[test]
+    fn files_without_a_test_runner_are_left_untested_and_the_rest_go_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("web/src")).unwrap();
+        std::fs::create_dir_all(root.join("tools")).unwrap();
+        std::fs::write(
+            root.join("web/package.json"),
+            r#"{"devDependencies":{"vitest":"3"}}"#,
+        )
+        .unwrap();
+        let source = "export function f(a: number) {\n  return a > 1;\n}\n";
+        std::fs::write(root.join("web/src/a.ts"), source).unwrap();
+        std::fs::write(root.join("tools/b.mjs"), source).unwrap();
+        let wanted = |file: &str| crate::mutate::Wanted {
+            file: file.into(),
+            path: root.join(file),
+            name: "f".into(),
+            start_line: 1,
+            end_line: 3,
+            complexity: 2,
+            reason: "selected",
+            lines: None,
+        };
+        let (mut targets, _) = crate::mutate::targets(
+            vec![wanted("web/src/a.ts"), wanted("tools/b.mjs")],
+            &dog_food_core::mutate::Settings::default(),
+        )
+        .unwrap();
+        number(&mut targets);
+        let options = Options {
+            root: root.to_path_buf(),
+            jobs: 1,
+            use_cache: false,
+            cache_dir: root.join(".cache"),
+            tests: TestSelection::default(),
+            sandbox: SandboxMode::Closure,
+            budget: Budget::default(),
+            timeouts: Timeouts::default(),
+            build_jobs: None,
+            low_priority: false,
+            rerun_survivors: false,
+            no_mix: false,
+        };
+        let mut result = RunResult::default();
+        let kept = with_runner(targets.iter().collect(), &options, &mut result);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].file, "web/src/a.ts");
+        let orphans = targets[1].mutants.len();
+        assert!(orphans > 0);
+        assert_eq!(result.untested.len(), orphans);
+        assert!(result.untested.values().all(|s| *s == Untested::NoRunner));
+        assert!(!result.budget_hit());
+        assert_eq!(
+            result.notes,
+            [format!("tools/b.mjs: no package.json with vitest or jest above it, so its {orphans} mutants were not tested")]
+        );
     }
 
     #[test]

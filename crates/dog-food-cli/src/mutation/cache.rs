@@ -75,6 +75,10 @@ struct CachedMutant {
     /// them puts the function back in `dgf mutate --changes`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     reached: Vec<String>,
+    /// Up to three tests that reach the mutant ("name (file)"), so a cached
+    /// survivor still says where a new assertion goes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    reached_tests: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +122,27 @@ impl Cache {
 
     /// Outcomes that still hold for the mutants of `targets`.
     pub fn lookup(&mut self, targets: &[&Target], scope: &Scope) -> HashMap<usize, Outcome> {
+        self.hits(targets, scope)
+            .into_iter()
+            .map(|(id, c)| (id, c.outcome))
+            .collect()
+    }
+
+    /// The tests recorded as reaching each mutant whose outcome still holds.
+    pub fn reached_tests(
+        &mut self,
+        targets: &[&Target],
+        scope: &Scope,
+    ) -> HashMap<usize, Vec<String>> {
+        self.hits(targets, scope)
+            .into_iter()
+            .filter(|(_, c)| !c.reached_tests.is_empty())
+            .map(|(id, c)| (id, c.reached_tests))
+            .collect()
+    }
+
+    /// The cached results that still hold, by mutant id.
+    fn hits(&mut self, targets: &[&Target], scope: &Scope) -> HashMap<usize, CachedMutant> {
         let mut found = HashMap::new();
         for target in targets {
             let Some((key, start)) = identify(target, &scope.root) else {
@@ -135,7 +160,7 @@ impl Cache {
                 found.extend(
                     cached
                         .filter(|c| c.holds(scope))
-                        .map(|c| (mutant.id, c.outcome)),
+                        .map(|c| (mutant.id, c.clone())),
                 );
             }
             self.touched.insert(key);
@@ -151,6 +176,7 @@ impl Cache {
         outcomes: &HashMap<usize, Outcome>,
         killed_by: &KilledBy,
         reached: &HashMap<usize, BTreeSet<String>>,
+        reached_tests: &HashMap<usize, Vec<String>>,
     ) {
         for target in targets {
             let Some((key, start)) = identify(target, &scope.root) else {
@@ -172,6 +198,7 @@ impl Cache {
                         .get(&m.id)
                         .map(|files| files.iter().cloned().collect())
                         .unwrap_or_default();
+                    entry.reached_tests = reached_tests.get(&m.id).cloned().unwrap_or_default();
                     Some(entry)
                 })
                 .collect();
@@ -272,6 +299,7 @@ fn cached(
         killed_by,
         tests: needs_all_tests.then_some(scope.test_set),
         reached: Vec::new(),
+        reached_tests: Vec::new(),
     }
 }
 
@@ -423,6 +451,7 @@ mod tests {
             &outcomes,
             &killers,
             &reached,
+            &HashMap::from([(0, vec!["T.A (ShopTests.cs)".to_string()])]),
         );
         cache.save().unwrap();
         // The function comes back when a test file that reaches it changes.
@@ -438,6 +467,10 @@ mod tests {
         assert_eq!(
             cache.lookup(&[&target], &scope(root.path(), 1, 2)),
             outcomes
+        );
+        assert_eq!(
+            cache.reached_tests(&[&target], &scope(root.path(), 1, 2)),
+            HashMap::from([(0, vec!["T.A (ShopTests.cs)".to_string()])])
         );
         assert_eq!(
             cache.score("Shop.cs", "C.F", "  int F(int a) { return a + 1; }\n"),
@@ -465,6 +498,7 @@ mod tests {
             &scope(root.path(), 1, 7),
             &outcomes,
             &KilledBy::new(),
+            &HashMap::new(),
             &HashMap::new(),
         );
         assert_eq!(
@@ -525,12 +559,14 @@ mod tests {
             &HashMap::from([(0, Outcome::Survived)]),
             &KilledBy::new(),
             &HashMap::new(),
+            &HashMap::new(),
         );
         second.store(
             &[&two],
             &scope,
             &HashMap::from([(1, Outcome::NoCoverage)]),
             &KilledBy::new(),
+            &HashMap::new(),
             &HashMap::new(),
         );
         first.save().unwrap();

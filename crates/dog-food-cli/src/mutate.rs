@@ -738,6 +738,17 @@ fn agent_why(result: &RunResult, m: &Mutant) -> String {
     }
 }
 
+/// The `tests:` line of a survivor with no reaching tests on record.
+fn unreached_text(result: &RunResult, m: &Mutant) -> String {
+    if result.outcomes.get(&m.id) == Some(&Outcome::NoCoverage) {
+        "none reaches this; write one that calls the function".into()
+    } else if result.cached.contains(&m.id) {
+        "not recorded (a cached result from an older dgf); --rerun-survivors tests it again and lists them".into()
+    } else {
+        "not recorded; the tests ran it but none reported reaching it".into()
+    }
+}
+
 /// What kind of assertion catches a mutant of this kind.
 fn assertion_hint(mutator: &str) -> &'static str {
     HINTS
@@ -860,15 +871,16 @@ fn untested_text(targets: &[Target], result: &RunResult) -> String {
     if !result.budget_hit() {
         return String::new();
     }
+    let stopped = |step: &Untested| *step != Untested::NoRunner;
     let mut out = format!(
         "\nThe time budget ran out; {} mutants were not tested (the results so far are saved):\n",
-        result.untested.len()
+        result.untested.values().filter(|s| stopped(s)).count()
     );
     for (t, m) in targets
         .iter()
         .flat_map(|t| t.mutants.iter().map(move |m| (t, m)))
     {
-        if let Some(step) = result.untested.get(&m.id) {
+        if let Some(step) = result.untested.get(&m.id).filter(|s| stopped(s)) {
             let _ = writeln!(
                 out,
                 "  {}:{}:{}  {}  ->  {}   ({}, {})  in {}",
@@ -891,6 +903,7 @@ fn untested_why(step: Untested) -> &'static str {
         Untested::Build => "stopped while building",
         Untested::Baseline => "stopped during the baseline test run",
         Untested::TestRuns => "its test runs did not finish",
+        Untested::NoRunner => "no vitest or jest package above this file",
     }
 }
 
@@ -1036,10 +1049,7 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
         let _ = writeln!(
             out,
             "  tests: {}\n  assert: {hint}",
-            tests.map_or_else(
-                || "none reaches this; write one that calls the function".to_string(),
-                |t| t.join(", ")
-            ),
+            tests.map_or_else(|| unreached_text(result, m), |t| t.join(", ")),
         );
     }
     let suppressed = suppressions_text(targets, "");
