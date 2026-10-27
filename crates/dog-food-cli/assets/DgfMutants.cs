@@ -5,7 +5,10 @@
 // AppDomain data "DgfTest".
 //   DGF_MUTANT  one mutant id, active for every test
 //   DGF_PLAN    file of "test<TAB>mutant id" lines: a different mutant per test
-//   DGF_REACH   folder: write "test<TAB>mutant id" for every switch reached
+//   DGF_REACH   folder: write "test<TAB>mutant id" for every switch reached;
+//               the test is empty outside any test and inside a static
+//               constructor or field initializer, which runs once, in whichever
+//               test touches the type first, for every test after it
 // </auto-generated>
 #nullable disable
 #pragma warning disable
@@ -38,14 +41,37 @@ namespace DogFood.Mutation
 
         private static void Record(string test, int id)
         {
-            var line = test + "\t" + id;
-            if (Seen.TryAdd(line, true))
+            if (!Seen.TryAdd(test + "\t" + id, true))
             {
-                lock (Gate)
+                return;
+            }
+            if (test.Length > 0 && InTypeInitializer())
+            {
+                test = "";
+            }
+            lock (Gate)
+            {
+                System.IO.File.AppendAllText(ReachFile, test + "\t" + id + "\n");
+            }
+        }
+
+        /// Whether a static constructor (field initializers are part of it) is on the stack.
+        private static bool InTypeInitializer()
+        {
+            var frames = new System.Diagnostics.StackTrace(2, false).GetFrames();
+            if (frames == null)
+            {
+                return false;
+            }
+            foreach (var frame in frames)
+            {
+                var method = frame.GetMethod();
+                if (method != null && method.IsConstructor && method.IsStatic)
                 {
-                    System.IO.File.AppendAllText(ReachFile, line + "\n");
+                    return true;
                 }
             }
+            return false;
         }
 
         private static int ReadActive()
