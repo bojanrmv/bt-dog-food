@@ -18,24 +18,53 @@ pub struct Excludes {
 impl Excludes {
     /// Adds patterns that are relative to `root` (the folder of `dgf.toml`, or
     /// the current folder for `--exclude`).
+    ///
+    /// When `root` is reached through a link (a junction or symlink to the
+    /// checkout), the patterns also hold under its real path, which is where
+    /// git reports the changed files.
     pub fn add<S: AsRef<str>>(&mut self, root: &Path, patterns: &[S]) -> Result<(), String> {
-        let mut builder = GitignoreBuilder::new(absolute(root));
-        for pattern in patterns {
-            builder
-                .add_line(None, pattern.as_ref())
-                .map_err(|err| format!("invalid exclude pattern `{}`: {err}", pattern.as_ref()))?;
+        let shown = absolute(root);
+        let mut roots = vec![shown.clone()];
+        roots.extend(real(&shown).filter(|r| *r != shown));
+        for root in roots {
+            let mut builder = GitignoreBuilder::new(root);
+            for pattern in patterns {
+                builder.add_line(None, pattern.as_ref()).map_err(|err| {
+                    format!("invalid exclude pattern `{}`: {err}", pattern.as_ref())
+                })?;
+            }
+            self.matchers
+                .push(builder.build().map_err(|err| err.to_string())?);
         }
-        self.matchers
-            .push(builder.build().map_err(|err| err.to_string())?);
         Ok(())
     }
 
-    /// Whether `path`, or a folder it is in, matches an exclude pattern.
+    /// Whether `path`, or a folder it is in, matches an exclude pattern. A
+    /// path outside every pattern folder is tried again by its real path, in
+    /// case it was reached through another link.
     pub fn is_excluded(&self, path: &Path, is_dir: bool) -> bool {
         let path = absolute(path);
+        if self.matches(&path, is_dir) {
+            return true;
+        }
+        let inside = self.matchers.iter().any(|m| path.starts_with(m.path()));
+        !inside && real(&path).is_some_and(|r| r != path && self.matches(&r, is_dir))
+    }
+
+    fn matches(&self, path: &Path, is_dir: bool) -> bool {
         self.matchers
             .iter()
-            .any(|matcher| matches(matcher, &path, is_dir))
+            .any(|matcher| matches(matcher, path, is_dir))
+    }
+}
+
+/// The path with every link resolved, without Windows' `\\?\` prefix.
+pub(crate) fn real(path: &Path) -> Option<PathBuf> {
+    let full = std::fs::canonicalize(path).ok()?;
+    let text = full.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC") => Some(PathBuf::from(rest)),
+        _ => Some(full),
     }
 }
 
@@ -98,6 +127,44 @@ pub(crate) fn absolute(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excludes_hold_through_a_link_to_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_root = dir.path().join("repo");
+        std::fs::create_dir_all(real_root.join("src/Migrations")).unwrap();
+        std::fs::write(real_root.join("src/Migrations/M.cs"), "").unwrap();
+        std::fs::write(real_root.join("src/Keep.cs"), "").unwrap();
+        let link = dir.path().join("link");
+        // A junction, the link Windows makes without extra rights.
+        #[cfg(windows)]
+        let linked = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real_root)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .ok_or(());
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&real_root, &link);
+        if linked.is_err() {
+            eprintln!("skipped: this machine cannot create symlinks");
+            return;
+        }
+        // dgf.toml found through the link, files named by their real path (as git does).
+        let mut excludes = Excludes::default();
+        excludes.add(&link, &["**/Migrations/"]).unwrap();
+        let real_root = real(&real_root).unwrap();
+        assert!(excludes.is_excluded(&real_root.join("src/Migrations/M.cs"), false));
+        assert!(!excludes.is_excluded(&real_root.join("src/Keep.cs"), false));
+        assert!(excludes.is_excluded(&link.join("src/Migrations/M.cs"), false));
+        // And the other way round.
+        let mut excludes = Excludes::default();
+        excludes.add(&real_root, &["**/Migrations/"]).unwrap();
+        assert!(excludes.is_excluded(&link.join("src/Migrations/M.cs"), false));
+        assert!(!excludes.is_excluded(&link.join("src/Keep.cs"), false));
+    }
 
     /// A temp folder with the given files (all empty).
     fn tree(files: &[&str]) -> tempfile::TempDir {

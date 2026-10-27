@@ -268,7 +268,9 @@ const EXIT_BUDGET: u8 = 4;
 
 // dgf-ignore: one match arm per subcommand; splitting it would only hide the list
 fn main() -> ExitCode {
-    let result = match Cli::parse().command {
+    let cli = Cli::parse();
+    work_in_real_folder();
+    let result = match cli.command {
         Command::Analyze(args) => analyze(args),
         Command::Changes(args) => compare(args),
         Command::History(args) => overview(args),
@@ -783,6 +785,18 @@ fn changed_functions(
         }
     }
     Ok(wanted)
+}
+
+/// Moves to the real path of the current folder when it was reached through
+/// a link (a junction or symlink to a worktree): git names files by their
+/// real path, so dgf.toml's excludes and limits must be anchored there too.
+fn work_in_real_folder() {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    if let Some(real) = discover::real(&cwd).filter(|r| *r != cwd) {
+        let _ = std::env::set_current_dir(real);
+    }
 }
 
 /// `dgf hook install|uninstall`
