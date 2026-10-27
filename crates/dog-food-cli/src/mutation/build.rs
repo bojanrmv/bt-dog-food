@@ -87,6 +87,7 @@ impl Rebuild {
             return false;
         }
         if self.round == Round::Mutated {
+            progress("the mutated projects compile; building the tests against them");
             self.round = Round::All;
             return false;
         }

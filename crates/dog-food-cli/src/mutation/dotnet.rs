@@ -284,6 +284,11 @@ const SANDBOX_BUILD: &[&str] = &[
     "-p:NuGetAudit=false",
 ];
 
+/// Errors from the C# compiler, which only runs once the restore worked.
+fn compiler_errors(errors: &[String]) -> bool {
+    errors.iter().any(|e| e.contains(": error CS"))
+}
+
 fn worst(a: TestRun, b: TestRun) -> TestRun {
     match (a, b) {
         (TestRun::TimedOut, _) | (_, TestRun::TimedOut) => TestRun::TimedOut,
@@ -300,13 +305,17 @@ impl Engine for Dotnet {
             return self.build_target(&self.mutated, false, true, budget);
         }
         let restore = !self.restored.load(Ordering::Relaxed);
-        self.build_target(&self.tests, restore, false, budget)?;
-        self.restored.store(true, Ordering::Relaxed);
-        let _ = std::fs::write(
-            self.sandbox.join(RESTORED),
-            format!("{:016x}", self.settings),
-        );
-        Ok(())
+        let built = self.build_target(&self.tests, restore, false, budget);
+        // Compiler errors come after a restore that worked: the builds after
+        // a mutant broke this one need not restore again.
+        if built.is_ok() || matches!(&built, Err(BuildError::Errors(e)) if compiler_errors(e)) {
+            self.restored.store(true, Ordering::Relaxed);
+            let _ = std::fs::write(
+                self.sandbox.join(RESTORED),
+                format!("{:016x}", self.settings),
+            );
+        }
+        built
     }
 
     fn locate(&self, files: &[FileMutants], errors: &[String]) -> Located {
@@ -678,6 +687,16 @@ fn xml(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_compiler_errors_show_the_restore_worked() {
+        assert!(compiler_errors(&[
+            "Shop/Pricing.cs(12,9): error CS0165: Use of unassigned local variable".into()
+        ]));
+        assert!(!compiler_errors(&[
+            "Shop.csproj : error NU1101: Unable to find package".into()
+        ]));
+    }
 
     #[test]
     fn compiler_errors_point_at_a_file_and_line() {
