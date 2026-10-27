@@ -434,9 +434,12 @@ fn mutation_runs_on_a_dotnet_solution() {
         outcome(&alone, "Pricing.Shipping", 21, "weight <= 0 -> false"),
         "killed"
     );
+    // A mutant that crashes the test host (an endless loop in a static
+    // initializer) uses its run too.
     let tested = alone["tally"]["killed"].as_u64().unwrap()
         + alone["tally"]["survived"].as_u64().unwrap()
-        + alone["tally"]["timeout"].as_u64().unwrap();
+        + alone["tally"]["timeout"].as_u64().unwrap()
+        + alone["tally"]["runtimeError"].as_u64().unwrap();
     assert_eq!(
         alone["timings"]["testRuns"].as_u64().unwrap(),
         tested,

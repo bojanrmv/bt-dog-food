@@ -55,10 +55,13 @@ namespace DogFood.Mutation
             }
         }
 
-        /// Whether a static constructor (field initializers are part of it) is on the stack.
+        /// Whether a static constructor (field initializers are part of it) of
+        /// another type is on the stack. Every frame is read: with inlining,
+        /// skipping a fixed number could skip the constructor itself.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         private static bool InTypeInitializer()
         {
-            var frames = new System.Diagnostics.StackTrace(2, false).GetFrames();
+            var frames = new System.Diagnostics.StackTrace(false).GetFrames();
             if (frames == null)
             {
                 return false;
@@ -66,7 +69,9 @@ namespace DogFood.Mutation
             foreach (var frame in frames)
             {
                 var method = frame.GetMethod();
-                if (method != null && method.IsConstructor && method.IsStatic)
+                // IsConstructor is false for a static constructor: match its name.
+                if (method != null && method.Name == System.Reflection.ConstructorInfo.TypeConstructorName
+                    && method.DeclaringType != typeof(DgfMutants))
                 {
                     return true;
                 }
