@@ -132,7 +132,7 @@ pub struct Request<'a> {
 
 pub fn collect(request: Request) -> Result<ChangesRun, String> {
     let started = Instant::now();
-    let base_commit = git::merge_base(request.root, &request.base)?;
+    let (base_commit, base_note) = git::merge_base(request.root, &request.base)?;
     let files: Vec<FileChange> = git::changed_files(request.root, &base_commit, request.staged)?
         .into_iter()
         .filter(|file| is_source(&request, file))
@@ -143,7 +143,7 @@ pub fn collect(request: Request) -> Result<ChangesRun, String> {
         .collect();
 
     let mut rows = Vec::new();
-    let mut warnings = Vec::new();
+    let mut warnings: Vec<String> = base_note.into_iter().collect();
     for result in results {
         match result {
             Ok(mut list) => rows.append(&mut list),

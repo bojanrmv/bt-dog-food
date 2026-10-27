@@ -99,16 +99,73 @@ pub fn default_base(root: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The commit where the current branch left `base`.
-pub fn merge_base(root: &Path, base: &str) -> Result<String, String> {
+/// The commit where the current branch left `base`, and a note when it is
+/// not where the local `base` says.
+///
+/// A local `base` branch can lag behind its remote copy. When the current
+/// branch left the remote copy later, that later commit is used: otherwise
+/// everything merged into the remote since the local branch was updated would
+/// count as this branch's changes.
+pub fn merge_base(root: &Path, base: &str) -> Result<(String, Option<String>), String> {
     if !exists(root, base) {
         return Err(format!(
             "base `{base}` not found; pass another one with --base"
         ));
     }
+    let local = fork_point(root, base)?;
+    let Some(remote) = remote_copy(root, base) else {
+        return Ok((local, None));
+    };
+    let Ok(later) = fork_point(root, &remote) else {
+        return Ok((local, None));
+    };
+    if later == local || !is_ancestor(root, &local, &later) {
+        return Ok((local, None));
+    }
+    let behind = run(root, &["rev-list", "--count", &format!("{local}..{later}")])
+        .ok()
+        .and_then(first_line)
+        .unwrap_or_else(|| "some".into());
+    let note = format!(
+        "`{base}` is behind `{remote}`: this branch left `{remote}` at {}, {behind} commits after where it left `{base}` ({}); comparing with {} (update `{base}` or pass --base to choose)",
+        short(root, &later),
+        short(root, &local),
+        short(root, &later),
+    );
+    Ok((later, Some(note)))
+}
+
+fn fork_point(root: &Path, base: &str) -> Result<String, String> {
     run(root, &["merge-base", base, "HEAD"])
         .map(first_line)?
         .ok_or_else(|| format!("no common commit between `{base}` and HEAD"))
+}
+
+/// The remote branch a local branch tracks, else `origin/<branch>`; `None`
+/// for a remote branch, a tag or a commit.
+fn remote_copy(root: &Path, base: &str) -> Option<String> {
+    if !exists(root, &format!("refs/heads/{base}")) {
+        return None;
+    }
+    run(
+        root,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            &format!("{base}@{{upstream}}"),
+        ],
+    )
+    .ok()
+    .and_then(first_line)
+    .or_else(|| {
+        let origin = format!("origin/{base}");
+        exists(root, &format!("refs/remotes/{origin}")).then_some(origin)
+    })
+}
+
+fn is_ancestor(root: &Path, ancestor: &str, of: &str) -> bool {
+    run(root, &["merge-base", "--is-ancestor", ancestor, of]).is_ok()
 }
 
 /// Short commit id and branch name of HEAD, when there are any.
@@ -287,5 +344,50 @@ rename to new/Name.cs
         assert!(file.touches(12, 30));
         assert!(!file.touches(13, 30));
         assert!(FileChange::added("b").touches(500, 900));
+    }
+
+    #[test]
+    fn a_local_base_behind_its_remote_copy_uses_the_later_fork_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            run(
+                root,
+                &[&["-c", "user.name=t", "-c", "user.email=t@t"], args].concat(),
+            )
+            .unwrap()
+        };
+        let commit = |name: &str| {
+            std::fs::write(root.join(name), name).unwrap();
+            git(&["add", name]);
+            git(&["commit", "-q", "-m", name]);
+        };
+        git(&["init", "-q", "-b", "main"]);
+        commit("a");
+        let old = run(root, &["rev-parse", "HEAD"])
+            .map(first_line)
+            .unwrap()
+            .unwrap();
+        commit("b");
+        // origin/main has b; local main is reset to a, behind it.
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let later = run(root, &["rev-parse", "HEAD"])
+            .map(first_line)
+            .unwrap()
+            .unwrap();
+        git(&["checkout", "-q", "-b", "feature"]);
+        commit("c");
+        git(&["branch", "-f", "main", &old]);
+
+        let (point, note) = merge_base(root, "main").unwrap();
+        assert_eq!(point, later);
+        assert!(note.unwrap().contains("`main` is behind `origin/main`"));
+        // The remote copy itself, or a base that is up to date, needs no note.
+        assert_eq!(
+            merge_base(root, "origin/main").unwrap(),
+            (later.clone(), None)
+        );
+        git(&["branch", "-f", "main", &later]);
+        assert_eq!(merge_base(root, "main").unwrap(), (later, None));
     }
 }

@@ -748,6 +748,9 @@ fn changed_functions(
         limits: &settings.limits,
     })
     .map_err(usage)?;
+    for warning in &run.warnings {
+        eprintln!("warning: {warning}");
+    }
     let mut wanted = mutate::from_changes(&run, &root, args.min_complexity);
     add_tested_by_changed_tests(&mut wanted, &root, &run.base_commit, settings)?;
     if args.scope == Some(mutate::Scope::Lines) {
