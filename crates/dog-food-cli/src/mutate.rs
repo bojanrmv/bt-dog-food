@@ -1060,6 +1060,9 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
             "suppressed (dgf-disable comments; not tested):\n{suppressed}"
         );
     }
+    for note in &result.notes {
+        let _ = writeln!(out, "note: {note}");
+    }
     out.push_str("\n## per function (score killed survived no_tests location name)\n");
     for t in targets.iter().filter(|t| !t.mutants.is_empty()) {
         let f = tally(t.mutants.iter(), result);

@@ -426,10 +426,29 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
             &result.reached_files,
             &result.reached,
         );
+        note_left_out(&scope, &pending, &mut result);
     }
     timings(targets, options, &mut cache, &mut result);
     cache.save()?;
     Ok(result)
+}
+
+/// Mutants no test reaches may be reached by a test project the run left out.
+fn note_left_out(scope: &Scope, targets: &[&Target], result: &mut RunResult) {
+    if scope.left_out.is_empty() {
+        return;
+    }
+    let unreached = targets
+        .iter()
+        .flat_map(|t| &t.mutants)
+        .filter(|m| result.outcomes.get(&m.id) == Some(&Outcome::NoCoverage))
+        .count();
+    if unreached > 0 {
+        result.notes.push(format!(
+            "{unreached} mutants no test reaches, but these test projects use the mutated code and did not run (test_projects, exclude_test_projects or a filter for another project): {}; their tests may reach them",
+            scope.left_out.join(", ")
+        ));
+    }
 }
 
 /// Remembers how long a run that tested everything itself took; a run that

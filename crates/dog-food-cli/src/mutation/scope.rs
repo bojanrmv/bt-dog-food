@@ -23,6 +23,8 @@ pub struct Scope {
     pub roots: Vec<PathBuf>,
     /// C#: the test projects to run.
     pub tests: Vec<TestProject>,
+    /// C#: test projects that use the mutated code but do not run.
+    pub left_out: Vec<String>,
     /// Fingerprint of the build settings.
     pub build: u64,
     /// Fingerprint of every file of the chosen tests, and their filters.
@@ -68,6 +70,7 @@ impl Scope {
             .map(|p| absolute(&p))
             .collect();
         let tests = projects::select(&root, &mutated, &options.tests)?;
+        let left_out = projects::left_out(&root, &mutated, &tests);
         let mut used: Vec<PathBuf> = tests.iter().map(|t| root.join(&t.path)).collect();
         used.extend(mutated);
         let closure = projects::closure(&used);
@@ -92,6 +95,7 @@ impl Scope {
             build: fingerprint(&root, &settings, &[]),
             test_set,
             tests,
+            left_out,
             hashes: Mutex::default(),
             root,
         })
@@ -114,6 +118,7 @@ impl Scope {
             build: fingerprint(&root, &settings, &[]),
             test_set: fingerprint(&root, &tests, &[]),
             tests: Vec::new(),
+            left_out: Vec::new(),
             hashes: Mutex::default(),
             root,
         })
@@ -127,6 +132,7 @@ impl Scope {
             root: absolute(root),
             roots: Vec::new(),
             tests: Vec::new(),
+            left_out: Vec::new(),
             build,
             test_set,
             hashes: Mutex::default(),

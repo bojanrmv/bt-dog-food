@@ -132,6 +132,19 @@ pub fn select(
     Ok(projects)
 }
 
+/// The test projects that use a mutated project but are not in `chosen`
+/// (left out by the globs or by filters for other projects), by name.
+pub fn left_out(root: &Path, mutated: &HashSet<PathBuf>, chosen: &[TestProject]) -> Vec<String> {
+    let root = absolute(root);
+    all(&root)
+        .into_iter()
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|text| is_test(&text)))
+        .filter(|p| reaches(p, mutated))
+        .filter(|p| !chosen.iter().any(|c| root.join(&c.path) == *p))
+        .map(|p| stem(&p))
+        .collect()
+}
+
 fn relative(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap_or(path).to_path_buf()
 }
@@ -352,6 +365,10 @@ mod tests {
         };
         let chosen = select(dir.path(), &lib(dir.path()), &selection).unwrap();
         assert_eq!(names(&chosen), [("App.Tests".into(), None)]);
+        assert_eq!(
+            left_out(dir.path(), &lib(dir.path()), &chosen),
+            ["App.Acceptance.Tests"]
+        );
         let none = TestSelection {
             include: vec!["nothing/**".into()],
             ..TestSelection::default()
