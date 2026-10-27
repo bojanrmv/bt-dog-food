@@ -1,0 +1,36 @@
+
+
+// Added by dog-food (dgf mutate --run) in the mutation sandbox only.
+// DGF_MUTANT: one active mutant · DGF_PLAN: "test<TAB>id" lines · DGF_REACH: folder for reach records
+function __dgfIs(id) {
+  const g = globalThis;
+  const s = g.__dgfState || (g.__dgfState = __dgfLoad(g));
+  const e = g.expect || g[Symbol.for("expect-global")];
+  const state = e && typeof e.getState === "function" ? e.getState() : undefined;
+  const test = (state && state.currentTestName) || "";
+  const key = test + "\t" + id;
+  if (s.reach && !s.seen.has(key)) {
+    s.seen.add(key);
+    s.fs.appendFileSync(s.reach, key + "\n");
+  }
+  if (s.plan) {
+    return s.plan.get(test) === id;
+  }
+  return s.active === id;
+}
+
+function __dgfLoad(g) {
+  const env = (g.process && g.process.env) || {};
+  const fs = g.process && g.process.getBuiltinModule ? g.process.getBuiltinModule("fs") : undefined;
+  let plan;
+  if (env.DGF_PLAN && fs) {
+    plan = new Map();
+    for (const line of String(fs.readFileSync(env.DGF_PLAN, "utf8")).split("\n")) {
+      const tab = line.lastIndexOf("\t");
+      if (tab > 0) plan.set(line.slice(0, tab), Number(line.slice(tab + 1)));
+    }
+  }
+  const reach = env.DGF_REACH && fs ? env.DGF_REACH + "/reach-" + Math.random().toString(36).slice(2) + ".txt" : undefined;
+  const active = env.DGF_MUTANT === undefined ? -1 : Number(env.DGF_MUTANT);
+  return { active, plan, reach, seen: new Set(), fs };
+}

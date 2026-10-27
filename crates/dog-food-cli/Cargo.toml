@@ -1,0 +1,25 @@
+[package]
+name = "dog-food-cli"
+description = "Command-line interface for dgf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dgf"
+path = "src/main.rs"
+
+[dependencies]
+dog-food-core.workspace = true
+clap.workspace = true
+ignore.workspace = true
+globset.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+quick-xml.workspace = true
+
+[dev-dependencies]
+jsonschema = { version = "0.60.2", default-features = false }
+tempfile.workspace = true

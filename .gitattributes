@@ -1,0 +1,5 @@
+# Files embedded with include_str! must be byte-identical on every platform.
+crates/dog-food-cli/assets/** text eol=lf
+crates/dog-food-cli/src/report/*.html text eol=lf
+crates/dog-food-cli/src/report/*.css text eol=lf
+crates/dog-food-cli/src/report/*.js text eol=lf

@@ -1,0 +1,16 @@
+# dog-food settings. `dgf` looks for this file in the current folder and its parents.
+
+[analyze]
+# Files and folders to skip, in .gitignore syntax, relative to this file.
+# .gitignore is always respected, and *.d.ts, *.g.cs and *.Designer.cs are always skipped.
+exclude = [
+  "crates/*/tests/fixtures/",   # sample inputs for the fixture tests, not real code
+  "crates/*/tests/e2e/",        # sample projects for the end-to-end tests
+  "crates/*/tests/mutants/",    # mutator fixtures, written to get mutants, not to be simple
+]
+
+[limits]
+# Functions scoring above `warn` are flagged. Functions above `fail` make dgf
+# exit with code 1, which fails a CI build.
+warn = 5
+fail = 6

@@ -1,0 +1,9 @@
+/target
+
+# Generated dgf reports
+/dgf-*.html
+/dgf-*.md
+/dgf-*.json
+
+# dgf mutate results (history and baseline in .dgf/ are committed)
+/.dgf/mutation-cache/

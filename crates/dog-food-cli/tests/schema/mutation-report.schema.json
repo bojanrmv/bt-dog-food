@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dgf mutation report (mutation-testing-elements format, schema version 2)",
+  "type": "object",
+  "required": ["schemaVersion", "thresholds", "files"],
+  "properties": {
+    "schemaVersion": { "type": "string", "pattern": "^2(\\.[0-9]+)*$" },
+    "thresholds": {
+      "type": "object",
+      "required": ["high", "low"],
+      "properties": {
+        "high": { "type": "number", "minimum": 0, "maximum": 100 },
+        "low": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/file" }
+    },
+    "framework": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "required": ["setup", "initialRun", "mutation"],
+      "properties": {
+        "setup": { "type": "number", "minimum": 0 },
+        "initialRun": { "type": "number", "minimum": 0 },
+        "mutation": { "type": "number", "minimum": 0 }
+      }
+    }
+  },
+  "definitions": {
+    "file": {
+      "type": "object",
+      "required": ["language", "source", "mutants"],
+      "properties": {
+        "language": { "type": "string" },
+        "source": { "type": "string" },
+        "mutants": { "type": "array", "items": { "$ref": "#/definitions/mutant" } }
+      }
+    },
+    "mutant": {
+      "type": "object",
+      "required": ["id", "mutatorName", "location", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "mutatorName": { "type": "string" },
+        "replacement": { "type": "string" },
+        "location": {
+          "type": "object",
+          "required": ["start", "end"],
+          "properties": {
+            "start": { "$ref": "#/definitions/position" },
+            "end": { "$ref": "#/definitions/position" }
+          }
+        },
+        "status": {
+          "enum": ["Killed", "Survived", "NoCoverage", "CompileError", "RuntimeError", "Timeout", "Ignored", "Pending"]
+        },
+        "statusReason": { "type": "string" }
+      }
+    },
+    "position": {
+      "type": "object",
+      "required": ["line", "column"],
+      "properties": {
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

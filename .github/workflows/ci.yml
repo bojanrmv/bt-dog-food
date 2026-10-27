@@ -1,0 +1,62 @@
+# Build, lint and test dog-food on Linux and Windows, then let dog-food check
+# itself: the whole repo on every push, and only the changed code on pull requests.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write   # upload SARIF to code scanning
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  complexity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # dgf changes needs the base branch history
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install --path crates/dog-food-cli --locked
+
+      - name: Whole repository (fails above the limits in dgf.toml)
+        run: |
+          dgf analyze --format markdown >> "$GITHUB_STEP_SUMMARY"
+          dgf analyze --format html -o dgf-report.html
+          dgf analyze --format sarif -o dgf.sarif
+
+      - name: Only what this pull request changed
+        if: github.event_name == 'pull_request'
+        run: |
+          dgf changes --base "origin/${{ github.base_ref }}" --format markdown >> "$GITHUB_STEP_SUMMARY"
+          dgf changes --base "origin/${{ github.base_ref }}" --format html -o dgf-changes.html
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: dgf.sarif
+          category: dog-food
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: complexity-reports
+          path: dgf-*.html

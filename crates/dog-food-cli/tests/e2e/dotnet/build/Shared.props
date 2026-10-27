@@ -1,0 +1,6 @@
+<Project>
+  <!-- Imported from outside the project folder: the sandbox must copy it too. -->
+  <PropertyGroup>
+    <DgfSharedProps>found</DgfSharedProps>
+  </PropertyGroup>
+</Project>

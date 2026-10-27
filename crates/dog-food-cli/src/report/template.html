@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dog-food complexity report</title>
+<style>
+/*DGF_STYLE*/
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand"><span class="mark">dgf</span> dog-food</div>
+      <button class="ghost" id="theme" type="button">Switch theme</button>
+    </div>
+    <div class="hero-grid">
+      <div>
+        <p class="eyebrow">Cyclomatic complexity report</p>
+        <h1 id="title">How tangled is this code?</h1>
+        <div class="meta" id="meta"></div>
+      </div>
+      <div class="verdict" id="verdict"></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="kpis" id="kpis" aria-label="Summary"></section>
+
+  <section class="grid2">
+    <article class="card">
+      <div class="card-head">
+        <h2>Score distribution</h2>
+        <p>Functions per complexity score</p>
+      </div>
+      <div class="chart" id="hist"></div>
+      <div class="legend">
+        <span><i style="background: var(--accent)"></i>within limits</span>
+        <span><i style="background: var(--warn)"></i>above warn</span>
+        <span><i style="background: var(--fail)"></i>above fail</span>
+      </div>
+    </article>
+    <article class="card">
+      <div class="card-head">
+        <h2>Status</h2>
+        <p id="limits-text"></p>
+      </div>
+      <div class="split" id="split"></div>
+      <div class="split-labels" id="split-labels"></div>
+      <h3>What drives complexity</h3>
+      <div class="drivers" id="drivers"></div>
+    </article>
+  </section>
+
+  <article class="card">
+    <div class="card-head">
+      <h2>Size versus complexity</h2>
+      <p>Each dot is a function. Long and branchy functions sit top right.</p>
+    </div>
+    <div class="chart" id="scatter"></div>
+  </article>
+
+  <article class="card" id="risk-card" hidden>
+    <div class="card-head">
+      <h2>Complex and untested</h2>
+      <p>Coverage against score; functions in the shaded corner have a CRAP score above the limit</p>
+    </div>
+    <div class="chart" id="risk"></div>
+    <div class="legend">
+      <span><i style="background: var(--accent)"></i>CRAP within limits</span>
+      <span><i style="background: var(--warn)"></i>above warn</span>
+      <span><i style="background: var(--fail)"></i>above fail</span>
+      <span><i style="background: var(--fail-soft)"></i>CRAP above the warn limit</span>
+    </div>
+  </article>
+
+  <article class="card">
+    <div class="card-head">
+      <h2>Hotspots by file</h2>
+      <p>Each square is a function, most complex first; deeper color means a higher score</p>
+    </div>
+    <div class="files" id="files"></div>
+    <button class="ghost more" id="more-files" type="button" hidden>Show all files</button>
+  </article>
+
+  <article class="card">
+    <div class="card-head">
+      <h2>All functions</h2>
+      <p>Click a column to sort</p>
+    </div>
+    <div class="controls">
+      <input class="search" id="search" type="search" placeholder="Filter by function or file" aria-label="Filter by function or file">
+      <div class="chips" id="status-filter" role="group" aria-label="Status"></div>
+      <span class="count" id="count"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="num" data-sort="complexity"><button type="button">Score</button></th>
+            <th class="num" data-sort="cognitive"><button type="button">Cognitive</button></th>
+            <th>Status</th>
+            <th data-sort="name"><button type="button">Function</button></th>
+            <th class="num" data-sort="lines"><button type="button">Lines</button></th>
+            <th class="num cov" data-sort="coverage" hidden><button type="button">Coverage</button></th>
+            <th class="num cov" data-sort="crap" hidden><button type="button">CRAP</button></th>
+            <th class="num mut" data-sort="mutation" hidden><button type="button">Mutation</button></th>
+            <th data-sort="file"><button type="button">Location</button></th>
+            <th>Decisions</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <button class="ghost more" id="more-rows" type="button" hidden>Show more</button>
+  </article>
+
+  <footer id="footer"></footer>
+</main>
+
+<div class="tip" id="tip" hidden></div>
+
+<script>
+const REPORT = /*DGF_DATA*/null;
+/*DGF_COMMON*/
+
+(function () {
+  "use strict";
+  if (!REPORT) { document.body.textContent = "This page has no report data. Create one with: dgf analyze --format html"; return; }
+
+  const S = REPORT.summary;
+  const WARN = S.limits.warn, FAIL = S.limits.fail;
+  const fns = REPORT.functions.map(f => Object.assign({}, f, { lines: f.endLine - f.startLine + 1 }));
+  const statusOf = score => (FAIL != null && score > FAIL) ? "fail" : (WARN != null && score > WARN) ? "warn" : "ok";
+  const HAS_COVERAGE = (REPORT.coverage || []).length > 0;
+  const HAS_MUTATION = REPORT.functions.some(f => f.mutation != null);
+  const CRAP = S.crapLimits || {};
+  const percent = r => r == null ? "–" : `${Math.round(r * 100)}%`;
+  const tipText = f => `${f.name}\nscore ${f.complexity} · cognitive ${f.cognitive} · ${f.lines} lines · ${f.status}` +
+    (HAS_COVERAGE ? `\ncoverage ${percent(f.coverage)} · CRAP ${f.crap == null ? "–" : f.crap.toFixed(1)}` : "") +
+    (f.ignored != null ? `\nignored: ${f.ignored || "no reason given"}` : "") +
+    (f.baseline != null ? `\naccepted by the baseline at ${f.baseline}` : "") +
+    `\n${f.file}:${f.startLine}`;
+
+  /* Header */
+  const state = S.fail > 0 ? "fail" : S.warn > 0 ? "warn" : "pass";
+  const verdict = {
+    fail: ["!", "Failed", `${plural(S.fail, "function")} above the fail limit of ${FAIL}`],
+    warn: ["~", "Passed with warnings", `${plural(S.warn, "function")} above the warn limit of ${WARN}`],
+    pass: ["✓", "Passed", "every function is within the limits"],
+  }[state];
+  $("verdict").className = `verdict ${state}`;
+  $("verdict").innerHTML = `<div class="badge" aria-hidden="true">${verdict[0]}</div><div><strong>${verdict[1]}</strong><span>${esc(verdict[2])}</span></div>`;
+  if (S.fail > 0) $("title").textContent = "Some code needs untangling";
+  else if (S.warn > 0) $("title").textContent = "Mostly clean, a few knots";
+  else $("title").textContent = "Clean and untangled";
+  const when = REPORT.generatedAt ? new Date(REPORT.generatedAt * 1000).toLocaleString() : "";
+  $("meta").innerHTML = [
+    `<span><code>dgf analyze ${esc((REPORT.paths || []).join(" "))}</code></span>`,
+    when && `<span>${esc(when)}</span>`,
+    `<span>${REPORT.config ? `settings <code>${esc(REPORT.config.split("/").pop())}</code>` : "default settings"}</span>`,
+    `<span>${esc(REPORT.tool.name)} ${esc(REPORT.tool.version)}</span>`,
+  ].filter(Boolean).join("");
+
+  /* Numbers */
+  const scores = fns.map(f => f.complexity).sort((a, b) => a - b);
+  const median = scores.length ? scores[Math.floor((scores.length - 1) / 2)] : 0;
+  const kpis = [
+    [S.functions.toLocaleString(), "", "functions"],
+    [S.maxComplexity, FAIL != null ? `/ ${FAIL}` : "", "highest score", statusOf(S.maxComplexity)],
+    [median, "", "median score"],
+    [S.maxCognitive, "", "highest cognitive"],
+    [S.warn, "", "above warn", S.warn ? "warn" : ""],
+    [S.fail, "", "above fail", S.fail ? "fail" : ""],
+  ];
+  if (S.ignored) kpis.push([S.ignored, "", "ignored"]);
+  if (HAS_COVERAGE) {
+    const measured = fns.filter(f => f.coverage != null);
+    const average = measured.length ? measured.reduce((sum, f) => sum + f.coverage, 0) / measured.length : null;
+    const crappy = fns.filter(f => f.crap != null && CRAP.warn != null && f.crap > CRAP.warn).length;
+    kpis.push([percent(average), "", "average coverage"], [crappy, "", `CRAP above ${CRAP.warn}`, crappy ? "warn" : ""]);
+  }
+  kpis.push([S.durationMs, "ms", "analysis time"]);
+  kpiStrip(kpis);
+
+  if (!fns.length) {
+    for (const id of ["hist", "scatter", "files", "drivers"]) $(id).innerHTML = `<p class="empty">No functions found.</p>`;
+  }
+
+  /* Score distribution */
+  function histogram() {
+    const max = Math.max(1, S.maxComplexity);
+    const bin = Math.max(1, Math.ceil(max / 30));
+    const bins = Math.ceil(max / bin);
+    const counts = new Array(bins).fill(0);
+    fns.forEach(f => counts[Math.min(bins - 1, Math.floor((f.complexity - 1) / bin))]++);
+    const W = 640, H = 270, L = 46, R = 14, T = 28, B = 40, pw = W - L - R, ph = H - T - B;
+    const ticks = niceTicks(Math.max(...counts), 4), top = ticks[ticks.length - 1];
+    const bw = pw / bins, gap = Math.min(4, bw * 0.2);
+    const y = c => T + ph - (c / top) * ph;
+    let body = "";
+    ticks.forEach(t => {
+      body += `<line x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}" stroke="var(--grid)"/>`;
+      body += `<text x="${L - 8}" y="${y(t) + 4}" text-anchor="end" font-size="11" fill="var(--faint)">${t}</text>`;
+    });
+    const labelEvery = Math.ceil(bins / 12);
+    counts.forEach((c, i) => {
+      const lo = i * bin + 1, hi = (i + 1) * bin, x0 = L + i * bw + gap / 2, w = bw - gap;
+      const range = bin === 1 ? `score ${lo}` : `scores ${lo}–${hi}`;
+      if (c > 0) {
+        const yb = T + ph, yt = y(c), r = Math.min(4, w / 2, yb - yt);
+        body += `<path d="M${x0} ${yb}V${yt + r}Q${x0} ${yt} ${x0 + r} ${yt}H${x0 + w - r}Q${x0 + w} ${yt} ${x0 + w} ${yt + r}V${yb}Z" fill="${color(statusOf(lo))}"/>`;
+        if (bins <= 16) body += `<text x="${x0 + w / 2}" y="${yt - 6}" text-anchor="middle" font-size="11" font-weight="600" fill="var(--muted)">${c}</text>`;
+      }
+      body += `<rect x="${L + i * bw}" y="${T}" width="${bw}" height="${ph}" fill="transparent" data-tip="${esc(`${range}\n${plural(c, "function")}`)}"/>`;
+      if (i % labelEvery === 0) body += `<text x="${L + i * bw + bw / 2}" y="${T + ph + 17}" text-anchor="middle" font-size="11" fill="var(--muted)">${lo}</text>`;
+    });
+    body += `<line x1="${L}" x2="${W - R}" y1="${T + ph}" y2="${T + ph}" stroke="var(--faint)"/>`;
+    body += `<text x="${L + pw / 2}" y="${H - 4}" text-anchor="middle" font-size="11" fill="var(--muted)">complexity score</text>`;
+    const marker = (value, status, label, dy) => {
+      if (value == null || value >= max) return "";
+      const x = L + (value / bin) * bw;
+      return limitLine(x, T - 6 + dy, x, T + ph, status, `${label} > ${value}`, { x: x + 5, y: T + 4 + dy, align: "start" });
+    };
+    body += marker(WARN, "warn", "warn", 0) + marker(FAIL, "fail", "fail", WARN != null && FAIL - WARN <= bin * 2 ? 14 : 0);
+    $("hist").innerHTML = svg(W, H, "Number of functions at each complexity score", body);
+  }
+
+  /* Status split and drivers */
+  function statusPanel() {
+    const total = Math.max(1, S.functions);
+    const parts = [["ok", S.ok, "within limits"], ["warn", S.warn, "above warn"], ["fail", S.fail, "above fail"]];
+    $("split").innerHTML = parts.filter(p => p[1] > 0).map(([s, n, label]) =>
+      `<div style="width:${(n / total) * 100}%;background:${color(s)}" data-tip="${esc(`${plural(n, "function")} ${label}`)}"></div>`).join("");
+    $("split-labels").innerHTML = parts.map(([s, n, label]) =>
+      `<div><b style="color:${color(s)}">${n.toLocaleString()}</b><span>${label} · ${Math.round((n / total) * 100)}%</span></div>`).join("");
+    $("limits-text").textContent = `warn above ${WARN ?? "none"} · fail above ${FAIL ?? "none"}` +
+      (S.pathOverrides ? ` · ${plural(S.pathOverrides, "path override")}` : "");
+
+    const totals = {};
+    fns.forEach(f => Object.entries(f.breakdown).forEach(([k, n]) => { totals[k] = (totals[k] || 0) + n; }));
+    const drivers = Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, 9);
+    const top = drivers.length ? drivers[0][1] : 1;
+    $("drivers").innerHTML = drivers.length ? drivers.map(([k, n]) =>
+      `<span class="name">${esc(k)}</span><div class="track"><div class="fill" style="width:${(n / top) * 100}%"></div></div><span class="num">${n.toLocaleString()}</span>`).join("")
+      : `<p class="empty">No decision points: every function is a straight line.</p>`;
+  }
+
+  /* Size versus complexity */
+  function scatter() {
+    const W = 1080, H = 330, L = 46, R = 70, T = 16, B = 42, pw = W - L - R, ph = H - T - B;
+    const maxLines = Math.max(10, ...fns.map(f => f.lines));
+    const lx = Math.log10(maxLines);
+    const x = v => L + (Math.log10(Math.max(1, v)) / lx) * pw;
+    const ticks = niceTicks(Math.max(S.maxComplexity + 1, (FAIL ?? 0) + 2), 5), top = ticks[ticks.length - 1];
+    const y = v => T + ph - (v / top) * ph;
+    let body = "";
+    // Limits sit between whole scores: "fail above 6" starts at 6.5.
+    const yLimit = v => y(v + 0.5);
+    if (FAIL != null) body += `<rect x="${L}" y="${T}" width="${pw}" height="${Math.max(0, yLimit(FAIL) - T)}" fill="var(--fail-soft)" opacity="0.6"/>`;
+    ticks.forEach(t => {
+      body += `<line x1="${L}" x2="${L + pw}" y1="${y(t)}" y2="${y(t)}" stroke="var(--grid)"/>`;
+      body += `<text x="${L - 8}" y="${y(t) + 4}" text-anchor="end" font-size="11" fill="var(--faint)">${t}</text>`;
+    });
+    [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000].filter(v => v <= maxLines).forEach(v => {
+      body += `<line x1="${x(v)}" x2="${x(v)}" y1="${T}" y2="${T + ph}" stroke="var(--grid)"/>`;
+      body += `<text x="${x(v)}" y="${T + ph + 17}" text-anchor="middle" font-size="11" fill="var(--muted)">${v}</text>`;
+    });
+    body += `<text x="${L + pw / 2}" y="${H - 4}" text-anchor="middle" font-size="11" fill="var(--muted)">lines of code (log scale)</text>`;
+    body += `<text x="${12}" y="${T + ph / 2}" text-anchor="middle" font-size="11" fill="var(--muted)" transform="rotate(-90 12 ${T + ph / 2})">score</text>`;
+    if (WARN != null && WARN < top) body += limitLine(L, yLimit(WARN), L + pw, yLimit(WARN), "warn", `warn > ${WARN}`, { x: L + pw + 6, y: yLimit(WARN) + 4, align: "start" });
+    if (FAIL != null && FAIL < top) body += limitLine(L, yLimit(FAIL), L + pw, yLimit(FAIL), "fail", `fail > ${FAIL}`, { x: L + pw + 6, y: yLimit(FAIL) + 4 + (WARN != null && Math.abs(yLimit(WARN) - yLimit(FAIL)) < 14 ? -12 : 0), align: "start" });
+    const order = { ignored: -1, ok: 0, warn: 1, fail: 2 };
+    const points = fns.slice(0, 6000).sort((a, b) => order[a.status] - order[b.status]);
+    points.forEach((f, i) => {
+      const jitter = (((i * 9301 + 49297) % 233280) / 233280 - 0.5) * 0.5;
+      body += `<circle cx="${x(f.lines).toFixed(1)}" cy="${y(f.complexity + jitter).toFixed(1)}" r="${f.status === "ok" ? 4 : 5.5}" fill="${color(f.status)}" fill-opacity="${f.status === "ok" ? 0.45 : 0.9}" stroke="var(--surface)" stroke-width="1" data-tip="${esc(tipText(f))}"/>`;
+    });
+    $("scatter").innerHTML = svg(W, H, "Function length against complexity score", body);
+  }
+
+  /* Hotspots by file */
+  function hotspots() {
+    const byFile = new Map();
+    fns.forEach(f => {
+      if (!byFile.has(f.file)) byFile.set(f.file, []);
+      byFile.get(f.file).push(f);
+    });
+    const files = [...byFile].map(([file, list]) => ({
+      file, list: list.sort((a, b) => b.complexity - a.complexity),
+      max: Math.max(...list.map(f => f.complexity)), sum: list.reduce((s, f) => s + f.complexity, 0),
+    })).sort((a, b) => b.max - a.max || b.sum - a.sum);
+    const scale = Math.max(2, WARN ?? S.maxComplexity);
+    const cellColor = f => f.status !== "ok" ? color(f.status)
+      : `color-mix(in srgb, var(--accent) ${Math.round(18 + 72 * (f.complexity - 1) / (scale - 1))}%, var(--surface-2))`;
+    const row = g => {
+      const cut = g.file.lastIndexOf("/");
+      const status = g.list[0].status;
+      return `<div class="file-row">
+        <div class="file-name" title="${esc(g.file)}"><bdi><span class="dir">${esc(g.file.slice(0, cut + 1))}</span>${esc(g.file.slice(cut + 1))}</bdi></div>
+        <div class="cells">${g.list.map(f => `<div class="cell" style="background:${cellColor(f)}" data-tip="${esc(tipText(f))}"></div>`).join("")}</div>
+        <div class="file-max"><span class="score ${status === "ok" ? "" : status}" data-tip="${esc(`highest score in this file\n${plural(g.list.length, "function")}, total ${g.sum}`)}">${g.max}</span></div>
+      </div>`;
+    };
+    const limit = 20;
+    const draw = all => { $("files").innerHTML = (all ? files : files.slice(0, limit)).map(row).join(""); };
+    draw(false);
+    const more = $("more-files");
+    more.hidden = files.length <= limit;
+    more.textContent = `Show all ${files.length} files`;
+    more.addEventListener("click", () => { draw(true); more.hidden = true; });
+  }
+
+  /* Function table */
+  function table() {
+    const view = { q: "", status: "all", sort: "complexity", dir: -1, limit: 100 };
+    const filters = [["all", "All", fns.length], ["fail", "Fail", S.fail], ["warn", "Warn", S.warn], ["ok", "Ok", S.ok]];
+    if (S.ignored) filters.push(["ignored", "Ignored", S.ignored]);
+    document.querySelectorAll("th.cov").forEach(th => { th.hidden = !HAS_COVERAGE; });
+    document.querySelectorAll("th.mut").forEach(th => { th.hidden = !HAS_MUTATION; });
+    $("status-filter").innerHTML = filters.map(([key, label, n]) =>
+      `<button type="button" data-status="${key}" aria-pressed="${key === "all"}">${label} <span class="mono">${n}</span></button>`).join("");
+    const compare = {
+      complexity: (a, b) => a.complexity - b.complexity,
+      cognitive: (a, b) => a.cognitive - b.cognitive,
+      coverage: (a, b) => (a.coverage ?? -1) - (b.coverage ?? -1),
+      crap: (a, b) => (a.crap ?? -1) - (b.crap ?? -1),
+      mutation: (a, b) => (a.mutation ?? -1) - (b.mutation ?? -1),
+      lines: (a, b) => a.lines - b.lines,
+      name: (a, b) => a.name.localeCompare(b.name),
+      file: (a, b) => a.file.localeCompare(b.file) || a.startLine - b.startLine,
+    };
+    const nameCell = name => {
+      const slash = name.lastIndexOf("/");
+      return slash < 0 ? esc(name) : `<span class="parent">${esc(name.slice(0, slash + 1))}</span>${esc(name.slice(slash + 1))}`;
+    };
+    const tags = f => {
+      const entries = Object.entries(f.breakdown);
+      return entries.length ? entries.map(([k, n]) => `<span class="tag">${esc(k)} <b>×${n}</b></span>`).join("") : `<span class="tag">no branches</span>`;
+    };
+    function draw() {
+      const q = view.q.toLowerCase();
+      const list = fns.filter(f => (view.status === "all" || f.status === view.status) &&
+        (!q || f.name.toLowerCase().includes(q) || f.file.toLowerCase().includes(q)))
+        .sort((a, b) => view.dir * compare[view.sort](a, b) || b.complexity - a.complexity);
+      $("count").textContent = `${Math.min(view.limit, list.length).toLocaleString()} of ${plural(list.length, "function")}`;
+      $("rows").innerHTML = list.slice(0, view.limit).map(f => `<tr class="${f.status}">
+        <td class="num"><span class="score ${f.status === "warn" || f.status === "fail" ? f.status : ""}">${f.complexity}</span></td>
+        <td class="num">${f.cognitive}</td>
+        <td><span class="pill ${f.status}" ${f.status === "ignored" ? `data-tip="${esc(tipText(f))}"` : ""}>${f.status}</span></td>
+        <td class="fn">${nameCell(f.name)}</td>
+        <td class="num">${f.lines}</td>
+        ${HAS_COVERAGE ? `<td class="num">${percent(f.coverage)}</td><td class="num">${f.crap == null ? "–" : f.crap.toFixed(1)}</td>` : ""}
+        ${HAS_MUTATION ? `<td class="num">${f.mutation == null ? "–" : Math.round(f.mutation) + "%"}</td>` : ""}
+        <td class="loc">${esc(f.file)}:${f.startLine}–${f.endLine}</td>
+        <td><div class="tags">${tags(f)}</div></td></tr>`).join("");
+      const more = $("more-rows");
+      more.hidden = list.length <= view.limit;
+      more.textContent = `Show ${Math.min(100, list.length - view.limit)} more`;
+      document.querySelectorAll("th[data-sort]").forEach(th => {
+        if (th.dataset.sort === view.sort) th.setAttribute("aria-sort", view.dir < 0 ? "descending" : "ascending");
+        else th.removeAttribute("aria-sort");
+      });
+    }
+    $("search").addEventListener("input", e => { view.q = e.target.value; view.limit = 100; draw(); });
+    $("status-filter").addEventListener("click", e => {
+      const button = e.target.closest("button");
+      if (!button) return;
+      view.status = button.dataset.status; view.limit = 100;
+      $("status-filter").querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", b === button));
+      draw();
+    });
+    document.querySelectorAll("th[data-sort] button").forEach(button => button.addEventListener("click", () => {
+      const key = button.parentElement.dataset.sort;
+      view.dir = view.sort === key ? -view.dir : (key === "name" || key === "file" ? 1 : -1);
+      view.sort = key;
+      draw();
+    }));
+    $("more-rows").addEventListener("click", () => { view.limit += 100; draw(); });
+    draw();
+  }
+
+  /* Footer */
+  function footer() {
+    const warnings = REPORT.warnings || [];
+    $("footer").innerHTML = `
+      <p><b>Score</b> (cyclomatic complexity, which the limits use) is 1 plus one for every decision point: <code>if</code>, loops, <code>case</code> labels, <code>catch</code>, <code>?:</code>, <code>&amp;&amp;</code>, <code>||</code>, <code>??</code> and match or switch-expression arms after the first. <b>Cognitive</b> complexity adds the nesting depth to every branch and loop, so deeply nested code costs more. Lambdas and closures are scored on their own.${HAS_COVERAGE ? ` <b>CRAP</b> = score² × (1 − coverage)³ + score: high when complex code is not tested.` : ""}</p>
+      ${HAS_COVERAGE ? `<p>Coverage from ${(REPORT.coverage || []).map(c => `<code>${esc(c)}</code>`).join(", ")}.</p>` : ""}
+      ${warnings.length ? `<p>${plural(warnings.length, "warning")}:</p><ul>${warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
+      <p>Generated by ${esc(REPORT.tool.name)} ${esc(REPORT.tool.version)} with <code>dgf analyze --format html</code>.</p>`;
+  }
+
+  /* Complex and untested: coverage on x, score on y, the CRAP limit as a curve */
+  function risk() {
+    const points = fns.filter(f => f.coverage != null);
+    if (!points.length) { $("risk").innerHTML = `<p class="note">The coverage reports cover none of these functions. Check that they come from the same code.</p>`; return; }
+    const W = 1080, H = 330, L = 46, R = 70, T = 16, B = 42, pw = W - L - R, ph = H - T - B;
+    const ticks = niceTicks(Math.max(S.maxComplexity + 1, 12), 5), top = ticks[ticks.length - 1];
+    const x = c => L + c * pw, y = v => T + ph - (v / top) * ph;
+    let body = "";
+    /* The coverage at which a function of score c reaches CRAP = limit. */
+    const limitCurve = limit => {
+      const pts = [];
+      for (let c = 1; c <= top; c += 0.25) {
+        const need = (limit - c) / (c * c);
+        const cov = need >= 1 ? 0 : need <= 0 ? 1 : 1 - Math.cbrt(need);
+        pts.push([x(cov), y(c)]);
+      }
+      return pts;
+    };
+    if (CRAP.warn != null) {
+      const curve = limitCurve(CRAP.warn);
+      body += `<path d="M${L} ${T}L${curve.slice().reverse().map(p => `${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join("L")}L${L} ${y(1)}Z" fill="var(--fail-soft)" opacity="0.7"/>`;
+      body += `<path d="M${curve.map(p => `${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join("L")}" fill="none" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="5 4"/>`;
+      const label = curve.find(p => p[1] <= T + 40) || curve[curve.length - 1];
+      body += `<text x="${label[0] + 6}" y="${label[1] + 4}" font-size="11" font-weight="700" fill="var(--warn)">CRAP ${CRAP.warn}</text>`;
+    }
+    ticks.forEach(t => {
+      body += `<line x1="${L}" x2="${L + pw}" y1="${y(t)}" y2="${y(t)}" stroke="var(--grid)"/>`;
+      body += `<text x="${L - 8}" y="${y(t) + 4}" text-anchor="end" font-size="11" fill="var(--faint)">${t}</text>`;
+    });
+    [0, 0.25, 0.5, 0.75, 1].forEach(c => {
+      body += `<text x="${x(c)}" y="${T + ph + 17}" text-anchor="middle" font-size="11" fill="var(--muted)">${c * 100}%</text>`;
+    });
+    body += `<text x="${L + pw / 2}" y="${H - 4}" text-anchor="middle" font-size="11" fill="var(--muted)">coverage of the function's lines</text>`;
+    body += `<text x="12" y="${T + ph / 2}" text-anchor="middle" font-size="11" fill="var(--muted)" transform="rotate(-90 12 ${T + ph / 2})">score</text>`;
+    const crapStatus = f => CRAP.fail != null && f.crap > CRAP.fail ? "fail" : CRAP.warn != null && f.crap > CRAP.warn ? "warn" : "ok";
+    points.forEach(f => {
+      const s = crapStatus(f);
+      body += `<circle cx="${x(f.coverage).toFixed(1)}" cy="${y(f.complexity).toFixed(1)}" r="${s === "ok" ? 4 : 6}" fill="${color(s)}" fill-opacity="${s === "ok" ? 0.45 : 0.9}" stroke="var(--surface)" stroke-width="1" data-tip="${esc(tipText(f))}"/>`;
+    });
+    $("risk").innerHTML = svg(W, H, "Function coverage against complexity score", body);
+  }
+
+  if (fns.length) { histogram(); scatter(); hotspots(); }
+  if (HAS_COVERAGE && fns.length) { $("risk-card").hidden = false; risk(); }
+  statusPanel();
+  table();
+  footer();
+})();
+</script>
+</body>
+</html>

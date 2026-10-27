@@ -1,0 +1,7 @@
+{
+  // Make cargo, rustc and dgf available in VS Code terminals even if VS Code
+  // was started before Rust was installed.
+  "terminal.integrated.env.windows": {
+    "PATH": "${env:USERPROFILE}\\.cargo\\bin;${env:PATH}"
+  }
+}

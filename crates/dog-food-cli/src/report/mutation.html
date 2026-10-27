@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dog-food mutation report</title>
+<style>
+/*DGF_STYLE*/
+.bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; gap: 2px; min-width: 120px; background: var(--surface-2); }
+.bar div { min-width: 2px; }
+.code { font: 0.8rem var(--mono); }
+.code del { color: var(--fail); text-decoration: line-through; }
+.code ins { color: var(--ok); text-decoration: none; font-weight: 700; }
+.outcome { font: 600 0.7rem var(--mono); padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+.outcome.killed, .outcome.timeout { background: var(--ok-soft); color: var(--ok); }
+.outcome.survived { background: var(--fail-soft); color: var(--fail); }
+.outcome.no-coverage { background: var(--warn-soft); color: var(--warn); }
+.outcome.compile-error, .outcome.runtime-error, .outcome.untested, .outcome.ignored { background: var(--surface-2); color: var(--faint); }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand"><span class="mark">dgf</span> dog-food</div>
+      <button class="ghost" id="theme" type="button">Switch theme</button>
+    </div>
+    <div class="hero-grid">
+      <div>
+        <p class="eyebrow">Mutation testing</p>
+        <h1 id="title">Would the tests notice a bug?</h1>
+        <div class="meta" id="meta"></div>
+      </div>
+      <div class="verdict" id="verdict"></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="kpis" id="kpis" aria-label="Summary"></section>
+
+  <article class="card">
+    <div class="card-head">
+      <h2>Not caught by any test</h2>
+      <p>Each line is a small change to the code that every test still passes: add or sharpen a test for it</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Why</th><th>Change</th><th>Kind</th><th>Function</th><th>Location</th></tr></thead>
+        <tbody id="survivors"></tbody>
+      </table>
+    </div>
+  </article>
+
+  <article class="card">
+    <div class="card-head">
+      <h2>By function</h2>
+      <p>Mutation score: detected mutants ÷ mutants that count</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th class="num">Score</th><th>Mutants</th><th class="num">Killed</th><th class="num">Survived</th><th class="num">No tests</th><th class="num">Complexity</th><th>Function</th><th>Location</th></tr></thead>
+        <tbody id="functions"></tbody>
+      </table>
+    </div>
+  </article>
+
+  <article class="card">
+    <div class="card-head">
+      <h2>Every mutant</h2>
+      <p id="every-count"></p>
+    </div>
+    <div class="controls">
+      <div class="chips" id="outcome-filter" role="group" aria-label="Outcome"></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Outcome</th><th>Change</th><th>Kind</th><th>Function</th><th>Location</th></tr></thead>
+        <tbody id="mutants"></tbody>
+      </table>
+    </div>
+  </article>
+
+  <article class="card" id="suppressed-card" hidden>
+    <div class="card-head">
+      <h2>Turned off by dgf-disable comments</h2>
+      <p>Each comment gives its reason; its mutants are not tested and not counted.</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Comment</th><th>Mutators</th><th>Reason</th><th class="num">Mutants</th></tr></thead>
+        <tbody id="suppressed"></tbody>
+      </table>
+    </div>
+  </article>
+
+  <footer id="footer"></footer>
+</main>
+
+<div class="tip" id="tip" hidden></div>
+
+<script>
+const REPORT = /*DGF_DATA*/null;
+/*DGF_COMMON*/
+(function () {
+  "use strict";
+  if (!REPORT || !REPORT.functions) { document.body.textContent = "This page has no mutation data. Create one with: dgf mutate --run --format html"; return; }
+
+  const T = REPORT.tally;
+  const score = REPORT.score;
+  const pct = s => s == null ? "–" : `${Math.round(s)}%`;
+  const OUTCOME_COLORS = { killed: "var(--ok)", timeout: "var(--ok)", survived: "var(--fail)", "no-coverage": "var(--warn)", "compile-error": "var(--line)", "runtime-error": "var(--line)", "untested": "var(--line)", "ignored": "var(--line)" };
+  const all = REPORT.functions.flatMap(f => f.mutants.map(m => Object.assign({ fn: f }, m)));
+  all.forEach(m => { if (!m.outcome && m.untested) m.outcome = "untested"; });
+  const short = text => { const flat = text.replace(/\s+/g, " "); return flat.length > 80 ? flat.slice(0, 77) + "..." : flat; };
+  const change = m => `<span class="code"><del>${esc(short(m.mutant.original))}</del> → <ins>${esc(m.mutant.replacement)}</ins></span>`;
+  const where = m => `${esc(m.fn.file)}:${m.mutant.line}:${m.mutant.column}`;
+
+  /* Header */
+  const bands = REPORT.thresholds || { high: 80, low: 60 };
+  const state = score == null ? "pass" : score >= bands.high ? "pass" : score >= bands.low ? "warn" : "fail";
+  verdictCard(state, `Mutation score ${pct(score)}`,
+    `${plural(T.killed + T.timeout, "mutant")} caught, ${plural(T.survived + T.noCoverage, "mutant")} not caught`);
+  $("title").textContent = score == null ? "No mutant could be tested" : score >= bands.high ? "The tests catch most bugs" : score >= bands.low ? "The tests miss some bugs" : "Many bugs would slip through";
+  const t = REPORT.timings;
+  $("meta").innerHTML = [
+    `<span>${plural(REPORT.functions.length, "function")}</span>`,
+    `<span>${esc(new Date(REPORT.generatedAt * 1000).toLocaleString())}</span>`,
+    `<span>${t.testRuns} test runs for ${all.length - REPORT.cached} mutants on ${t.jobs} workers</span>`,
+  ].join("");
+  kpiStrip([
+    [pct(score), "", "mutation score", state === "pass" ? "good" : state],
+    [T.killed, "", "killed"],
+    [T.survived, "", "survived", T.survived ? "fail" : ""],
+    [T.noCoverage, "", "no tests", T.noCoverage ? "warn" : ""],
+    [T.timeout, "", "timeout"],
+    [REPORT.cached, "", "from cache"],
+    [((t.prepareMs + t.buildMs + t.baselineMs + t.mutantsMs) / 1000).toFixed(1), "s", "total time"],
+  ]);
+
+  /* Survivors */
+  const survivors = all.filter(m => m.outcome === "survived" || m.outcome === "no-coverage");
+  $("survivors").innerHTML = survivors.map(m => `<tr>
+      <td><span class="outcome ${m.outcome}">${m.outcome === "no-coverage" ? "no test runs this" : "tests still pass"}</span></td>
+      <td>${change(m)}</td><td class="kind">${esc(m.mutant.mutator)}${m.mutant.boundaryRisk ? " · date boundary" : ""}</td>
+      <td class="fn">${esc(m.fn.name)}</td><td class="loc">${where(m)}</td></tr>`).join("")
+    || `<tr><td colspan="5" class="empty">Every mutant was caught.</td></tr>`;
+
+  /* Functions */
+  const segments = f => ["killed", "timeout", "survived", "noCoverage", "compileError"].map(k => {
+    const n = f.tally[k];
+    const key = k === "noCoverage" ? "no-coverage" : k === "compileError" ? "compile-error" : k;
+    return n ? `<div style="flex:${n};background:${OUTCOME_COLORS[key]}" data-tip="${esc(`${n} ${key.replace("-", " ")}`)}"></div>` : "";
+  }).join("");
+  $("functions").innerHTML = REPORT.functions.slice().sort((a, b) => (a.score ?? 101) - (b.score ?? 101)).map(f => `<tr>
+      <td class="num"><span class="score ${f.score == null ? "" : f.score < bands.low ? "fail" : f.score < bands.high ? "warn" : ""}">${pct(f.score)}</span></td>
+      <td><div class="bar">${segments(f)}</div></td>
+      <td class="num">${f.tally.killed + f.tally.timeout}</td><td class="num">${f.tally.survived}</td><td class="num">${f.tally.noCoverage}</td>
+      <td class="num">${f.complexity}</td><td class="fn">${esc(f.name)}</td>
+      <td class="loc">${esc(f.file)}:${f.startLine}–${f.endLine}</td></tr>`).join("");
+
+  /* Every mutant */
+  const kinds = [["all", "All"], ["survived", "Survived"], ["no-coverage", "No tests"], ["killed", "Killed"], ["timeout", "Timeout"], ["compile-error", "Did not compile"], ["runtime-error", "Crashed the run"], ["ignored", "Ignored"], ["untested", "Not tested"]];
+  let show = "all";
+  const counts = k => k === "all" ? all.length : all.filter(m => m.outcome === k).length;
+  $("outcome-filter").innerHTML = kinds.map(([k, label]) => `<button type="button" data-k="${k}" aria-pressed="${k === "all"}">${label} <span class="mono">${counts(k)}</span></button>`).join("");
+  function draw() {
+    const list = all.filter(m => show === "all" || m.outcome === show);
+    $("every-count").textContent = plural(list.length, "mutant");
+    $("mutants").innerHTML = list.map(m => `<tr>
+        <td><span class="outcome ${m.outcome}"${m.mutant.ignored ? ` data-tip="${esc(m.mutant.ignored)}"` : ""}>${esc((m.outcome || "").replace("-", " "))}${m.cached ? " · cached" : ""}</span></td>
+        <td>${change(m)}</td><td class="kind">${esc(m.mutant.mutator)}</td>
+        <td class="fn">${esc(m.fn.name)}</td><td class="loc">${where(m)}</td></tr>`).join("");
+  }
+  $("outcome-filter").addEventListener("click", e => {
+    const button = e.target.closest("button");
+    if (!button) return;
+    show = button.dataset.k;
+    $("outcome-filter").querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", b === button));
+    draw();
+  });
+  draw();
+
+  /* Suppressions */
+  const seen = new Set();
+  const suppressed = REPORT.functions.flatMap(f => (f.suppressions || []).map(s => Object.assign({ file: f.file }, s)))
+    .filter(s => !seen.has(`${s.file}:${s.line}`) && seen.add(`${s.file}:${s.line}`));
+  if (suppressed.length) {
+    $("suppressed-card").hidden = false;
+    $("suppressed").innerHTML = suppressed.map(s => `<tr>
+        <td class="loc">${esc(s.file)}:${s.line} <span class="kind">dgf-disable${s.kind === "range" ? "" : "-" + esc(s.kind)}</span></td>
+        <td class="kind">${esc(s.mutators.join(", "))}</td><td>${esc(s.reason)}</td><td class="num">${s.mutants}</td></tr>`).join("");
+  }
+
+  $("footer").innerHTML = `
+    <p>A mutant is a small deliberate change (<code>&lt;</code> → <code>&lt;=</code>, <code>&amp;&amp;</code> → <code>||</code>, a condition → <code>false</code>). <b>Killed</b>: a test failed, so the tests notice it. <b>Survived</b>: every test still passed. <b>No tests</b>: no test runs that code. Score = (killed + timeout) ÷ (killed + timeout + survived + no tests).</p>
+    <p>Test projects: ${(REPORT.testProjects || []).map(p => `<code>${esc(p)}</code>`).join(", ") || "–"}. Generated by dog-food with <code>dgf mutate --run --format html</code>.</p>`;
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+{
+  "name": "dog-food",
+  "displayName": "dog-food complexity",
+  "description": "Cyclomatic and cognitive complexity above every function (C#, TypeScript/JavaScript, Rust), problems for functions above your limits, and the dog-food HTML reports.",
+  "version": "0.1.0",
+  "publisher": "dog-food",
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Linters", "Visualization"],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:csharp",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:rust"
+  ],
+  "contributes": {
+    "commands": [
+      { "command": "dogFood.analyzeFile", "title": "dog-food: Analyze Current File" },
+      { "command": "dogFood.openReport", "title": "dog-food: Open Workspace Report" },
+      { "command": "dogFood.openChanges", "title": "dog-food: Open Changes Report (this branch vs main)" },
+      { "command": "dogFood.openHistory", "title": "dog-food: Open History Report" }
+    ],
+    "configuration": {
+      "title": "dog-food",
+      "properties": {
+        "dogFood.path": {
+          "type": "string",
+          "default": "dgf",
+          "description": "The dgf executable. Install it with `cargo install --path crates/dog-food-cli` from the dog-food repository."
+        },
+        "dogFood.codeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the scores above each function."
+        },
+        "dogFood.codeLensMinimum": {
+          "type": "number",
+          "default": 1,
+          "description": "Only show scores above functions with at least this cyclomatic complexity."
+        }
+      }
+    }
+  }
+}

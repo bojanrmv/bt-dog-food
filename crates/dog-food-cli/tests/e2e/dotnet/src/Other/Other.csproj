@@ -1,0 +1,3 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- No test project uses this project: the sandbox does not need it. -->
+</Project>

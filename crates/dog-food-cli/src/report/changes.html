@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dog-food complexity changes</title>
+<style>
+/*DGF_STYLE*/
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand"><span class="mark">dgf</span> dog-food</div>
+      <button class="ghost" id="theme" type="button">Switch theme</button>
+    </div>
+    <div class="hero-grid">
+      <div>
+        <p class="eyebrow">Complexity changes</p>
+        <h1 id="title">What did this change do?</h1>
+        <div class="meta" id="meta"></div>
+      </div>
+      <div class="verdict" id="verdict"></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="kpis" id="kpis" aria-label="Summary"></section>
+
+  <article class="card">
+    <div class="card-head">
+      <h2>Before and after</h2>
+      <p>Each row is a function whose score changed: hollow dot before, filled dot after</p>
+    </div>
+    <div class="chart" id="dumbbell"></div>
+    <div class="legend">
+      <span><i style="background: var(--fail)"></i>got more complex</span>
+      <span><i style="background: var(--ok)"></i>got simpler</span>
+      <span><i style="background: var(--accent)"></i>new function</span>
+      <span><i style="background: var(--faint)"></i>removed</span>
+    </div>
+  </article>
+
+  <article class="card">
+    <div class="card-head">
+      <h2>Changed functions</h2>
+      <p id="rule"></p>
+    </div>
+    <div class="controls">
+      <input class="search" id="search" type="search" placeholder="Filter by function or file" aria-label="Filter by function or file">
+      <div class="chips" id="change-filter" role="group" aria-label="Change"></div>
+      <span class="count" id="count"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Change</th>
+            <th class="num">Score</th>
+            <th class="num">Δ</th>
+            <th>Status</th>
+            <th>Function</th>
+            <th>Location</th>
+            <th>Decisions</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </article>
+
+  <article class="card">
+    <div class="card-head">
+      <h2>Changed source files</h2>
+      <p>Compared with the base, after excludes</p>
+    </div>
+    <div class="tags" id="files"></div>
+  </article>
+
+  <footer id="footer"></footer>
+</main>
+
+<div class="tip" id="tip" hidden></div>
+
+<script>
+const REPORT = /*DGF_DATA*/null;
+/*DGF_COMMON*/
+(function () {
+  "use strict";
+  if (!REPORT) { document.body.textContent = "This page has no report data. Create one with: dgf changes --format html"; return; }
+
+  const S = REPORT.summary;
+  const WARN = REPORT.limits.warn, FAIL = REPORT.limits.fail;
+  const rows = REPORT.functions.map(f => Object.assign({}, f, { delta: (f.after ?? 0) - (f.before ?? 0) }));
+  const who = REPORT.failOn === "touched" ? "changed" : "new or worse";
+  const tipText = f => `${f.name}\n${f.change}: ${f.before ?? "–"} → ${f.after ?? "–"} (${signed(f.delta)})\n${f.file}:${f.startLine}`;
+
+  /* Header */
+  const state = { fail: "fail", warn: "warn" }[REPORT.verdict] || "pass";
+  const netText = S.net > 0 ? `complexity went up by ${S.net}` : S.net < 0 ? `complexity went down by ${-S.net}` : "complexity did not change";
+  verdictCard(state, { fail: "Failed", warn: "Passed with warnings", pass: "Passed" }[state],
+    state === "fail" ? `${plural(S.failing, "function")} ${who} above the fail limit of ${FAIL}`
+      : state === "warn" ? `${plural(S.warning, "function")} ${who} above the warn limit of ${WARN}`
+      : `within the limits; ${netText}`);
+  $("title").textContent = !rows.length ? "No functions changed"
+    : S.net > 0 ? "This change adds complexity"
+    : S.net < 0 ? "This change removes complexity"
+    : "Complexity holds steady";
+  const when = new Date(REPORT.generatedAt * 1000).toLocaleString();
+  $("meta").innerHTML = [
+    `<span>compared with <code>${esc(REPORT.base)}</code> at <code>${esc(REPORT.baseCommit)}</code></span>`,
+    REPORT.head && `<span>head <code>${esc(REPORT.head)}</code>${REPORT.branch ? ` on <code>${esc(REPORT.branch)}</code>` : ""} + uncommitted edits</span>`,
+    `<span>${REPORT.scope === "lines" ? "functions with changed lines" : "all functions in changed files"}</span>`,
+    `<span>${esc(when)}</span>`,
+  ].filter(Boolean).join("");
+
+  /* Numbers */
+  kpiStrip([
+    [S.files, "", "changed files"],
+    [S.functions - S.removed, "", "functions changed"],
+    [S.new, "", "new"],
+    [S.worse, "", "worse", S.worse ? "fail" : ""],
+    [S.better, "", "better", S.better ? "good" : ""],
+    [S.removed, "", "removed"],
+    [signed(S.net), "", "net score change", S.net > 0 ? "fail" : S.net < 0 ? "good" : ""],
+  ]);
+
+  /* Before and after */
+  (function dumbbell() {
+    /* What a reviewer needs first: functions that got worse, then new ones, then the rest. */
+    const priority = { worse: 0, new: 1, better: 2, removed: 3 };
+    const moved = rows.filter(r => r.change !== "same")
+      .sort((a, b) => priority[a.change] - priority[b.change] || Math.abs(b.delta) - Math.abs(a.delta) || (b.after ?? 0) - (a.after ?? 0));
+    const shown = moved.slice(0, 30);
+    if (!shown.length) {
+      $("dumbbell").innerHTML = `<p class="note">${rows.length ? `${plural(rows.length, "function")} changed, but no score moved.` : "No functions changed compared with the base."}</p>`;
+      return;
+    }
+    const rowH = 28, W = 1080, L = 340, R = 70, T = 34, B = 36;
+    const H = T + shown.length * rowH + B, pw = W - L - R;
+    const most = Math.max(...shown.map(r => Math.max(r.before ?? 0, r.after ?? 0)), (FAIL ?? 0) + 1, (WARN ?? 0) + 1);
+    const ticks = niceTicks(most, 6), top = ticks[ticks.length - 1];
+    const x = v => L + (v / top) * pw;
+    let body = "";
+    ticks.forEach(t => {
+      body += `<line x1="${x(t)}" x2="${x(t)}" y1="${T - 8}" y2="${H - B}" stroke="var(--grid)"/>`;
+      body += `<text x="${x(t)}" y="${H - B + 18}" text-anchor="middle" font-size="11" fill="var(--muted)">${t}</text>`;
+    });
+    body += `<text x="${L + pw / 2}" y="${H - 4}" text-anchor="middle" font-size="11" fill="var(--muted)">complexity score</text>`;
+    if (WARN != null) body += limitLine(x(WARN + 0.5), T - 8, x(WARN + 0.5), H - B, "warn", `warn > ${WARN}`, { x: x(WARN + 0.5) - 5, y: T - 14, align: "end" });
+    if (FAIL != null) body += limitLine(x(FAIL + 0.5), T - 8, x(FAIL + 0.5), H - B, "fail", `fail > ${FAIL}`, { x: x(FAIL + 0.5) + 5, y: T - 14, align: "start" });
+    const lineColor = { worse: "var(--fail)", better: "var(--ok)" };
+    shown.forEach((r, i) => {
+      const y = T + i * rowH + rowH / 2;
+      const name = r.name.length > 44 ? "…" + r.name.slice(-43) : r.name;
+      body += `<g data-tip="${esc(tipText(r))}"><rect x="0" y="${y - rowH / 2}" width="${W}" height="${rowH}" fill="transparent"/>`;
+      body += `<text x="${L - 14}" y="${y + 4}" text-anchor="end" font-size="12" font-family="var(--mono)" fill="var(--ink)">${esc(name)}</text>`;
+      if (r.before != null && r.after != null) {
+        body += `<line x1="${x(r.before)}" x2="${x(r.after)}" y1="${y}" y2="${y}" stroke="${lineColor[r.change] || "var(--faint)"}" stroke-width="3" stroke-linecap="round" opacity="0.75"/>`;
+      }
+      if (r.before != null) body += `<circle cx="${x(r.before)}" cy="${y}" r="5.5" fill="var(--surface)" stroke="${r.after == null ? "var(--faint)" : "var(--muted)"}" stroke-width="2"/>`;
+      if (r.after != null) body += `<circle cx="${x(r.after)}" cy="${y}" r="6.5" fill="${r.change === "new" ? "var(--accent)" : color(r.status)}" stroke="var(--surface)" stroke-width="1.5"/>`;
+      const end = x(Math.max(r.before ?? 0, r.after ?? 0)) + 12;
+      const label = r.change === "new" ? `new · ${r.after}` : r.change === "removed" ? "removed" : signed(r.delta);
+      const tone = r.delta > 0 ? "var(--fail)" : r.delta < 0 ? "var(--ok)" : "var(--muted)";
+      body += `<text x="${end}" y="${y + 4}" font-size="11.5" font-weight="700" fill="${r.change === "new" ? "var(--accent)" : tone}">${label}</text></g>`;
+    });
+    $("dumbbell").innerHTML = svg(W, H, "Score of each changed function before and after", body) +
+      (moved.length > shown.length ? `<p class="note">Showing the ${shown.length} biggest of ${moved.length} score changes; the table below has all of them.</p>` : "");
+  })();
+
+  /* Table */
+  (function table() {
+    $("rule").textContent = `${who === "changed" ? "Any changed function" : "Only new or worse functions"} can fail this run · warn above ${WARN ?? "none"} · fail above ${FAIL ?? "none"}`;
+    const view = { q: "", change: "all" };
+    const kinds = [["all", "All", rows.length], ["new", "New", S.new], ["worse", "Worse", S.worse], ["better", "Better", S.better], ["same", "Same", S.same], ["removed", "Removed", S.removed]];
+    $("change-filter").innerHTML = kinds.map(([key, label, n]) =>
+      `<button type="button" data-change="${key}" aria-pressed="${key === "all"}">${label} <span class="mono">${n}</span></button>`).join("");
+    const tags = f => {
+      const entries = Object.entries(f.breakdown);
+      return entries.length ? entries.map(([k, n]) => `<span class="tag">${esc(k)} <b>×${n}</b></span>`).join("") : `<span class="tag">${f.change === "removed" ? "removed" : "no branches"}</span>`;
+    };
+    const deltaCell = d => `<span class="delta ${d > 0 ? "up" : d < 0 ? "down" : "flat"}">${signed(d)}</span>`;
+    function draw() {
+      const q = view.q.toLowerCase();
+      const list = rows.filter(r => (view.change === "all" || r.change === view.change) &&
+        (!q || r.name.toLowerCase().includes(q) || r.file.toLowerCase().includes(q)));
+      $("count").textContent = plural(list.length, "function");
+      $("rows").innerHTML = list.map(r => `<tr class="${r.counted && r.status !== "ok" ? r.status : ""}">
+        <td><span class="pill ${r.change}">${r.change}</span></td>
+        <td class="num"><span class="scorepair"><span class="was">${r.before ?? "–"} →</span> ${r.after ?? "–"}</span></td>
+        <td class="num">${deltaCell(r.delta)}</td>
+        <td>${r.change === "removed" ? "–" : `<span class="pill ${r.status}">${r.status}</span>`}</td>
+        <td class="fn">${esc(r.name)}</td>
+        <td class="loc">${esc(r.file)}:${r.startLine}–${r.endLine}</td>
+        <td><div class="tags">${tags(r)}</div></td></tr>`).join("") ||
+        `<tr><td colspan="7" class="empty">No functions match.</td></tr>`;
+    }
+    $("search").addEventListener("input", e => { view.q = e.target.value; draw(); });
+    $("change-filter").addEventListener("click", e => {
+      const button = e.target.closest("button");
+      if (!button) return;
+      view.change = button.dataset.change;
+      $("change-filter").querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", b === button));
+      draw();
+    });
+    draw();
+  })();
+
+  /* Files */
+  const perFile = {};
+  rows.forEach(r => { perFile[r.file] = (perFile[r.file] || 0) + 1; });
+  $("files").innerHTML = REPORT.files.length
+    ? REPORT.files.map(f => `<span class="tag">${esc(f)} <b>${perFile[f] || 0}</b></span>`).join("")
+    : `<p class="empty">No changed C#, TypeScript or Rust files.</p>`;
+
+  /* Footer */
+  const warnings = REPORT.warnings || [];
+  $("footer").innerHTML = `
+    <p>Functions are matched between the base and now by name; a renamed function shows as one removed and one new. A score counts 1 plus every decision point.</p>
+    ${warnings.length ? `<p>${plural(warnings.length, "warning")}:</p><ul>${warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
+    <p>Generated by ${esc(REPORT.tool.name)} ${esc(REPORT.tool.version)} with <code>dgf changes --format html</code>.</p>`;
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,541 @@
+//! The mutation cache: one result per mutant, reused while everything that
+//! decided it is unchanged. A key never names a branch or a folder outside
+//! the repository, so one cache folder can serve every clone and worktree.
+//!
+//! A result holds while the function's text, the mutant and the build
+//! settings (project files, Directory.Build.props, global.json, package.json
+//! and the like) are the same, and:
+//! - killed: the files of the tests that killed it are unchanged;
+//! - survived, no tests, timeout: no test file of the chosen tests changed,
+//!   since any new or changed test might kill it;
+//! - did not compile: nothing more.
+//!
+//! It does not notice a change in other
+//! production code that makes a killing test miss the mutant; `--no-cache`
+//! tests everything again.
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+use super::scope::Scope;
+use super::Outcome;
+use crate::changes::stable_name;
+use crate::discover::absolute;
+use crate::mutate::Target;
+
+/// The cache folder, relative to dgf.toml (or the repository) unless absolute.
+pub const DEFAULT_DIR: &str = ".dgf/mutation-cache";
+const FILE: &str = "mutants.json";
+const LOCK: &str = "mutants.lock";
+const SCHEMA: u32 = 5;
+/// Entries nobody used for this long are dropped when the cache is saved.
+const KEEP_DAYS: u64 = 30;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cache {
+    schema_version: u32,
+    functions: HashMap<String, Entry>,
+    #[serde(skip)]
+    dir: PathBuf,
+    /// Entries this run read or wrote: saved over what is on disk.
+    #[serde(skip)]
+    touched: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Entry {
+    /// Day (since 1970) the entry was last used.
+    used: u64,
+    mutants: Vec<CachedMutant>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedMutant {
+    /// Byte offset from the function's first line.
+    offset: usize,
+    mutator: String,
+    replacement: String,
+    outcome: Outcome,
+    /// Fingerprint of the build settings.
+    build: u64,
+    /// Killed: the files of the tests that killed it, with their hashes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    killed_by: Vec<TestFile>,
+    /// Fingerprint of every test file of the chosen tests, when the result
+    /// depends on all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tests: Option<u64>,
+    /// The files of the tests that reach the mutant: a change to one of
+    /// them puts the function back in `dgf mutate --changes`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    reached: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TestFile {
+    path: String,
+    hash: u64,
+}
+
+impl CachedMutant {
+    fn holds(&self, scope: &Scope) -> bool {
+        if self.build != scope.build {
+            return false;
+        }
+        if self.outcome == Outcome::CompileError {
+            return true;
+        }
+        if !self.killed_by.is_empty() {
+            return self
+                .killed_by
+                .iter()
+                .all(|f| scope.file_hash(&f.path) == Some(f.hash));
+        }
+        self.tests == Some(scope.test_set)
+    }
+}
+
+/// What a run learned about the mutants it killed: the repository files of
+/// the tests that killed each one (empty when a test's file is unknown).
+pub type KilledBy = HashMap<usize, Vec<String>>;
+
+impl Cache {
+    /// The cache in `dir`; empty when there is none or it has another format.
+    pub fn load(dir: &Path) -> Cache {
+        let saved = locked(dir, false, || read(dir)).ok().flatten();
+        let mut cache = saved
+            .filter(|c| c.schema_version == SCHEMA)
+            .unwrap_or_default();
+        cache.dir = dir.to_path_buf();
+        cache
+    }
+
+    /// Outcomes that still hold for the mutants of `targets`.
+    pub fn lookup(&mut self, targets: &[&Target], scope: &Scope) -> HashMap<usize, Outcome> {
+        let mut found = HashMap::new();
+        for target in targets {
+            let Some((key, start)) = identify(target, &scope.root) else {
+                continue;
+            };
+            let Some(entry) = self.functions.get(&key) else {
+                continue;
+            };
+            for mutant in &target.mutants {
+                let cached = entry.mutants.iter().find(|c| {
+                    c.offset == mutant.start_byte - start
+                        && c.mutator == mutant.mutator
+                        && c.replacement == mutant.replacement
+                });
+                found.extend(
+                    cached
+                        .filter(|c| c.holds(scope))
+                        .map(|c| (mutant.id, c.outcome)),
+                );
+            }
+            self.touched.insert(key);
+        }
+        found
+    }
+
+    /// Remembers every outcome of `targets` worth keeping.
+    pub fn store(
+        &mut self,
+        targets: &[&Target],
+        scope: &Scope,
+        outcomes: &HashMap<usize, Outcome>,
+        killed_by: &KilledBy,
+        reached: &HashMap<usize, BTreeSet<String>>,
+    ) {
+        for target in targets {
+            let Some((key, start)) = identify(target, &scope.root) else {
+                continue;
+            };
+            let fresh: Vec<CachedMutant> = target
+                .mutants
+                .iter()
+                .filter_map(|m| {
+                    let outcome = *outcomes.get(&m.id).filter(|o| o.is_cached())?;
+                    let mut entry = cached(
+                        m.start_byte - start,
+                        m,
+                        outcome,
+                        scope,
+                        killed_by.get(&m.id),
+                    );
+                    entry.reached = reached
+                        .get(&m.id)
+                        .map(|files| files.iter().cloned().collect())
+                        .unwrap_or_default();
+                    Some(entry)
+                })
+                .collect();
+            let entry = self.functions.entry(key.clone()).or_default();
+            merge(&mut entry.mutants, fresh);
+            entry.used = today();
+            self.touched.insert(key);
+        }
+    }
+
+    /// Writes the entries this run used into the cache file, keeping what
+    /// other runs wrote meanwhile. Other dgf processes wait for the lock.
+    pub fn save(&self) -> Result<(), String> {
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|err| format!("{}: {err}", self.dir.display()))?;
+        locked(&self.dir, true, || {
+            let mut on_disk = read(&self.dir)?
+                .filter(|c| c.schema_version == SCHEMA)
+                .unwrap_or_default();
+            for key in &self.touched {
+                let Some(ours) = self.functions.get(key) else {
+                    continue;
+                };
+                let entry = on_disk.functions.entry(key.clone()).or_default();
+                merge(&mut entry.mutants, ours.mutants.clone());
+                entry.used = today();
+            }
+            let oldest = today().saturating_sub(KEEP_DAYS);
+            on_disk.functions.retain(|_, e| e.used >= oldest);
+            on_disk.schema_version = SCHEMA;
+            write(&self.dir, &on_disk)
+        })
+    }
+
+    /// Functions (file, stable name) with a mutant that a test in one of
+    /// `test_files` reached, the last time it was tested.
+    pub fn reached_by(&self, test_files: &[String]) -> BTreeSet<(String, String)> {
+        self.functions
+            .iter()
+            .filter(|(_, entry)| {
+                entry
+                    .mutants
+                    .iter()
+                    .any(|m| m.reached.iter().any(|file| test_files.contains(file)))
+            })
+            .filter_map(|(key, _)| {
+                let mut parts = key.split('\u{0}');
+                Some((parts.next()?.to_string(), parts.next()?.to_string()))
+            })
+            .collect()
+    }
+
+    /// Mutation score of a function from earlier runs, if its code is unchanged:
+    /// (score in percent, number of mutants that counted).
+    pub fn score(
+        &self,
+        relative_file: &str,
+        name: &str,
+        function_text: &str,
+    ) -> Option<(f64, usize)> {
+        let hash = super::fnv(&[function_text.as_bytes()]);
+        let entry = self.functions.get(&key(relative_file, name, hash))?;
+        let detected = entry
+            .mutants
+            .iter()
+            .filter(|m| matches!(m.outcome, Outcome::Killed | Outcome::Timeout))
+            .count();
+        let counted = entry.mutants.iter().filter(|m| m.outcome.counts()).count();
+        (counted > 0).then(|| (detected as f64 * 100.0 / counted as f64, counted))
+    }
+}
+
+fn cached(
+    offset: usize,
+    mutant: &dog_food_core::Mutant,
+    outcome: Outcome,
+    scope: &Scope,
+    killers: Option<&Vec<String>>,
+) -> CachedMutant {
+    let killed_by: Vec<TestFile> = killers
+        .filter(|files| outcome == Outcome::Killed && !files.is_empty())
+        .into_iter()
+        .flatten()
+        .filter_map(|path| {
+            scope.file_hash(path).map(|hash| TestFile {
+                path: path.clone(),
+                hash,
+            })
+        })
+        .collect();
+    let needs_all_tests = outcome != Outcome::CompileError && killed_by.is_empty();
+    CachedMutant {
+        offset,
+        mutator: mutant.mutator.to_string(),
+        replacement: mutant.replacement.clone(),
+        outcome,
+        build: scope.build,
+        killed_by,
+        tests: needs_all_tests.then_some(scope.test_set),
+        reached: Vec::new(),
+    }
+}
+
+/// Adds `fresh` to `mutants`, replacing older results for the same mutant.
+fn merge(mutants: &mut Vec<CachedMutant>, fresh: Vec<CachedMutant>) {
+    for new in fresh {
+        mutants.retain(|old| {
+            (old.offset, &old.mutator, &old.replacement)
+                != (new.offset, &new.mutator, &new.replacement)
+        });
+        mutants.push(new);
+    }
+}
+
+fn today() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() / 86_400)
+}
+
+/// Runs `work` while holding the cache folder's lock (shared for reading).
+fn locked<T>(
+    dir: &Path,
+    exclusive: bool,
+    work: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let path = dir.join(LOCK);
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+    else {
+        // No cache folder yet (reading), or a read-only one: nothing to guard.
+        return work();
+    };
+    let taken = if exclusive {
+        lock.lock()
+    } else {
+        lock.lock_shared()
+    };
+    taken.map_err(|err| format!("{}: {err}", path.display()))?;
+    work()
+}
+
+fn read(dir: &Path) -> Result<Option<Cache>, String> {
+    let Ok(text) = std::fs::read_to_string(dir.join(FILE)) else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_str(&text).ok())
+}
+
+/// Writes a temporary file and renames it over the cache, so a reader never
+/// sees half a file.
+fn write(dir: &Path, cache: &Cache) -> Result<(), String> {
+    let path = dir.join(FILE);
+    let temporary = dir.join(format!("{FILE}.{}.tmp", std::process::id()));
+    std::fs::write(
+        &temporary,
+        serde_json::to_string(cache).expect("cache serializes"),
+    )
+    .map_err(|err| format!("{}: {err}", temporary.display()))?;
+    std::fs::rename(&temporary, &path).map_err(|err| format!("{}: {err}", path.display()))
+}
+
+/// File, name and code hash: two lambdas in one method share a stable name,
+/// so the hash tells them apart.
+fn key(relative_file: &str, name: &str, function: u64) -> String {
+    format!(
+        "{}\u{0}{}\u{0}{function:016x}",
+        relative_file.replace('\\', "/"),
+        stable_name(name)
+    )
+}
+
+/// The cache key, and the byte where the function's first line starts.
+fn identify(target: &Target, root: &Path) -> Option<(String, usize)> {
+    let source = std::fs::read_to_string(&target.path).ok()?;
+    let (start, text) = function_text(&source, target.start_line, target.end_line)?;
+    let relative = absolute(&target.path)
+        .strip_prefix(absolute(root))
+        .ok()?
+        .to_string_lossy()
+        .into_owned();
+    let hash = super::fnv(&[text.as_bytes()]);
+    Some((key(&relative, &target.name, hash), start))
+}
+
+/// The byte where line `start` begins, and the text of lines `start..=end`.
+pub fn function_text(source: &str, start: usize, end: usize) -> Option<(usize, &str)> {
+    let mut offsets = vec![0];
+    offsets.extend(source.match_indices('\n').map(|(i, _)| i + 1));
+    let from = *offsets.get(start.checked_sub(1)?)?;
+    let to = offsets.get(end).copied().unwrap_or(source.len());
+    Some((from, &source[from..to]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mutation::sandbox::Kind;
+
+    fn target(root: &Path, file: &str, source: &str) -> Target {
+        let path = root.join(file);
+        std::fs::write(&path, source).unwrap();
+        let mutants =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp).unwrap();
+        Target {
+            file: file.into(),
+            path,
+            name: "C.F".into(),
+            start_line: 2,
+            end_line: 2,
+            complexity: 1,
+            reason: "selected",
+            mutants,
+            suppressions: Vec::new(),
+        }
+    }
+
+    fn scope(root: &Path, build: u64, test_set: u64) -> Scope {
+        Scope::fixed(Kind::CSharp, root, build, test_set)
+    }
+
+    #[test]
+    fn function_text_cuts_whole_lines() {
+        let source = "a\nfn f() {\n  1\n}\nz\n";
+        assert_eq!(function_text(source, 2, 4), Some((2, "fn f() {\n  1\n}\n")));
+        assert_eq!(function_text(source, 9, 9), None);
+    }
+
+    #[test]
+    fn a_kill_holds_while_its_test_file_is_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("cache");
+        std::fs::write(root.path().join("ShopTests.cs"), "class T { void A() {} }").unwrap();
+        let target = target(
+            root.path(),
+            "Shop.cs",
+            "class C {\n  int F(int a) { return a + 1; }\n}\n",
+        );
+        let outcomes = HashMap::from([(0, Outcome::Killed)]);
+        let killers = KilledBy::from([(0, vec!["ShopTests.cs".to_string()])]);
+        let mut cache = Cache::load(&dir);
+        let reached = HashMap::from([(0, BTreeSet::from(["ShopTests.cs".to_string()]))]);
+        cache.store(
+            &[&target],
+            &scope(root.path(), 1, 1),
+            &outcomes,
+            &killers,
+            &reached,
+        );
+        cache.save().unwrap();
+        // The function comes back when a test file that reaches it changes.
+        let saved = Cache::load(&dir);
+        assert_eq!(
+            saved.reached_by(&["ShopTests.cs".to_string()]),
+            BTreeSet::from([("Shop.cs".to_string(), "C.F".to_string())])
+        );
+        assert!(saved.reached_by(&["OtherTests.cs".to_string()]).is_empty());
+
+        // Another test file changing does not matter; the killing one does.
+        let mut cache = Cache::load(&dir);
+        assert_eq!(
+            cache.lookup(&[&target], &scope(root.path(), 1, 2)),
+            outcomes
+        );
+        assert_eq!(
+            cache.score("Shop.cs", "C.F", "  int F(int a) { return a + 1; }\n"),
+            Some((100.0, 1))
+        );
+        std::fs::write(root.path().join("ShopTests.cs"), "class T { void B() {} }").unwrap();
+        assert!(cache
+            .lookup(&[&target], &scope(root.path(), 1, 2))
+            .is_empty());
+    }
+
+    #[test]
+    fn survivors_need_every_test_and_the_build_settings_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("cache");
+        let target = target(
+            root.path(),
+            "Shop.cs",
+            "class C {\n  int F(int a) { return a + 1; }\n}\n",
+        );
+        let outcomes = HashMap::from([(0, Outcome::Survived)]);
+        let mut cache = Cache::load(&dir);
+        cache.store(
+            &[&target],
+            &scope(root.path(), 1, 7),
+            &outcomes,
+            &KilledBy::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            cache.lookup(&[&target], &scope(root.path(), 1, 7)),
+            outcomes
+        );
+        assert!(cache
+            .lookup(&[&target], &scope(root.path(), 1, 8))
+            .is_empty());
+        assert!(cache
+            .lookup(&[&target], &scope(root.path(), 2, 7))
+            .is_empty());
+        // A changed function is a new entry.
+        let changed = target_with(&target, "class C {\n  int F(int a) { return a + 2; }\n}\n");
+        assert!(cache
+            .lookup(&[&changed], &scope(root.path(), 1, 7))
+            .is_empty());
+    }
+
+    fn target_with(old: &Target, source: &str) -> Target {
+        std::fs::write(&old.path, source).unwrap();
+        let mutants =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp).unwrap();
+        Target {
+            file: old.file.clone(),
+            path: old.path.clone(),
+            name: old.name.clone(),
+            start_line: 2,
+            end_line: 2,
+            complexity: 1,
+            reason: "selected",
+            mutants,
+            suppressions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn saving_keeps_what_another_run_saved_meanwhile() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("cache");
+        let one = target(
+            root.path(),
+            "One.cs",
+            "class C {\n  int F(int a) { return a + 1; }\n}\n",
+        );
+        let mut two = target(
+            root.path(),
+            "Two.cs",
+            "class C {\n  int F(int a) { return a * 2; }\n}\n",
+        );
+        two.mutants[0].id = 1;
+        let scope = scope(root.path(), 1, 1);
+        let mut first = Cache::load(&dir);
+        let mut second = Cache::load(&dir);
+        first.store(
+            &[&one],
+            &scope,
+            &HashMap::from([(0, Outcome::Survived)]),
+            &KilledBy::new(),
+            &HashMap::new(),
+        );
+        second.store(
+            &[&two],
+            &scope,
+            &HashMap::from([(1, Outcome::NoCoverage)]),
+            &KilledBy::new(),
+            &HashMap::new(),
+        );
+        first.save().unwrap();
+        second.save().unwrap();
+        let mut both = Cache::load(&dir);
+        assert_eq!(both.lookup(&[&one, &two], &scope).len(), 2);
+    }
+}

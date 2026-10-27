@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <Import Project="$(MSBuildThisFileDirectory)..\..\build\Shared.props" />
+
+  <Target Name="DgfCheckImports" BeforeTargets="Build" Condition="'$(DgfSampleProps)' != 'found' Or '$(DgfSharedProps)' != 'found'">
+    <Error Text="Directory.Build.props or build/Shared.props was not found" />
+  </Target>
+
+</Project>

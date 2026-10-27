@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dog-food complexity over time</title>
+<style>
+/*DGF_STYLE*/
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand"><span class="mark">dgf</span> dog-food</div>
+      <button class="ghost" id="theme" type="button">Switch theme</button>
+    </div>
+    <div class="hero-grid">
+      <div>
+        <p class="eyebrow">Complexity over time</p>
+        <h1 id="title">Where is this code heading?</h1>
+        <div class="meta" id="meta"></div>
+      </div>
+      <div class="verdict" id="verdict"></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="kpis" id="kpis" aria-label="Latest run compared with the first"></section>
+
+  <article class="card">
+    <div class="card-head">
+      <h2>Trends</h2>
+      <p>One point per saved run, oldest on the left</p>
+    </div>
+    <div id="single" class="note" hidden>Only one run is saved so far. Run <code>dgf analyze --save-history</code> again later to start the trend lines.</div>
+    <div class="small-multiples" id="trends"></div>
+  </article>
+
+  <article class="card">
+    <div class="card-head">
+      <h2>Biggest movers</h2>
+      <p id="movers-span">Score changes between the first and the latest run</p>
+    </div>
+    <div class="cols2">
+      <div>
+        <h3>Got more complex</h3>
+        <div class="table-wrap"><table><thead><tr><th class="num">Δ</th><th class="num">Score</th><th>Function</th></tr></thead><tbody id="worse"></tbody></table></div>
+      </div>
+      <div>
+        <h3>Got simpler</h3>
+        <div class="table-wrap"><table><thead><tr><th class="num">Δ</th><th class="num">Score</th><th>Function</th></tr></thead><tbody id="better"></tbody></table></div>
+      </div>
+    </div>
+  </article>
+
+  <article class="card">
+    <div class="card-head">
+      <h2>Runs</h2>
+      <p>Newest first</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>When</th><th>Commit</th><th>Branch</th><th class="num">Functions</th><th class="num">Highest</th><th class="num">Median</th><th class="num">Warn</th><th class="num">Fail</th><th>Result</th></tr>
+        </thead>
+        <tbody id="runs"></tbody>
+      </table>
+    </div>
+  </article>
+
+  <footer id="footer"></footer>
+</main>
+
+<div class="tip" id="tip" hidden></div>
+
+<script>
+const REPORT = /*DGF_DATA*/null;
+/*DGF_COMMON*/
+(function () {
+  "use strict";
+  if (!REPORT || !REPORT.runs.length) { document.body.textContent = "No saved runs. Save one with: dgf analyze --save-history"; return; }
+
+  const runs = REPORT.runs;
+  const first = runs[0], last = runs[runs.length - 1];
+  const F = first.summary, N = last.summary;
+  const day = s => new Date(s * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  const stamp = s => new Date(s * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const resultOf = s => s.fail > 0 ? "fail" : s.warn > 0 ? "warn" : "ok";
+
+  /* Header */
+  const debt = s => s.fail * 1000 + s.warn;
+  $("title").textContent = runs.length < 2 ? "The first snapshot is in"
+    : debt(N) < debt(F) ? "Getting simpler over time"
+    : debt(N) > debt(F) ? "Getting more tangled over time"
+    : "Holding steady";
+  const state = { fail: "fail", warn: "warn", ok: "pass" }[resultOf(N)];
+  verdictCard(state, `Latest run: ${{ fail: "failed", warn: "warnings", pass: "passed" }[state]}`,
+    `${N.fail} above fail · ${N.warn} above warn · ${plural(N.functions, "function")}`);
+  $("meta").innerHTML = [
+    `<span>${plural(runs.length, "saved run")}</span>`,
+    runs.length > 1 && `<span>${esc(day(first.generatedAt))} → ${esc(day(last.generatedAt))}</span>`,
+    last.commit && `<span>latest <code>${esc(last.commit)}</code>${last.branch ? ` on <code>${esc(last.branch)}</code>` : ""}</span>`,
+    `<span>limits: warn above ${N.limits.warn ?? "none"}, fail above ${N.limits.fail ?? "none"}</span>`,
+  ].filter(Boolean).join("");
+
+  /* Numbers: latest value, change since the first run */
+  const change = (now, then, upIsBad) => {
+    if (runs.length < 2) return "";
+    const d = now - then;
+    const tone = d === 0 || upIsBad == null ? "flat" : (d > 0) === upIsBad ? "up" : "down";
+    return `<span class="d ${tone}">${signed(d)} since first</span>`;
+  };
+  kpiStrip([
+    [N.functions.toLocaleString(), change(N.functions, F.functions, null), "functions"],
+    [N.maxComplexity, change(N.maxComplexity, F.maxComplexity, true), "highest score",
+      N.maxComplexity > (N.limits.fail ?? Infinity) ? "fail" : N.maxComplexity > (N.limits.warn ?? Infinity) ? "warn" : ""],
+    [N.medianComplexity, change(N.medianComplexity, F.medianComplexity, true), "median score"],
+    [N.warn, change(N.warn, F.warn, true), "above warn", N.warn ? "warn" : ""],
+    [N.fail, change(N.fail, F.fail, true), "above fail", N.fail ? "fail" : ""],
+    [N.totalComplexity.toLocaleString(), change(N.totalComplexity, F.totalComplexity, true), "total score"],
+  ]);
+  document.querySelectorAll("#kpis .kpi small").forEach(el => { el.style.display = "block"; el.style.marginLeft = "0"; });
+
+  /* Trends: small multiples with a shared run axis */
+  $("single").hidden = runs.length > 1;
+  const panels = [
+    { title: "Functions above the limits", series: [["above fail", s => s.fail, "var(--fail)"], ["above warn", s => s.warn, "var(--warn)"]] },
+    { title: "Highest and median score", series: [["highest", s => s.maxComplexity, "var(--ink)"], ["median", s => s.medianComplexity, "var(--accent)"]], limits: true },
+    { title: "Functions", series: [["functions", s => s.functions, "var(--accent)"]], area: true },
+    { title: "Total score (sum of all functions)", series: [["total", s => s.totalComplexity, "var(--accent)"]], area: true },
+  ];
+  $("trends").innerHTML = panels.map((panel, i) => `<div class="panel"><h3>${esc(panel.title)}</h3><div class="chart" id="trend-${i}"></div></div>`).join("");
+  panels.forEach((panel, i) => {
+    const W = 520, H = 190, L = 40, R = 86, T = 14, B = 30, pw = W - L - R, ph = H - T - B;
+    let most = Math.max(1, ...panel.series.flatMap(([, get]) => runs.map(r => get(r.summary))));
+    if (panel.limits && N.limits.fail != null) most = Math.max(most, N.limits.fail + 1);
+    const ticks = niceTicks(most, 4), top = ticks[ticks.length - 1];
+    const x = j => runs.length === 1 ? L + pw / 2 : L + (j / (runs.length - 1)) * pw;
+    const y = v => T + ph - (v / top) * ph;
+    let body = "";
+    ticks.forEach(t => {
+      body += `<line x1="${L}" x2="${L + pw}" y1="${y(t)}" y2="${y(t)}" stroke="var(--grid)"/>`;
+      body += `<text x="${L - 8}" y="${y(t) + 4}" text-anchor="end" font-size="11" fill="var(--faint)">${t.toLocaleString()}</text>`;
+    });
+    if (panel.limits && N.limits.fail != null) body += limitLine(L, y(N.limits.fail + 0.5), L + pw, y(N.limits.fail + 0.5), "fail", "", { x: 0, y: 0, align: "start" });
+    body += `<text x="${L}" y="${H - 8}" font-size="11" fill="var(--muted)">${esc(day(first.generatedAt))}</text>`;
+    if (runs.length > 1) body += `<text x="${L + pw}" y="${H - 8}" text-anchor="end" font-size="11" fill="var(--muted)">${esc(day(last.generatedAt))}</text>`;
+    const ends = [];
+    panel.series.forEach(([name, get, stroke]) => {
+      const pts = runs.map((r, j) => [x(j), y(get(r.summary))]);
+      const line = pts.map((p, j) => `${j ? "L" : "M"}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join("");
+      if (panel.area && pts.length > 1) body += `<path d="${line}L${pts[pts.length - 1][0]} ${T + ph}L${pts[0][0]} ${T + ph}Z" fill="${stroke}" opacity="0.12"/>`;
+      if (pts.length > 1) body += `<path d="${line}" fill="none" stroke="${stroke}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+      const end = pts[pts.length - 1];
+      body += `<circle cx="${end[0]}" cy="${end[1]}" r="4" fill="${stroke}" stroke="var(--surface)" stroke-width="1.5"/>`;
+      ends.push({ y: end[1], text: `${get(N).toLocaleString()} ${panel.series.length > 1 ? name : ""}`.trim(), stroke });
+    });
+    /* End labels, nudged apart when two series end close together. */
+    ends.sort((a, b) => a.y - b.y);
+    ends.forEach((e, k) => { if (k && e.y - ends[k - 1].y < 13) e.y = ends[k - 1].y + 13; });
+    ends.forEach(e => { body += `<text x="${L + pw + 8}" y="${e.y + 4}" font-size="11.5" font-weight="700" fill="${e.stroke}">${esc(e.text)}</text>`; });
+    /* Hover columns, one per run */
+    runs.forEach((r, j) => {
+      const half = runs.length === 1 ? pw / 2 : pw / (runs.length - 1) / 2;
+      const values = panel.series.map(([name, get]) => `${name}: ${get(r.summary).toLocaleString()}`).join("\n");
+      body += `<rect x="${x(j) - half}" y="${T}" width="${half * 2}" height="${ph}" fill="transparent" data-tip="${esc(`${stamp(r.generatedAt)}${r.commit ? ` · ${r.commit}` : ""}\n${values}`)}"/>`;
+    });
+    $(`trend-${i}`).innerHTML = svg(W, H, panel.title, body);
+  });
+
+  /* Movers */
+  const moverRow = m => `<tr>
+    <td class="num"><span class="delta ${m.delta > 0 ? "up" : "down"}">${signed(m.delta)}</span></td>
+    <td class="num"><span class="scorepair"><span class="was">${m.before ?? "–"} →</span> ${m.after ?? "–"}</span></td>
+    <td><div class="fn">${esc(m.name)}</div><div class="loc">${esc(m.file)}</div></td></tr>`;
+  const empty = text => `<tr><td colspan="3" class="empty">${text}</td></tr>`;
+  const worse = REPORT.movers.filter(m => m.delta > 0).slice(0, 15);
+  const better = REPORT.movers.filter(m => m.delta < 0).reverse().slice(0, 15);
+  $("worse").innerHTML = worse.map(moverRow).join("") || empty(runs.length > 1 ? "Nothing got more complex." : "Needs two runs.");
+  $("better").innerHTML = better.map(moverRow).join("") || empty(runs.length > 1 ? "Nothing got simpler yet." : "Needs two runs.");
+  if (runs.length > 1) $("movers-span").textContent = `Score changes from ${day(first.generatedAt)} to ${day(last.generatedAt)}; new functions count from 0, removed ones drop to 0`;
+
+  /* Runs */
+  $("runs").innerHTML = runs.slice().reverse().map(r => {
+    const s = r.summary, result = resultOf(s);
+    return `<tr class="${result === "ok" ? "" : result}">
+      <td>${esc(stamp(r.generatedAt))}</td>
+      <td class="loc">${esc(r.commit || "–")}</td>
+      <td class="loc">${esc(r.branch || "–")}</td>
+      <td class="num">${s.functions.toLocaleString()}</td>
+      <td class="num">${s.maxComplexity}</td>
+      <td class="num">${s.medianComplexity}</td>
+      <td class="num">${s.warn}</td>
+      <td class="num">${s.fail}</td>
+      <td><span class="pill ${result}">${result}</span></td></tr>`;
+  }).join("");
+
+  const warnings = REPORT.warnings || [];
+  $("footer").innerHTML = `
+    ${warnings.length ? `<p>${plural(warnings.length, "file")} in the history folder could not be read:</p><ul>${warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
+    <p>Each run is a snapshot saved by <code>dgf analyze --save-history</code>. Generated by ${esc(REPORT.tool.name)} ${esc(REPORT.tool.version)} with <code>dgf history --format html</code>.</p>`;
+})();
+</script>
+</body>
+</html>
