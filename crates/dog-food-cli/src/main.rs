@@ -549,10 +549,14 @@ fn mutation(args: MutateArgs) -> Result<ExitCode, Failure> {
         let (reports, _) = scan(&args.paths, std::mem::take(&mut settings.excludes))?;
         mutate::from_reports(&reports, args.min_complexity, display_path)
     };
-    let wanted = wanted
+    let found = wanted.len();
+    let wanted: Vec<mutate::Wanted> = wanted
         .into_iter()
         .filter(|w| !never.is_excluded(&w.path, false))
         .collect();
+    if !args.limits.no_config {
+        eprintln!("{}", config_used(&settings, found - wanted.len()));
+    }
     let (targets, warnings) =
         mutate::targets(wanted, &mutator_settings(&args, &settings)?).map_err(usage)?;
     let root = git::root(&settings.cwd).unwrap_or_else(|_| settings.cwd.clone());
@@ -564,6 +568,22 @@ fn mutation(args: MutateArgs) -> Result<ExitCode, Failure> {
     let text = mutate::render(&targets, args.out.format, args.show).map_err(usage)?;
     write_report(&text, &args.out)?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Which dgf.toml a mutation run follows and what its excludes left out, so
+/// a run that found none (a worktree of a branch older than the file, a
+/// command run from another folder) does not pass for one that did.
+fn config_used(settings: &Settings, left_out: usize) -> String {
+    match &settings.config_path {
+        Some(path) => format!(
+            "note: following {}; [mutate] exclude left out {left_out} functions",
+            path.display()
+        ),
+        None => format!(
+            "warning: no dgf.toml in {} or above it, so nothing is excluded and the defaults apply; run dgf inside the checkout that has one",
+            settings.cwd.display()
+        ),
+    }
 }
 
 /// Which mutants to make: `--level`, then `[mutate]` in dgf.toml.
