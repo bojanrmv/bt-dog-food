@@ -268,14 +268,17 @@ impl Located {
 pub fn locate(sandbox: &Path, base: &Path, files: &[FileMutants], errors: &[String]) -> Located {
     let locations: Vec<(PathBuf, usize, bool)> = errors
         .iter()
-        .filter_map(|e| error_location(e).map(|(path, line)| (path, line, is_flow_error(e))))
-        .map(|(path, line, flow)| (absolute(&base.join(path)), line, flow))
+        .filter_map(|e| {
+            let (path, line) = error_location(e)?;
+            Some((error_file(base, &path, e), line, is_flow_error(e)))
+        })
         .collect();
     let mut located = Located::default();
     for file in files {
         let path = absolute(&sandbox.join(&file.relative));
         let added = super::sandbox::added_lines(&file.relative);
-        for (_, line, flow) in locations.iter().filter(|(p, _, _)| *p == path) {
+        let named = |p: &PathBuf| *p == path || is_only_file_named(p, &file.relative, files);
+        for (_, line, flow) in locations.iter().filter(|(p, _, _)| named(p)) {
             let Some(line) = line.checked_sub(added).filter(|l| *l > 0) else {
                 continue;
             };
@@ -288,6 +291,38 @@ pub fn locate(sandbox: &Path, base: &Path, files: &[FileMutants], errors: &[Stri
     }
     located.suspects.retain(|id| !located.broken.contains(id));
     located
+}
+
+/// The file an error names. MSBuild gives a path relative to the project
+/// (named at the end of the line in `[...]`) when full paths are turned off.
+fn error_file(base: &Path, path: &Path, error: &str) -> PathBuf {
+    if path.is_absolute() {
+        return absolute(path);
+    }
+    let project = error
+        .rfind('[')
+        .and_then(|open| error[open + 1..].split(']').next())
+        .map(str::trim)
+        .filter(|p| p.ends_with("proj"))
+        .map(PathBuf::from);
+    match project.as_ref().and_then(|p| p.parent()) {
+        Some(folder) if folder.is_absolute() => absolute(&folder.join(path)),
+        _ => absolute(&base.join(path)),
+    }
+}
+
+/// An error that names only a file name, found under no project, still
+/// belongs to the one mutated file of that name.
+fn is_only_file_named(error_path: &Path, relative: &Path, files: &[FileMutants]) -> bool {
+    let Some(name) = relative.file_name() else {
+        return false;
+    };
+    let bare = error_path.file_name().is_some_and(|n| n == name) && !error_path.exists();
+    bare && files
+        .iter()
+        .filter(|f| f.relative.file_name() == Some(name))
+        .count()
+        == 1
 }
 
 /// Errors the compiler reports where a variable is used or a function ends,
@@ -374,6 +409,42 @@ mod tests {
             command.arg(seconds.to_string());
             command
         }
+    }
+
+    #[test]
+    fn errors_with_paths_relative_to_the_project_find_their_mutants() {
+        let dir = tempfile::tempdir().unwrap();
+        let sandbox = absolute(dir.path());
+        let source = "class P {\n  bool F(bool a, bool b) {\n    return a && b;\n  }\n}\n";
+        let mutants =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp).unwrap();
+        let files = vec![FileMutants {
+            relative: PathBuf::from("src/Shop/Features/Parser.cs"),
+            source: source.into(),
+            mutants,
+            functions: vec![(2, 4)],
+        }];
+        let project = sandbox.join("src/Shop/Shop.csproj");
+        let added = super::super::sandbox::added_lines(&files[0].relative);
+        let line = 4 + added;
+        let relative = format!(
+            "Features\\Parser.cs({line},12): error CS0165: Use of unassigned local variable 'n' [{}]",
+            project.display()
+        );
+        let bare =
+            format!("Parser.cs({line},12): error CS0165: Use of unassigned local variable 'n'");
+        for error in [relative, bare] {
+            let located = locate(&sandbox, &sandbox, &files, std::slice::from_ref(&error));
+            assert!(!located.is_empty(), "{error}");
+        }
+        assert_eq!(
+            error_file(
+                &sandbox,
+                Path::new("Features/Parser.cs"),
+                &format!("x [{}]", project.display())
+            ),
+            absolute(&sandbox.join("src/Shop/Features/Parser.cs"))
+        );
     }
 
     #[test]

@@ -48,6 +48,9 @@ pub struct Dotnet {
     /// successful build in this sandbox had the same.
     settings: u64,
     restored: AtomicBool,
+    /// Whether the projects with mutants were restored: one that no test
+    /// project uses is not part of the first build's restore.
+    mutated_restored: AtomicBool,
     /// Extra `dotnet build` arguments: `-m:N`, `-lowPriority`.
     build_args: Vec<String>,
 }
@@ -98,6 +101,7 @@ impl Dotnet {
                 std::fs::read_to_string(sandbox.join(RESTORED))
                     .is_ok_and(|t| t == format!("{settings:016x}")),
             ),
+            mutated_restored: AtomicBool::new(false),
             build_args,
         })
     }
@@ -278,6 +282,9 @@ impl Dotnet {
 /// errors: analyzers (source generators still run), warnings as errors,
 /// code-style enforcement, and the NuGet vulnerability audit.
 const SANDBOX_BUILD: &[&str] = &[
+    // Errors name files by their full path, so dgf can tell which mutant
+    // broke the build even where a repository turns full paths off.
+    "-p:GenerateFullPaths=true",
     "-p:RunAnalyzers=false",
     "-p:TreatWarningsAsErrors=false",
     "-p:EnforceCodeStyleInBuild=false",
@@ -302,7 +309,12 @@ impl Engine for Dotnet {
     /// the projects with mutants, which is where a mutant can break the build.
     fn build(&self, round: Round, budget: Budget) -> Result<(), BuildError> {
         if round == Round::Mutated {
-            return self.build_target(&self.mutated, false, true, budget);
+            let restore = !self.mutated_restored.load(Ordering::Relaxed);
+            let built = self.build_target(&self.mutated, restore, true, budget);
+            if built.is_ok() || matches!(&built, Err(BuildError::Errors(e)) if compiler_errors(e)) {
+                self.mutated_restored.store(true, Ordering::Relaxed);
+            }
+            return built;
         }
         let restore = !self.restored.load(Ordering::Relaxed);
         let built = self.build_target(&self.tests, restore, false, budget);
@@ -606,7 +618,7 @@ fn guid(text: &str) -> String {
 /// processes wait while one builds it.
 fn collector() -> Result<PathBuf, String> {
     let version = super::fnv(&[COLLECTOR_CS.as_bytes(), COLLECTOR_PROJECT.as_bytes()]);
-    let dir = std::env::temp_dir()
+    let dir = super::sandbox::temp_root()
         .join("dgf-mutate")
         .join(format!("collector-{version:016x}"));
     let dll = dir.join("out").join("DgfCollector.dll");

@@ -208,6 +208,14 @@ impl Engine for NodeTests {
         if status == TestRun::TimedOut && budget.spent() {
             return Ok(None);
         }
+        if report.outcome.is_empty() {
+            if let Some(failure) = &report.first_failure {
+                return Err(format!(
+                    "no test ran without mutants; the first test file that failed: {failure} (all results: {})",
+                    folder.join("report.json").display()
+                ));
+            }
+        }
         check_baseline(status, &report.outcome)?;
         let wall = started.elapsed();
         // Each name is stored twice (Vitest's and Jest's spelling).
@@ -401,6 +409,8 @@ struct Report {
     home: HashMap<String, String>,
     /// Test name → how long it ran.
     times: HashMap<String, Duration>,
+    /// The first test file that failed with no test reported, and why.
+    first_failure: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -414,6 +424,9 @@ struct JsonFile {
     name: String,
     #[serde(default, rename = "assertionResults")]
     tests: Vec<JsonTest>,
+    /// Why the file failed before its tests ran (an import, a setup file).
+    #[serde(default)]
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -437,6 +450,12 @@ impl Report {
             let home = Path::new(&file.name)
                 .strip_prefix(package)
                 .map_or(file.name.clone(), |p| p.to_string_lossy().into_owned());
+            if file.tests.is_empty() && !file.message.trim().is_empty() {
+                report.first_failure.get_or_insert_with(|| {
+                    let first = file.message.lines().next().unwrap_or_default().trim();
+                    format!("{home}: {first}")
+                });
+            }
             for test in file.tests {
                 report.add(&test, &home);
             }
@@ -461,6 +480,26 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_test_file_that_fails_to_load_is_named_with_its_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("src").join("case.spec.ts");
+        let json = serde_json::json!({ "testResults": [{
+            "name": file.to_string_lossy(),
+            "assertionResults": [],
+            "message": "Cannot find module 'C:/x/src/tests/setup.ts'\n    at resolve",
+        }]});
+        let path = dir.path().join("report.json");
+        std::fs::write(&path, json.to_string()).unwrap();
+        let report = Report::read(&path, dir.path());
+        assert!(report.outcome.is_empty());
+        let failure = report.first_failure.unwrap();
+        assert!(
+            failure.ends_with("case.spec.ts: Cannot find module 'C:/x/src/tests/setup.ts'"),
+            "{failure}"
+        );
+    }
 
     #[test]
     fn reports_store_both_test_name_styles() {

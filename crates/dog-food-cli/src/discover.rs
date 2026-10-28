@@ -128,6 +128,19 @@ pub(crate) fn absolute(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// Windows 8.3 short names (`C:\PROGRA~1`) come back long, as the
+    /// tools that run in a sandbox under %TEMP% see them.
+    #[cfg(windows)]
+    #[test]
+    fn short_names_resolve_to_long_ones() {
+        let short = Path::new(r"C:\PROGRA~1");
+        if !short.exists() {
+            eprintln!("skipped: no 8.3 names on this machine");
+            return;
+        }
+        assert_eq!(real(short), Some(PathBuf::from(r"C:\Program Files")));
+    }
+
     #[test]
     fn excludes_hold_through_a_link_to_the_folder() {
         let dir = tempfile::tempdir().unwrap();

@@ -256,8 +256,27 @@ fn mutation_runs_on_a_dotnet_solution() {
         outcome(&first, "Codes.Square/lambda@23:60", 23, "* -> /"),
         "killed"
     );
-    // The source generator behind [GeneratedRegex] still ran: nothing failed to build.
-    assert_eq!(first["tally"]["compileError"], 0, "{first}");
+    // The source generator behind [GeneratedRegex] still ran: nothing in
+    // Pricing failed to build. The only mutants that do not compile are the
+    // ones that leave an `out var` of a condition unassigned in its body
+    // (CS0165): found and left out, while the rest of the run goes on, even
+    // with a project no test uses (Other) built on its own.
+    let compile_errors = |function: &str| {
+        first["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["name"] == function)
+            .map(|f| f["tally"]["compileError"].as_u64().unwrap())
+            .sum::<u64>()
+    };
+    assert_eq!(compile_errors("Pricing.IsOrderCode"), 0, "{first}");
+    assert!(compile_errors("PayloadValueParser.TryParse") > 0, "{first}");
+    assert_eq!(
+        first["tally"]["compileError"].as_u64().unwrap(),
+        compile_errors("PayloadValueParser.TryParse"),
+        "{first}"
+    );
     // The guard clause's comment turns its statement mutant off, with its reason.
     let guard = mutant(
         &first,

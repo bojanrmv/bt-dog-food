@@ -196,9 +196,17 @@ fn sandbox_dir(root: &Path, kind: Kind) -> PathBuf {
         .take(24)
         .collect();
     let hash = super::fnv(&[root.to_string_lossy().as_bytes()]) as u32;
-    std::env::temp_dir()
+    temp_root()
         .join("dgf-mutate")
         .join(format!("{name}-{hash:08x}-{}", kind.folder()))
+}
+
+/// The temp folder by its full, real path: on Windows %TEMP% can be an 8.3
+/// short name (`C:\Users\BOJAN~1.PAV\...`), and tools that resolve the long
+/// name (Vite, Node) then fail to match paths under the short one.
+pub fn temp_root() -> PathBuf {
+    let temp = std::env::temp_dir();
+    crate::discover::real(&temp).unwrap_or(temp)
 }
 
 /// What the sandbox holds at a relative path.
