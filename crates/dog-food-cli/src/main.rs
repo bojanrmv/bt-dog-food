@@ -215,6 +215,11 @@ struct MutateArgs {
     /// With --run, test survivors again even when their code and tests did not change
     #[arg(long)]
     rerun_survivors: bool,
+    /// With --changes, also mutate the lines of other functions that hold a
+    /// string key a changed function holds (such as "MemberPlanId"); their
+    /// survivors are listed apart and left out of the score
+    #[arg(long, requires = "changes")]
+    neighbours: bool,
     /// With --run, give every mutant a test run of its own instead of packing several into one
     #[arg(long)]
     no_mix: bool,
@@ -624,9 +629,17 @@ fn mutation(args: MutateArgs) -> Result<ExitCode, Failure> {
     if !args.limits.no_config {
         scope.insert(0, config_used(&settings, found - wanted.len()));
     }
-    let (targets, warnings) =
+    let (mut targets, mut warnings) =
         mutate::targets(wanted, &mutator_settings(&args, &settings)?).map_err(usage)?;
     let root = git::root(&settings.cwd).unwrap_or_else(|_| settings.cwd.clone());
+    if args.neighbours {
+        let (near, line) = neighbour_targets(&targets, &root, &mut settings, &never)?;
+        let (more, more_warnings) =
+            mutate::targets(near, &mutator_settings(&args, &settings)?).map_err(usage)?;
+        targets.extend(more);
+        warnings.extend(more_warnings);
+        scope.push(line);
+    }
     mutate::check_named_tests(&targets, &root).map_err(usage)?;
     print_warnings(&warnings, args.out.format);
     if args.run {
@@ -635,6 +648,42 @@ fn mutation(args: MutateArgs) -> Result<ExitCode, Failure> {
     let text = mutate::render(&targets, args.out.format, args.show).map_err(usage)?;
     write_report(&with_scope(text, &scope, args.out.format), &args.out)?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// The functions next to the change: those that hold a string key one of
+/// `targets` holds, and the scope line that says so.
+fn neighbour_targets(
+    targets: &[mutate::Target],
+    root: &Path,
+    settings: &mut Settings,
+    never: &Excludes,
+) -> Result<(Vec<mutate::Wanted>, String), Failure> {
+    let keys = mutate::Keys::of(targets);
+    let taken = targets
+        .iter()
+        .map(|t| (t.file.clone(), t.start_line))
+        .collect();
+    let files = discover::discover(
+        &[root.to_path_buf()],
+        std::mem::take(&mut settings.excludes),
+    );
+    let near: Vec<mutate::Wanted> = mutate::neighbours(&files, root, &keys, &taken)
+        .into_iter()
+        .filter(|w| !never.is_excluded(&w.path, false))
+        .collect();
+    let shown: Vec<&str> = keys.literals.iter().take(5).map(String::as_str).collect();
+    let more = if keys.len() > shown.len() {
+        ", ..."
+    } else {
+        ""
+    };
+    let line = format!(
+        "neighbours: {} functions hold one of the change's {} string keys ({}{more})",
+        near.len(),
+        keys.len(),
+        shown.join(", ")
+    );
+    Ok((near, line))
 }
 
 /// What a mutation run covers, first: agents check it before trusting the

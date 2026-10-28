@@ -2,7 +2,7 @@
 //! them, and reports what the engine (`crate::mutation`) found when they ran.
 //! See docs/mutation-testing.md.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -58,6 +58,194 @@ pub enum Scope {
     Functions,
     /// Only mutants on changed lines.
     Lines,
+}
+
+/// Why a function is chosen when it is only next to the change: it holds a
+/// string key a changed function also holds. Its mutants are listed apart
+/// and left out of the score.
+pub const NEIGHBOUR: &str = "neighbour";
+
+/// The string keys of a change: quoted literals of three characters or more
+/// with a letter and only letters, digits and `_ . - :` (such as
+/// `"MemberPlanId"`), and the names of constants that hold one.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Keys {
+    pub literals: BTreeSet<String>,
+    pub names: BTreeSet<String>,
+    /// The languages of the change: keys are not looked for in others.
+    languages: Vec<Language>,
+}
+
+impl Keys {
+    /// The keys of `targets` (test code left out): the literals in the
+    /// functions, and the constants of their files that the functions use.
+    pub fn of(targets: &[Target]) -> Keys {
+        let mut keys = Keys::default();
+        let mut constants: BTreeMap<&PathBuf, Vec<(String, Vec<String>)>> = BTreeMap::new();
+        for t in targets
+            .iter()
+            .filter(|t| t.reason != NEIGHBOUR && !is_test_code(&t.path))
+        {
+            if let Some(language) = Language::from_path(&t.path) {
+                if !keys.languages.contains(&language) {
+                    keys.languages.push(language);
+                }
+            }
+            let file = constants
+                .entry(&t.path)
+                .or_insert_with(|| file_constants(&t.path));
+            let text = std::fs::read_to_string(&t.path).unwrap_or_default();
+            let body: Vec<&str> = text
+                .lines()
+                .skip(t.start_line.saturating_sub(1))
+                .take(t.end_line + 1 - t.start_line)
+                .collect();
+            for line in &body {
+                keys.literals.extend(literals(line));
+            }
+            for (name, held) in file.iter() {
+                if body.iter().any(|line| has_word(line, name)) {
+                    keys.names.insert(name.clone());
+                    keys.literals.extend(held.iter().cloned());
+                }
+            }
+        }
+        keys
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.literals.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.literals.len()
+    }
+
+    /// Whether `line` holds a key literal or names a constant that holds one.
+    fn in_line(&self, line: &str) -> bool {
+        self.literals.iter().any(|k| line.contains(k.as_str()))
+            || self.names.iter().any(|n| has_word(line, n))
+    }
+}
+
+/// The constants a file declares with a key: (name, its literals).
+fn file_constants(path: &Path) -> Vec<(String, Vec<String>)> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let held = literals(line);
+            let name = constant_name(line).filter(|_| !held.is_empty())?;
+            Some((name.to_string(), held))
+        })
+        .collect()
+}
+
+/// The quoted keys on a line, quotes included.
+fn literals(line: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for quote in ['"', '\''] {
+        let parts: Vec<&str> = line.split(quote).collect();
+        // Odd parts sit between a pair of quotes.
+        for inner in parts.iter().skip(1).step_by(2).take(parts.len() / 2) {
+            let is_key = inner.len() >= 3
+                && inner.chars().any(char::is_alphabetic)
+                && inner
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | ':'));
+            if is_key {
+                found.push(format!("{quote}{inner}{quote}"));
+            }
+        }
+    }
+    found
+}
+
+/// `X` in `const string X = "..."` (C#) or `const X = '...'` (TypeScript).
+fn constant_name(line: &str) -> Option<&str> {
+    let (before, _) = line.split_once('=')?;
+    let before = before.trim_end();
+    let declares = before
+        .split_whitespace()
+        .any(|w| w == "const" || w == "readonly");
+    let name = before
+        .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .next()?;
+    (declares && !name.is_empty()).then_some(name)
+}
+
+/// Whether `word` appears in `line` with no identifier character around it.
+fn has_word(line: &str, word: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    line.match_indices(word).any(|(at, _)| {
+        let before = line[..at].chars().next_back().is_none_or(|c| !ident(c));
+        let after = line[at + word.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !ident(c));
+        before && after
+    })
+}
+
+/// Functions in `files` (absolute paths) that hold one of `keys`, other
+/// than those in `taken` (file, first line), with only the lines that hold
+/// a key: the code that writes or reads the same keys as the change.
+pub fn neighbours(
+    files: &[PathBuf],
+    root: &Path,
+    keys: &Keys,
+    taken: &HashSet<(String, usize)>,
+) -> Vec<Wanted> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    files
+        .par_iter()
+        .filter(|path| !is_test_code(path))
+        .flat_map_iter(|path| {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            let found = keys.literals.iter().any(|k| text.contains(k.as_str()))
+                || keys.names.iter().any(|n| text.contains(n.as_str()));
+            let functions = Language::from_path(path)
+                .filter(|language| found && keys.languages.contains(language))
+                .and_then(|language| dog_food_core::analyze_source(&text, language).ok())
+                .unwrap_or_default();
+            let file = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let lines: Vec<&str> = text.lines().collect();
+            functions
+                .into_iter()
+                .filter(|f| !taken.contains(&(file.clone(), f.start_line)))
+                .filter_map(|f| {
+                    let holding: Vec<(usize, usize)> = (f.start_line..=f.end_line)
+                        .filter(|n| lines.get(n - 1).is_some_and(|l| keys.in_line(l)))
+                        .map(|n| (n, n))
+                        .collect();
+                    (!holding.is_empty()).then(|| Wanted {
+                        file: file.clone(),
+                        path: path.clone(),
+                        name: f.name,
+                        start_line: f.start_line,
+                        end_line: f.end_line,
+                        complexity: f.complexity,
+                        reason: NEIGHBOUR,
+                        lines: Some(holding),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The targets a score and exit code are about: not the neighbours.
+fn gated(targets: &[Target]) -> impl Iterator<Item = &Mutant> {
+    targets
+        .iter()
+        .filter(|t| t.reason != NEIGHBOUR)
+        .flat_map(|t| &t.mutants)
 }
 
 /// Every function in `reports` with at least `min_complexity`.
@@ -591,7 +779,7 @@ fn percent(score: Option<f64>) -> String {
 
 /// The overall mutation score, if any mutant counted.
 pub fn overall(targets: &[Target], result: &RunResult) -> Option<f64> {
-    tally(targets.iter().flat_map(|t| &t.mutants), result).score()
+    tally(gated(targets), result).score()
 }
 
 pub fn render_run(
@@ -928,7 +1116,7 @@ fn band(score: Option<f64>, thresholds: &Thresholds) -> String {
 }
 
 fn summary(targets: &[Target], result: &RunResult, thresholds: &Thresholds) -> String {
-    let n = tally(targets.iter().flat_map(|t| &t.mutants), result);
+    let n = tally(gated(targets), result);
     let sandboxes: Vec<String> = result
         .sandboxes
         .iter()
@@ -965,7 +1153,7 @@ fn run_json(targets: &[Target], result: &RunResult, thresholds: &Thresholds) -> 
         "schemaVersion": 4,
         "generatedAt": now(),
         "score": overall(targets, result),
-        "tally": tally(targets.iter().flat_map(|t| &t.mutants), result),
+        "tally": tally(gated(targets), result),
         "budgetHit": result.budget_hit(),
         "notes": result.notes,
         "timings": {
@@ -1005,9 +1193,37 @@ fn function_json(t: &Target, result: &RunResult) -> serde_json::Value {
     })
 }
 
+/// One survivor in the agent format: where, what, which tests reach it and
+/// what to assert.
+fn agent_survivor(out: &mut String, t: &Target, m: &Mutant, result: &RunResult) {
+    let _ = writeln!(
+        out,
+        "{}:{}:{} {} {} -> {} ({}) {}",
+        t.file,
+        m.line,
+        m.column,
+        t.name,
+        short(&m.original),
+        m.replacement,
+        m.mutator,
+        agent_why(result, m)
+    );
+    let tests = result.reached.get(&m.id).filter(|t| !t.is_empty());
+    let hint = if m.boundary_risk {
+        "a date boundary: the result on the boundary day itself (the off-by-one-day bug); never call this one equivalent"
+    } else {
+        assertion_hint(m.mutator)
+    };
+    let _ = writeln!(
+        out,
+        "  tests: {}\n  assert: {hint}",
+        tests.map_or_else(|| unreached_text(result, m), |t| t.join(", ")),
+    );
+}
+
 /// Compact text for AI assistants: the score, then every surviving mutant.
 fn run_agent(targets: &[Target], result: &RunResult) -> String {
-    let n = tally(targets.iter().flat_map(|t| &t.mutants), result);
+    let n = tally(gated(targets), result);
     let mut out = format!(
         "dgf mutate: score {} killed={} survived={} no_tests={} timeout={} compile_error={} runtime_error={} ignored={} untested={}\n",
         percent(n.score()),
@@ -1028,30 +1244,18 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
     out.push_str(
         "        then: tests that reach it (where a new assertion goes), and what to assert\n",
     );
-    for (t, m) in survivors(targets, result) {
-        let _ = writeln!(
-            out,
-            "{}:{}:{} {} {} -> {} ({}) {}",
-            t.file,
-            m.line,
-            m.column,
-            t.name,
-            short(&m.original),
-            m.replacement,
-            m.mutator,
-            agent_why(result, m)
-        );
-        let tests = result.reached.get(&m.id).filter(|t| !t.is_empty());
-        let hint = if m.boundary_risk {
-            "a date boundary: the result on the boundary day itself (the off-by-one-day bug); never call this one equivalent"
-        } else {
-            assertion_hint(m.mutator)
-        };
-        let _ = writeln!(
-            out,
-            "  tests: {}\n  assert: {hint}",
-            tests.map_or_else(|| unreached_text(result, m), |t| t.join(", ")),
-        );
+    let (neighbours, gate): (Vec<_>, Vec<_>) =
+        survivors(targets, result).partition(|(t, _)| t.reason == NEIGHBOUR);
+    for (t, m) in gate {
+        agent_survivor(&mut out, t, m, result);
+    }
+    if !neighbours.is_empty() {
+        out.push_str("
+## next to your change (--neighbours: code that holds a string key of a changed function; not in the score, yours to decide)
+");
+        for (t, m) in neighbours {
+            agent_survivor(&mut out, t, m, result);
+        }
     }
     let suppressed = suppressions_text(targets, "");
     if !suppressed.is_empty() {
@@ -1140,6 +1344,78 @@ mod tests {
             .find(|m| m["mutatorName"] == "relational")
             .unwrap();
         assert_eq!(relational["location"]["start"]["line"], 5);
+    }
+
+    #[test]
+    fn keys_are_quoted_names_and_the_constants_that_hold_them() {
+        assert_eq!(
+            literals(r#"input["MemberPlanId"] = id; log("saved it"); x = 'Ab';"#),
+            [r#""MemberPlanId""#]
+        );
+        assert_eq!(
+            constant_name(r#"    public const string MemberPlanKey = "MemberPlanId";"#),
+            Some("MemberPlanKey")
+        );
+        assert_eq!(constant_name(r#"    var key = "MemberPlanId";"#), None);
+        assert!(has_word(
+            "[WorkflowGymLookup.MemberPlanKey] = id",
+            "MemberPlanKey"
+        ));
+        assert!(!has_word("MemberPlanKeys.Add(x)", "MemberPlanKey"));
+    }
+
+    #[test]
+    fn neighbours_hold_a_key_of_the_change_on_their_own_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let lookup = root.join("Lookup.cs");
+        std::fs::write(
+            &lookup,
+            "class Lookup {
+  public const string PlanKey = \"MemberPlanId\";
+  object Read(Dictionary<string, object> input) {
+    return input[PlanKey];
+  }
+}
+",
+        )
+        .unwrap();
+        let handler = root.join("Handler.cs");
+        std::fs::write(
+            &handler,
+            "class Handler {
+  void Start(Dictionary<string, object> input, int id) {
+    var other = id + 1;
+    input[\"MemberPlanId\"] = id;
+  }
+  int Unrelated(int a) { return a * 2; }
+}
+",
+        )
+        .unwrap();
+        let wanted = Wanted {
+            file: "Lookup.cs".into(),
+            path: lookup.clone(),
+            name: "Lookup.Read".into(),
+            start_line: 3,
+            end_line: 5,
+            complexity: 1,
+            reason: "worse",
+            lines: None,
+        };
+        let (changed, _) = targets(vec![wanted], &Settings::default()).unwrap();
+        let keys = Keys::of(&changed);
+        assert!(keys.literals.contains(r#""MemberPlanId""#), "{keys:?}");
+        assert!(keys.names.contains("PlanKey"));
+        let taken = HashSet::from([("Lookup.cs".to_string(), 3)]);
+        let near = neighbours(&[lookup, handler], root, &keys, &taken);
+        assert_eq!(near.len(), 1);
+        assert_eq!(
+            (near[0].file.as_str(), near[0].name.as_str()),
+            ("Handler.cs", "Handler.Start")
+        );
+        assert_eq!(near[0].lines, Some(vec![(4, 4)]));
+        assert!(near.iter().all(|w| w.reason == NEIGHBOUR));
     }
 
     #[test]
