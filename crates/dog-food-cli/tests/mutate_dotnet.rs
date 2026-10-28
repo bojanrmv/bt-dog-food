@@ -439,15 +439,15 @@ fn mutation_runs_on_a_dotnet_solution() {
         outcome(&alone, "Pricing.Shipping", 21, "weight <= 0 -> false"),
         "killed"
     );
-    // One run per mutant, a crashed one included (an endless loop in a static
-    // initializer can crash the test host); a timeout is confirmed by a
-    // second, longer run.
+    // One run per mutant, a crashed one included, plus a second, longer run
+    // for each that timed out (a busy machine or an endless loop).
     let tally = |name: &str| alone["tally"][name].as_u64().unwrap();
     let tested = tally("killed") + tally("survived") + tally("timeout") + tally("runtimeError");
-    let runs = alone["timings"]["testRuns"].as_u64().unwrap();
-    assert!(
-        (tested..=tested + tally("timeout")).contains(&runs),
-        "{runs} runs for {tested} mutants: {alone}"
+    let retries = alone["timings"]["retries"].as_u64().unwrap();
+    assert_eq!(
+        alone["timings"]["testRuns"].as_u64().unwrap(),
+        tested + retries,
+        "{alone}"
     );
 
     // Two runs at once: a test filter, and the acceptance tests included.

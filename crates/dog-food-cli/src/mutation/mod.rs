@@ -183,6 +183,9 @@ pub struct RunResult {
     pub mutants: Duration,
     /// Test runs started for mutants (packs plus solo runs).
     pub test_runs: usize,
+    /// Of those, second runs of a solo run that timed out (a busy machine
+    /// or an endless loop: the second, longer run tells them apart).
+    pub retries: usize,
     /// Tests that fail without mutants, left out.
     pub set_aside: Vec<String>,
     /// Killed in a run whose tests did not all report (the test host crashed
@@ -477,6 +480,49 @@ fn note_left_out(scope: &Scope, targets: &[&Target], result: &mut RunResult) {
     }
 }
 
+/// A filter without `Project:` runs in every test project that uses the
+/// mutated code; the ones where it matched no test only cost a test host
+/// start each. Says which, and the flag when the filter is a project's name.
+fn note_idle_projects(scope: &Scope, reach: &Reach, options: &Options, result: &mut RunResult) {
+    let names: Vec<String> = scope.tests.iter().map(|t| t.name()).collect();
+    let global: Vec<&String> = options
+        .tests
+        .filters
+        .iter()
+        .filter(|f| {
+            f.split_once(':')
+                .is_none_or(|(project, _)| !names.iter().any(|n| n == project.trim()))
+        })
+        .collect();
+    if global.is_empty() {
+        return;
+    }
+    let idle: Vec<String> = scope
+        .tests
+        .iter()
+        .filter(|t| !reach.home.values().any(|home| *home == t.assembly))
+        .map(|t| t.name())
+        .collect();
+    if idle.is_empty() {
+        return;
+    }
+    let named = global
+        .iter()
+        .find(|f| names.iter().any(|n| n == f.trim()))
+        .map(|f| {
+            format!(
+                "; `{f}` is a test project's name: to run only that project, pass `--test-filter \"{}:FullyQualifiedName~.\"`",
+                f.trim()
+            )
+        })
+        .unwrap_or_default();
+    result.notes.push(format!(
+        "the test filter ({}) has no `Project:` prefix, so it ran in every test project that uses the mutated code; these ran no test under it and only cost a start each: {}{named}",
+        global.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", "),
+        idle.join(", ")
+    ));
+}
+
 /// Mutants no test reached under a test filter may only be outside the
 /// filter: a filter on a class or a file misses the sibling classes.
 fn note_filtered(targets: &[Target], options: &Options, result: &mut RunResult) {
@@ -659,7 +705,7 @@ fn run_language(
     result.prepare += started.elapsed();
     let built = Instant::now();
     progress(&format!(
-        "building the sandbox ({:.1} s so far)",
+        "building the sandbox (preparing it took {:.1} s)",
         secs(started)
     ));
     let mut status = build::build(&mut prepared, scope.kind, &mut result.outcomes, budget);
@@ -683,7 +729,8 @@ fn run_language(
         return Ok(cache::KilledBy::new());
     }
     progress(&format!(
-        "running the tests once to see which test reaches which mutant ({:.1} s so far)",
+        "running the tests once to see which test reaches which mutant (the build took {:.1} s; {:.1} s so far)",
+        secs(built),
         secs(started)
     ));
     let Some(mut reach) = prepared.engine.reach(budget)? else {
@@ -691,7 +738,12 @@ fn run_language(
         return Ok(cache::KilledBy::new());
     };
     result.baseline += reach.duration;
-    progress(&format!("baseline by test home: {}", home_times(&reach)));
+    progress(&format!(
+        "the tests took {:.1} s (test projects run side by side); by test home: {}",
+        reach.duration.as_secs_f64(),
+        home_times(&reach)
+    ));
+    note_idle_projects(scope, &reach, options, result);
     note_failing(&reach, result);
     reach.set_aside_failing();
     let tested = Instant::now();
@@ -870,7 +922,9 @@ fn test_mutants(
             killers.insert(id, killed_by);
         }
     }
-    result.test_runs += runner.finish();
+    let (started, again) = runner.finish();
+    result.test_runs += started;
+    result.retries += again;
     Ok(killers)
 }
 
@@ -902,7 +956,9 @@ fn run_packs(
             solo.extend(resolve(pack, reach, &run, &mut result.outcomes, killers));
         }
     }
-    result.test_runs += runner.finish();
+    let (started, again) = runner.finish();
+    result.test_runs += started;
+    result.retries += again;
     Ok(mutants
         .iter()
         .copied()
@@ -1006,6 +1062,7 @@ struct Runner<'a> {
     timeouts: Timeouts,
     pool: rayon::ThreadPool,
     done: std::sync::atomic::AtomicUsize,
+    again: std::sync::atomic::AtomicUsize,
 }
 
 impl<'a> Runner<'a> {
@@ -1025,6 +1082,7 @@ impl<'a> Runner<'a> {
             timeouts: options.timeouts,
             pool,
             done: std::sync::atomic::AtomicUsize::new(0),
+            again: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -1066,6 +1124,8 @@ impl<'a> Runner<'a> {
                     // (and at least 30 s more) also times out.
                     if matches!(&run, Ok(Ran::Done((TestRun::TimedOut, _)))) {
                         let longer = (limit * 4).max(limit + Duration::from_secs(30));
+                        self.again
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         run = solo(longer, &format!("s{id}-again"));
                     }
                     (id, run)
@@ -1094,13 +1154,14 @@ impl<'a> Runner<'a> {
         Ok(Ran::Done(ran))
     }
 
-    /// Ends the progress line; returns how many runs were started.
-    fn finish(self) -> usize {
+    /// Ends the progress line; returns how many runs were started and how
+    /// many of them were second runs after a timeout.
+    fn finish(self) -> (usize, usize) {
         let started = self.done.into_inner();
         if started > 0 {
             tellln!();
         }
-        started
+        (started, self.again.into_inner())
     }
 }
 
@@ -1186,6 +1247,24 @@ mod tests {
                 .map(|(id, tests)| (*id, tests.iter().map(|t| t.to_string()).collect()))
                 .collect(),
             ..Reach::default()
+        }
+    }
+
+    /// Options for a run in `root`, with every default.
+    fn options(root: &std::path::Path) -> Options {
+        Options {
+            root: root.to_path_buf(),
+            jobs: 1,
+            use_cache: false,
+            cache_dir: root.join(".cache"),
+            tests: TestSelection::default(),
+            sandbox: SandboxMode::Closure,
+            budget: Budget::default(),
+            timeouts: Timeouts::default(),
+            build_jobs: None,
+            low_priority: false,
+            rerun_survivors: false,
+            no_mix: false,
         }
     }
 
@@ -1413,20 +1492,7 @@ mod tests {
         )
         .unwrap();
         number(&mut targets);
-        let options = Options {
-            root: root.to_path_buf(),
-            jobs: 1,
-            use_cache: false,
-            cache_dir: root.join(".cache"),
-            tests: TestSelection::default(),
-            sandbox: SandboxMode::Closure,
-            budget: Budget::default(),
-            timeouts: Timeouts::default(),
-            build_jobs: None,
-            low_priority: false,
-            rerun_survivors: false,
-            no_mix: false,
-        };
+        let options = options(root);
         let mut result = RunResult::default();
         let kept = with_runner(targets.iter().collect(), &options, &mut result);
         assert_eq!(kept.len(), 1);
@@ -1440,6 +1506,43 @@ mod tests {
             result.notes,
             [format!("tools/b.mjs: no package.json with vitest or jest above it, so its {orphans} mutants were not tested")]
         );
+    }
+
+    #[test]
+    fn a_filter_without_a_project_names_the_projects_that_ran_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut scope = Scope::fixed(sandbox::Kind::CSharp, dir.path(), 1, 1);
+        scope.tests = [
+            "Shop.Workflows.Tests",
+            "Shop.Plans.Tests",
+            "Shop.Coaches.Tests",
+        ]
+        .iter()
+        .map(|name| projects::TestProject {
+            path: PathBuf::from(format!("{name}/{name}.csproj")),
+            assembly: name.to_string(),
+            filter: Some(name.to_string()),
+        })
+        .collect();
+        let mut reach = Reach::default();
+        reach
+            .home
+            .insert("W.one".into(), "Shop.Workflows.Tests".into());
+        let mut options = options(dir.path());
+        options.tests.filters = vec!["Shop.Workflows.Tests".into()];
+        let mut result = RunResult::default();
+        note_idle_projects(&scope, &reach, &options, &mut result);
+        let note = result.notes.join("\n");
+        assert!(note.contains("ran no test under it and only cost a start each: Shop.Plans.Tests, Shop.Coaches.Tests"), "{note}");
+        assert!(
+            note.contains(r#"--test-filter "Shop.Workflows.Tests:FullyQualifiedName~.""#),
+            "{note}"
+        );
+        // A filter for one project says nothing.
+        options.tests.filters = vec!["Shop.Workflows.Tests:Category=Fast".into()];
+        let mut quiet = RunResult::default();
+        note_idle_projects(&scope, &reach, &options, &mut quiet);
+        assert!(quiet.notes.is_empty());
     }
 
     #[test]

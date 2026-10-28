@@ -1217,6 +1217,7 @@ fn run_json(targets: &[Target], result: &RunResult, thresholds: &Thresholds) -> 
             "baselineMs": result.baseline.as_millis(),
             "mutantsMs": result.mutants.as_millis(),
             "testRuns": result.test_runs,
+            "retries": result.retries,
             "jobs": result.jobs,
             "fromCacheOf": result.timings_from,
         },
