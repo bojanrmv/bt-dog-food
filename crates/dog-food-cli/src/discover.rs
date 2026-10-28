@@ -149,7 +149,7 @@ mod tests {
         #[cfg(unix)]
         let linked = std::os::unix::fs::symlink(&real_root, &link);
         if linked.is_err() {
-            eprintln!("skipped: this machine cannot create symlinks");
+            tellln!("skipped: this machine cannot create symlinks");
             return;
         }
         // dgf.toml found through the link, files named by their real path (as git does).

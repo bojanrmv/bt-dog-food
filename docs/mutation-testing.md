@@ -60,6 +60,7 @@ sandbox = "closure"                                    # or "full"
 level = "standard"                                     # basic, standard (default), advanced
 ignore_mutators = ["string"]                           # by name, see Mutators
 ignore_methods = ["*Log*", "ToString", "ConfigureAwait", "Dispose"]
+skip_plain_constructors = true   # constructors that only store their arguments are not mutated
 thresholds = { high = 80, low = 60, break = 50 }       # below break: exit code 1
 timeout_factor = 1.5                                   # a test run hangs after (startup + its tests) x 1.5
 timeout_ms = 5000                                      # ... + 5 s
@@ -212,7 +213,7 @@ mutation score 14% · 3 killed, 5 survived, 14 no tests, 0 timeout, 0 did not co
 | no tests | no test reaches this code | not detected |
 | did not compile | removed before testing | left out |
 | crashed the test run | the test run ended before the tests it was meant to run reported | left out |
-| ignored | a `dgf-disable` comment, `ignore_methods` or `[ExcludeFromCodeCoverage]`; never tested | left out |
+| ignored | a `dgf-disable` comment, `ignore_methods`, `skip_plain_constructors` or `[ExcludeFromCodeCoverage]`; never tested | left out |
 | not tested | `--max-minutes` ran out first | left out |
 
 Score = detected ÷ (detected + survived + no tests), per function and overall.

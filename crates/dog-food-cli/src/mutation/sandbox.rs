@@ -161,7 +161,7 @@ fn claim(root: &Path, kind: Kind) -> Result<Sandbox, String> {
             return Ok(Sandbox { dir, _lock: lock });
         }
     }
-    eprintln!("  every sandbox is in use by other dgf runs; waiting for one...");
+    tellln!("  every sandbox is in use by other dgf runs; waiting for one...");
     let dir = slot(0);
     let lock = lock_file(&dir)?;
     lock.lock().map_err(|err| err.to_string())?;

@@ -240,6 +240,61 @@ pub fn neighbours(
         .collect()
 }
 
+/// Why a plain constructor's mutants are not tested.
+const PLAIN_CONSTRUCTOR: &str =
+    "a constructor that only stores its arguments ([mutate] skip_plain_constructors)";
+
+/// Marks the mutants of C# constructors that only store their arguments
+/// (`_repo = repo;`, `this.log = log ?? throw ...;`) as ignored: every test
+/// that uses the object fails without them, so they cost a run and say
+/// nothing.
+pub fn skip_plain_constructors(targets: &mut [Target]) {
+    for target in targets.iter_mut() {
+        let text = std::fs::read_to_string(&target.path).unwrap_or_default();
+        let body: Vec<&str> = text
+            .lines()
+            .skip(target.start_line.saturating_sub(1))
+            .take(target.end_line + 1 - target.start_line)
+            .collect();
+        if !is_constructor(&target.name) || !only_stores(&body) {
+            continue;
+        }
+        for mutant in target.mutants.iter_mut().filter(|m| m.ignored.is_none()) {
+            mutant.ignored = Some(PLAIN_CONSTRUCTOR.into());
+        }
+    }
+}
+
+/// `Type.Type`: how C# constructors are named.
+fn is_constructor(name: &str) -> bool {
+    let mut parts = name.rsplit('.');
+    matches!((parts.next(), parts.next()), (Some(a), Some(b)) if a == b)
+}
+
+/// Whether every statement in a constructor's body, after its `{`, stores a
+/// name in a field: `x = y;`, `this.x = y;`, `x = y ?? throw ...;`.
+fn only_stores(lines: &[&str]) -> bool {
+    let Some(open) = lines.iter().position(|l| l.contains('{')) else {
+        return false;
+    };
+    let after = lines[open].split_once('{').map_or("", |(_, rest)| rest);
+    let statements: Vec<&str> = std::iter::once(after)
+        .chain(lines[open + 1..].iter().copied())
+        .map(|l| l.trim().trim_end_matches('}').trim())
+        .filter(|l| !l.is_empty() && !l.starts_with("//"))
+        .collect();
+    let name = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_');
+    let stores = |line: &str| {
+        let Some((field, value)) = line.trim_end_matches(';').split_once(" = ") else {
+            return false;
+        };
+        let field = field.trim().trim_start_matches("this.");
+        let value = value.split(" ?? throw ").next().unwrap_or("").trim();
+        line.ends_with(';') && name(field) && name(value)
+    };
+    !statements.is_empty() && statements.iter().all(|l| stores(l))
+}
+
 /// The targets a score and exit code are about: not the neighbours.
 fn gated(targets: &[Target]) -> impl Iterator<Item = &Mutant> {
     targets
@@ -1357,10 +1412,7 @@ mod tests {
             Some("MemberPlanKey")
         );
         assert_eq!(constant_name(r#"    var key = "MemberPlanId";"#), None);
-        assert!(has_word(
-            "[WorkflowGymLookup.MemberPlanKey] = id",
-            "MemberPlanKey"
-        ));
+        assert!(has_word("[InputKeys.MemberPlanKey] = id", "MemberPlanKey"));
         assert!(!has_word("MemberPlanKeys.Add(x)", "MemberPlanKey"));
     }
 
@@ -1416,6 +1468,28 @@ mod tests {
         );
         assert_eq!(near[0].lines, Some(vec![(4, 4)]));
         assert!(near.iter().all(|w| w.reason == NEIGHBOUR));
+    }
+
+    #[test]
+    fn constructors_that_only_store_their_arguments_are_plain() {
+        assert!(is_constructor("Orders.Handler.Handler"));
+        assert!(!is_constructor("Handler.Handle"));
+        let plain = [
+            "public Handler(IRepo repo, ILogger log)",
+            "{",
+            "    _repo = repo;",
+            "    this._log = log ?? throw new ArgumentNullException(nameof(log));",
+            "}",
+        ];
+        assert!(only_stores(&plain));
+        let busy = [
+            "public Handler(IRepo repo) {",
+            "    _repo = repo;",
+            "    _cache = repo.Load();",
+            "}",
+        ];
+        assert!(!only_stores(&busy));
+        assert!(!only_stores(&["public Handler() { }"]));
     }
 
     #[test]

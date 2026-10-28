@@ -1,3 +1,31 @@
+// Console output that a closed pipe (dgf ... | head) does not stop: the
+// run goes on and still writes its report and cache. Defined before the
+// modules so they can use them.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout(), $($arg)*);
+    }};
+}
+macro_rules! sayln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+macro_rules! tell {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stderr(), $($arg)*);
+    }};
+}
+macro_rules! tellln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod baseline;
 mod changes;
 mod config;
@@ -286,7 +314,7 @@ fn main() -> ExitCode {
         Command::Init => init(),
     };
     result.unwrap_or_else(|(code, message)| {
-        eprintln!("error: {message}");
+        tellln!("error: {message}");
         ExitCode::from(code)
     })
 }
@@ -334,7 +362,7 @@ fn init() -> Result<ExitCode, Failure> {
     }
     std::fs::write(path, config::TEMPLATE)
         .map_err(|err| io(format!("could not write {}: {err}", path.display())))?;
-    println!("Created {}", config::FILE_NAME);
+    sayln!("Created {}", config::FILE_NAME);
     Ok(ExitCode::SUCCESS)
 }
 
@@ -589,7 +617,7 @@ fn accept(args: BaselineArgs) -> Result<ExitCode, Failure> {
         .unwrap_or_else(|| settings.config_dir.join(baseline::DEFAULT_FILE));
     baseline.save(&path).map_err(io)?;
     print_warnings(&warnings, Format::Table);
-    println!(
+    sayln!(
         "Accepted {} functions above the limits in {}. Later runs ignore them until their score goes up.",
         baseline.functions.len(),
         display_path(&path.to_string_lossy())
@@ -631,6 +659,9 @@ fn mutation(args: MutateArgs) -> Result<ExitCode, Failure> {
     }
     let (mut targets, mut warnings) =
         mutate::targets(wanted, &mutator_settings(&args, &settings)?).map_err(usage)?;
+    if settings.config.mutate.skip_plain_constructors {
+        mutate::skip_plain_constructors(&mut targets);
+    }
     let root = git::root(&settings.cwd).unwrap_or_else(|_| settings.cwd.clone());
     if args.neighbours {
         let (near, line) = neighbour_targets(&targets, &root, &mut settings, &never)?;
@@ -691,7 +722,7 @@ fn neighbour_targets(
 fn with_scope(text: String, scope: &[String], format: Format) -> String {
     if format != Format::Agent {
         for line in scope {
-            eprintln!("{line}");
+            tellln!("{line}");
         }
         return text;
     }
@@ -815,7 +846,7 @@ fn run_mutants(
         .filter(|t| !mutation::runnable(&t.path))
         .count();
     if others > 0 {
-        eprintln!("note: {others} Rust functions are skipped; use cargo-mutants for Rust");
+        tellln!("note: {others} Rust functions are skipped; use cargo-mutants for Rust");
     }
     targets.retain(|t| mutation::runnable(&t.path) && !t.mutants.is_empty());
     if targets.is_empty() {
@@ -828,7 +859,7 @@ fn run_mutants(
         mutation::priority::lower().map_err(usage)?;
     }
     let count: usize = targets.iter().map(|t| t.mutants.len()).sum();
-    eprintln!("Testing {count} mutants in {} functions...", targets.len());
+    tellln!("Testing {count} mutants in {} functions...", targets.len());
     let result = mutation::run(&mut targets, &options).map_err(usage)?;
     let mut thresholds = settings.config.mutate.thresholds;
     thresholds.fail = args.fail_under.or(thresholds.fail);
@@ -956,11 +987,11 @@ fn hook(action: HookAction) -> Result<ExitCode, Failure> {
     match action {
         HookAction::Install { force } => {
             let path = setup::install_hook(&root, force).map_err(usage)?;
-            println!("Installed {}: commits that add or worsen functions above the fail limit are blocked.", path.display());
+            sayln!("Installed {}: commits that add or worsen functions above the fail limit are blocked.", path.display());
         }
         HookAction::Uninstall => {
             let path = setup::uninstall_hook(&root).map_err(usage)?;
-            println!("Removed {}", path.display());
+            sayln!("Removed {}", path.display());
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -969,13 +1000,13 @@ fn hook(action: HookAction) -> Result<ExitCode, Failure> {
 /// `dgf skill install|show`
 fn skill(action: SkillAction) -> Result<ExitCode, Failure> {
     let SkillAction::Install { global } = action else {
-        print!("{}", setup::SKILL);
+        say!("{}", setup::SKILL);
         return Ok(ExitCode::SUCCESS);
     };
     let cwd = std::env::current_dir().map_err(|err| io(err.to_string()))?;
     let root = git::root(&cwd).unwrap_or(cwd);
     let path = setup::install_skill(&root, global).map_err(io)?;
-    println!(
+    sayln!(
         "Installed the dog-food skill at {}",
         display_path(&path.to_string_lossy())
     );
@@ -988,7 +1019,7 @@ fn save_history(run: &Run, config_dir: &Path, dir: &Path) -> Result<(), Failure>
         .unwrap_or((None, None));
     let snapshot = history::Snapshot::from_run(run, report::now(), commit, branch);
     let path = history::save(dir, &snapshot).map_err(io)?;
-    eprintln!(
+    tellln!(
         "Saved history snapshot {}",
         display_path(&path.to_string_lossy())
     );
@@ -998,12 +1029,12 @@ fn save_history(run: &Run, config_dir: &Path, dir: &Path) -> Result<(), Failure>
 /// Prints the report, or writes it to `--output`.
 fn write_report(text: &str, out: &OutputArgs) -> Result<(), Failure> {
     let Some(path) = &out.output else {
-        print!("{text}");
+        say!("{text}");
         return Ok(());
     };
     std::fs::write(path, text)
         .map_err(|err| io(format!("could not write {}: {err}", path.display())))?;
-    eprintln!("Wrote {} report to {}", out.format.name(), path.display());
+    tellln!("Wrote {} report to {}", out.format.name(), path.display());
     Ok(())
 }
 
@@ -1012,7 +1043,7 @@ fn write_report(text: &str, out: &OutputArgs) -> Result<(), Failure> {
 fn print_warnings(warnings: &[String], format: Format) {
     if matches!(format, Format::Table | Format::Markdown | Format::Html) {
         for warning in warnings {
-            eprintln!("warning: {warning}");
+            tellln!("warning: {warning}");
         }
     }
 }

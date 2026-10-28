@@ -440,6 +440,7 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
         );
         note_left_out(&scope, &pending, &mut result);
     }
+    note_filtered(targets, options, &mut result);
     timings(targets, options, &mut cache, &mut result);
     cache.save()?;
     Ok(result)
@@ -469,6 +470,25 @@ fn note_left_out(scope: &Scope, targets: &[&Target], result: &mut RunResult) {
             "{unreached} mutants no test reaches, but these test projects use the mutated code and did not run (test_projects, exclude_test_projects or a filter for another project): {}; their tests may reach them. To run them with the others: {} (narrow each filter as needed)",
             scope.left_out.join(", "),
             flags.join(" ")
+        ));
+    }
+}
+
+/// Mutants no test reached under a test filter may only be outside the
+/// filter: a filter on a class or a file misses the sibling classes.
+fn note_filtered(targets: &[Target], options: &Options, result: &mut RunResult) {
+    if options.tests.filters.is_empty() {
+        return;
+    }
+    let unreached = targets
+        .iter()
+        .flat_map(|t| &t.mutants)
+        .filter(|m| result.outcomes.get(&m.id) == Some(&Outcome::NoCoverage))
+        .count();
+    if unreached > 0 {
+        result.notes.push(format!(
+            "{unreached} mutants no test reached under the test filter ({}); a filter on one class or file misses tests in sibling classes (OrderSenderTests next to OrderTests): widen it to the namespace before writing tests for them",
+            options.tests.filters.join(", ")
         ));
     }
 }
@@ -668,6 +688,7 @@ fn run_language(
         return Ok(cache::KilledBy::new());
     };
     result.baseline += reach.duration;
+    progress(&format!("baseline by test home: {}", home_times(&reach)));
     note_failing(&reach, result);
     reach.set_aside_failing();
     let tested = Instant::now();
@@ -688,12 +709,40 @@ fn run_language(
     Ok(killer_files(killers, &reach))
 }
 
+/// Each test home's (project or file) time in the baseline run, slowest
+/// first: its tests plus its startup. Shows which project a long run waits on.
+fn home_times(reach: &Reach) -> String {
+    let mut by_home: HashMap<&str, Duration> = HashMap::new();
+    for (test, time) in &reach.times {
+        if let Some(home) = reach.home.get(test) {
+            *by_home.entry(home.as_str()).or_default() += *time;
+        }
+    }
+    for (home, startup) in &reach.startup {
+        *by_home.entry(home.as_str()).or_default() += *startup;
+    }
+    let mut homes: Vec<(&str, Duration)> = by_home.into_iter().collect();
+    homes.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let shown: Vec<String> = homes
+        .iter()
+        .take(8)
+        .map(|(home, time)| format!("{home} {:.1} s", time.as_secs_f64()))
+        .collect();
+    let more = homes.len().saturating_sub(shown.len());
+    let tail = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    format!("{}{tail}", shown.join(", "))
+}
+
 fn note_failing(reach: &Reach, result: &mut RunResult) {
     if reach.failing.is_empty() {
         return;
     }
     let names: Vec<&String> = reach.failing.iter().take(5).collect();
-    eprintln!(
+    tellln!(
         "note: {} tests fail without any mutant and are left out: {names:?}",
         reach.failing.len()
     );
@@ -725,7 +774,7 @@ fn killer_files(killers: HashMap<usize, Vec<String>>, reach: &Reach) -> cache::K
 
 /// One line on stderr, so a long run shows where it is.
 fn progress(step: &str) {
-    eprintln!("  {step}...");
+    tellln!("  {step}...");
 }
 
 fn secs(since: Instant) -> f64 {
@@ -1031,7 +1080,7 @@ impl<'a> Runner<'a> {
         }
         let ran = run(self.budget.limit(limit))?;
         let n = self.done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        eprint!("\r  test runs finished: {n}");
+        tell!("\r  test runs finished: {n}");
         if timed_out(&ran) && self.budget.spent() {
             return Ok(Ran::Skipped);
         }
@@ -1042,7 +1091,7 @@ impl<'a> Runner<'a> {
     fn finish(self) -> usize {
         let started = self.done.into_inner();
         if started > 0 {
-            eprintln!();
+            tellln!();
         }
         started
     }
@@ -1384,6 +1433,23 @@ mod tests {
             result.notes,
             [format!("tools/b.mjs: no package.json with vitest or jest above it, so its {orphans} mutants were not tested")]
         );
+    }
+
+    #[test]
+    fn baseline_times_add_up_per_test_home_slowest_first() {
+        let mut reach = Reach::default();
+        for (test, home, ms) in [
+            ("A.one", "Fast.Tests", 100),
+            ("B.one", "Slow.Tests", 900),
+            ("B.two", "Slow.Tests", 600),
+        ] {
+            reach.home.insert(test.into(), home.into());
+            reach.times.insert(test.into(), Duration::from_millis(ms));
+        }
+        reach
+            .startup
+            .insert("Fast.Tests".into(), Duration::from_millis(400));
+        assert_eq!(home_times(&reach), "Slow.Tests 1.5 s, Fast.Tests 0.5 s");
     }
 
     #[test]

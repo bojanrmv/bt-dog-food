@@ -74,6 +74,8 @@ warn = 10
 # ignore_mutators = ["string"]
 # Calls left alone with everything inside them; `*` stays within one name part.
 # ignore_methods = ["*Log*", "ToString", "ConfigureAwait", "Dispose"]
+# Leave out constructors that only store their arguments (dependency injection).
+# skip_plain_constructors = true
 # A test run hangs after (startup + its tests' time without mutants) x factor + ms.
 # timeout_factor = 1.5
 # timeout_ms = 5000
@@ -119,6 +121,9 @@ pub struct MutateConfig {
     pub ignore_mutators: Vec<String>,
     /// Calls left alone with everything inside them.
     pub ignore_methods: Vec<String>,
+    /// Constructors that only store their arguments in fields are not
+    /// mutated: a removed assignment fails every test that uses the object.
+    pub skip_plain_constructors: bool,
     /// A test run hangs after (startup + its tests' time) × `timeout_factor`
     /// + `timeout_ms`; defaults 1.5 and 5000.
     pub timeout_ms: Option<u64>,

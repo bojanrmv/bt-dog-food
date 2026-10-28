@@ -247,7 +247,7 @@ fn give_up(
         .flatten()
         .map(|(_, m)| m.id)
         .collect();
-    eprintln!(
+    tellln!(
         "note: {} suspected mutants were not isolated and count as not compiling",
         unresolved.len()
     );
