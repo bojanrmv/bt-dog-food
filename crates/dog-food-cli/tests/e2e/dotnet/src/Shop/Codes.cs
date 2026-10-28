@@ -8,9 +8,9 @@ public static class Codes
     private static List<int> Build()
     {
         var list = new List<int>();
-        for (var i = 0; i < 3; i++)
+        foreach (var step in new[] { 0, 1, 2 })
         {
-            list.Add(i * 10);
+            list.Add(step * 10);
         }
         return list;
     }
