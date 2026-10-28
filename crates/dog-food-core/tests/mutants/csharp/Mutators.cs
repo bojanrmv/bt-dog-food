@@ -539,4 +539,16 @@ second");
     public void VoidArrow() => _count++;
 
     private void Save(int value) => _count = value;
+
+    // A block that already returns null or default is not replaced by {return default;}.
+    public string? Missing(bool known)
+    {
+        // mutant: condition known -> false
+        // mutant: negate known -> !(known)
+        if (known)
+        {
+            return null;
+        }
+        return default;
+    }
 }

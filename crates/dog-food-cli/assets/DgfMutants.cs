@@ -7,9 +7,9 @@
 //   DGF_PLAN    file of "test<TAB>mutant id" lines: a different mutant per test
 //   DGF_REACH   folder: write "test<TAB>mutant id" for every switch reached;
 //               the test is empty outside any test and inside a static
-//               constructor, a field initializer or a lazy cache's factory,
-//               which run once, in whichever test comes first, for every test
-//               after it
+//               constructor, a field initializer, a lazy cache's factory or
+//               EF Core's OnModelCreating, which run once, in whichever test
+//               comes first, for every test after it
 // </auto-generated>
 #nullable disable
 #pragma warning disable
@@ -84,10 +84,16 @@ namespace DogFood.Mutation
             return false;
         }
 
-        /// The framework's caches that run a factory once per key or value:
-        /// ConditionalWeakTable, Lazy, LazyInitializer and ConcurrentDictionary.GetOrAdd.
+        /// Code that runs once per key or value and is cached for every caller
+        /// after: ConditionalWeakTable, Lazy, LazyInitializer,
+        /// ConcurrentDictionary.GetOrAdd, IMemoryCache.GetOrCreate, and EF
+        /// Core building a context's model (OnModelCreating, once per process).
         private static bool FillsLazily(System.Reflection.MethodBase method)
         {
+            if (method.Name == "OnModelCreating")
+            {
+                return true;
+            }
             var type = method.DeclaringType;
             if (type == null)
             {
@@ -99,9 +105,12 @@ namespace DogFood.Mutation
                 case "System.Runtime.CompilerServices.ConditionalWeakTable`2":
                 case "System.Lazy`1":
                 case "System.Threading.LazyInitializer":
+                case "Microsoft.EntityFrameworkCore.Infrastructure.ModelSource":
                     return true;
                 case "System.Collections.Concurrent.ConcurrentDictionary`2":
                     return method.Name == "GetOrAdd";
+                case "Microsoft.Extensions.Caching.Memory.CacheExtensions":
+                    return method.Name.StartsWith("GetOrCreate");
                 default:
                     return false;
             }

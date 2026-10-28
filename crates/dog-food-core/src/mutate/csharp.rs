@@ -1052,7 +1052,7 @@ fn block<'t>(node: Node<'t>, src: &[u8], found: &mut Vec<Found<'t>>) {
     }
     let function = enclosing_function(node);
     let replacement = block_replacement(node, function, src);
-    if unassigns(node, function, replacement, src) {
+    if unassigns(node, function, replacement, src) || already_default(node, replacement, src) {
         return;
     }
     found.push(Found::new("block", node, replacement).switched_as_statement());
@@ -1068,6 +1068,31 @@ fn unassigns(node: Node, function: Option<Node>, replacement: &str, src: &[u8]) 
     replacement == "{}"
         && ((has_kind_outside_functions_any(node, JUMPS) && guards_assignment(node, src))
             || assigns_for_later(node, src))
+}
+
+/// `{ return null; }` or `{ return default; }` as `{return default;}`: the
+/// same value (null is the default of every type that can hold it), so the
+/// mutant could never be caught.
+fn already_default(node: Node, replacement: &str, src: &[u8]) -> bool {
+    if replacement != "{return default;}" {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let statements: Vec<Node> = node
+        .named_children(&mut cursor)
+        .filter(|c| !c.kind().contains("comment"))
+        .collect();
+    let [only] = statements.as_slice() else {
+        return false;
+    };
+    let value = only
+        .named_child(0)
+        .map(|v| text(v, src).split_whitespace().collect::<String>());
+    only.kind() == "return_statement"
+        && matches!(
+            value.as_deref(),
+            Some("null" | "default" | "default!" | "null!")
+        )
 }
 
 fn has_statements(node: Node) -> bool {
