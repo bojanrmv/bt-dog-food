@@ -50,6 +50,9 @@ pub struct Cache {
     /// Entries this run read or wrote: saved over what is on disk.
     #[serde(skip)]
     touched: HashSet<String>,
+    /// This run tests survivors again (`--rerun-survivors`).
+    #[serde(skip)]
+    pub rerun: bool,
 }
 
 /// How long the phases of a run took, so a later run that takes every
@@ -99,6 +102,10 @@ struct CachedMutant {
     /// survivor still says where a new assertion goes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     reached_tests: Vec<String>,
+    /// A survivor that `--rerun-survivors` tested again against these tests:
+    /// testing it once more would say the same.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    rechecked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +168,16 @@ impl Cache {
             .collect()
     }
 
+    /// Survivors whose result still holds and that `--rerun-survivors`
+    /// already tested again against these tests.
+    pub fn rechecked(&mut self, targets: &[&Target], scope: &Scope) -> HashSet<usize> {
+        self.hits(targets, scope)
+            .into_iter()
+            .filter(|(_, c)| c.rechecked)
+            .map(|(id, _)| id)
+            .collect()
+    }
+
     /// The cached results that still hold, by mutant id.
     fn hits(&mut self, targets: &[&Target], scope: &Scope) -> HashMap<usize, CachedMutant> {
         let mut found = HashMap::new();
@@ -219,6 +236,7 @@ impl Cache {
                         .map(|files| files.iter().cloned().collect())
                         .unwrap_or_default();
                     entry.reached_tests = reached_tests.get(&m.id).cloned().unwrap_or_default();
+                    entry.rechecked = self.rerun && outcome.undetected();
                     Some(entry)
                 })
                 .collect();
@@ -334,6 +352,7 @@ fn cached(
         tests: needs_all_tests.then_some(scope.test_set),
         reached: Vec::new(),
         reached_tests: Vec::new(),
+        rechecked: false,
     }
 }
 
@@ -562,6 +581,43 @@ mod tests {
         let changed = target_with(&target, "class C {\n  int F(int a) { return a + 2; }\n}\n");
         assert!(cache
             .lookup(&[&changed], &scope(root.path(), 1, 7))
+            .is_empty());
+    }
+
+    #[test]
+    fn a_survivor_rechecked_against_the_same_tests_is_not_rechecked_again() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("cache");
+        let target = target(
+            root.path(),
+            "Shop.cs",
+            "class C {\n  int F(int a) { return a + 1; }\n}\n",
+        );
+        let survived = HashMap::from([(0, Outcome::Survived)]);
+        let store = |cache: &mut Cache, test_set| {
+            cache.store(
+                &[&target],
+                &scope(root.path(), 1, test_set),
+                &survived,
+                &KilledBy::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+        };
+        let mut cache = Cache::load(&dir);
+        store(&mut cache, 7);
+        assert!(cache
+            .rechecked(&[&target], &scope(root.path(), 1, 7))
+            .is_empty());
+        cache.rerun = true;
+        store(&mut cache, 7);
+        assert_eq!(
+            cache.rechecked(&[&target], &scope(root.path(), 1, 7)),
+            HashSet::from([0])
+        );
+        // Changed tests: the old result, rechecked or not, no longer holds.
+        assert!(cache
+            .rechecked(&[&target], &scope(root.path(), 1, 8))
             .is_empty());
     }
 

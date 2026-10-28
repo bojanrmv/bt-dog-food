@@ -379,6 +379,7 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
     };
     result.outcomes.extend(ignored(targets));
     let mut cache = cache::Cache::load(&options.cache_dir);
+    cache.rerun = options.rerun_survivors;
     for language in [sandbox::Kind::CSharp, sandbox::Kind::Node] {
         let mut pending: Vec<&Target> = targets
             .iter()
@@ -393,10 +394,21 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
         let scope = Scope::new(language, &pending, options)?;
         if options.use_cache {
             let mut found = cache.lookup(&pending, &scope);
+            // A survivor already tested again against these tests is not
+            // tested a third time: renders of other formats stay cheap.
+            let rechecked = if options.rerun_survivors {
+                cache.rechecked(&pending, &scope)
+            } else {
+                HashSet::new()
+            };
             found.retain(|id, outcome| {
                 !result.outcomes.contains_key(id)
-                    && !(options.rerun_survivors && outcome.undetected())
+                    && !(options.rerun_survivors && outcome.undetected() && !rechecked.contains(id))
             });
+            let kept = found.keys().filter(|id| rechecked.contains(id)).count();
+            if kept > 0 {
+                result.notes.push(format!("--rerun-survivors: {kept} survivors were already tested again against these tests, so they come from the cache; --no-cache tests them once more"));
+            }
             result.cached.extend(found.keys().copied());
             let mut tests = cache.reached_tests(&pending, &scope);
             tests.retain(|id, _| found.contains_key(id));
