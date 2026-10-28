@@ -974,11 +974,16 @@ fn agent_why(result: &RunResult, m: &Mutant) -> String {
     } else {
         "tests_still_pass"
     };
+    let mut why = reason.to_string();
     if m.boundary_risk {
-        format!("{reason} boundary-risk")
-    } else {
-        reason.to_string()
+        why.push_str(" boundary-risk");
     }
+    // A cached survivor was not tested in this run: new tests outside the
+    // chosen test projects and filter do not change it.
+    if result.cached.contains(&m.id) {
+        why.push_str(" cached");
+    }
+    why
 }
 
 /// The `tests:` line of a survivor with no reaching tests on record.
@@ -1324,6 +1329,7 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
     }
     out.push_str("survivors: each is a change no test noticed; add a test that fails for it\n");
     out.push_str("columns: location function original -> replacement (mutator) why\n");
+    out.push_str("        why ends in `cached` when this run took the result from the cache: new tests outside the chosen test projects and filter do not change it\n");
     out.push_str(
         "        then: tests that reach it (where a new assertion goes), and what to assert\n",
     );

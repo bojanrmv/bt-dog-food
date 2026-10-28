@@ -413,7 +413,7 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
             });
             let kept = found.keys().filter(|id| rechecked.contains(id)).count();
             if kept > 0 {
-                result.notes.push(format!("--rerun-survivors: {kept} survivors were already tested again against these tests, so they come from the cache; --no-cache tests them once more"));
+                result.notes.push(format!("--rerun-survivors: {kept} survivors (marked `cached`) were already tested again, and neither the test files of the chosen test projects nor the test filter changed since, so they come from the cache; tests added in another project or outside the filter count only once the filter or test projects include them (or with --no-cache)"));
             }
             result.cached.extend(found.keys().copied());
             let mut tests = cache.reached_tests(&pending, &scope);
