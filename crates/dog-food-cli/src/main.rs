@@ -244,6 +244,11 @@ struct MutateArgs {
     /// With --run, test survivors again even when their code and tests did not change
     #[arg(long)]
     rerun_survivors: bool,
+    /// With --run, report the cached results only and test nothing, such as
+    /// to render another format of the last run; mutants without a cached
+    /// result are listed as not in the cache
+    #[arg(long, conflicts_with_all = ["no_cache", "rerun_survivors"])]
+    cached: bool,
     /// With --changes, also mutate the lines of other functions that hold a
     /// string key a changed function holds (such as "MemberPlanId"); their
     /// survivors are listed apart and left out of the score
@@ -804,6 +809,7 @@ fn mutation_options(args: &MutateArgs, settings: &Settings) -> mutation::Options
         },
         rerun_survivors: args.rerun_survivors,
         no_mix: args.no_mix,
+        cached_only: args.cached,
         low_priority: args.low_priority || config.low_priority,
         use_cache: !args.no_cache,
         tests: mutation::TestSelection {

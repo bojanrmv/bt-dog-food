@@ -72,10 +72,16 @@ impl Outcome {
         matches!(self, Outcome::Survived | Outcome::NoCoverage)
     }
 
-    /// Whether the outcome is worth caching: a crash may not happen again,
-    /// and an ignored mutant was not tested.
+    /// What `--rerun-survivors` tests again: survivors and crashed runs.
+    pub fn retested_on_rerun(self) -> bool {
+        self.undetected() || self == Outcome::RuntimeError
+    }
+
+    /// Whether the outcome is worth caching: an ignored mutant was not
+    /// tested. A crash is kept too, so a render in another format does not
+    /// test it again; `--rerun-survivors` does.
     fn is_cached(self) -> bool {
-        !matches!(self, Outcome::RuntimeError | Outcome::Ignored)
+        self != Outcome::Ignored
     }
 }
 
@@ -96,6 +102,8 @@ pub struct Options {
     pub rerun_survivors: bool,
     /// One mutant per test run.
     pub no_mix: bool,
+    /// Report the cached results only; test nothing (`--cached`).
+    pub cached_only: bool,
 }
 
 /// When a test run counts as hanging: (startup +
@@ -166,6 +174,8 @@ pub enum Untested {
     TestRuns,
     /// No Vitest or Jest package above the file: nothing can test it.
     NoRunner,
+    /// `--cached`: no cached result, and nothing was tested.
+    NotCached,
 }
 
 #[derive(Default)]
@@ -208,7 +218,7 @@ impl RunResult {
     pub fn budget_hit(&self) -> bool {
         self.untested
             .values()
-            .any(|step| *step != Untested::NoRunner)
+            .any(|step| !matches!(step, Untested::NoRunner | Untested::NotCached))
     }
 }
 
@@ -409,7 +419,9 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
             };
             found.retain(|id, outcome| {
                 !result.outcomes.contains_key(id)
-                    && !(options.rerun_survivors && outcome.undetected() && !rechecked.contains(id))
+                    && !(options.rerun_survivors
+                        && outcome.retested_on_rerun()
+                        && !rechecked.contains(id))
             });
             let kept = found.keys().filter(|id| rechecked.contains(id)).count();
             if kept > 0 {
@@ -421,12 +433,30 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
             result.reached.extend(tests);
             result.outcomes.extend(found);
         }
-        let open = pending
+        let open: Vec<usize> = pending
             .iter()
             .flat_map(|t| &t.mutants)
-            .any(|m| !result.outcomes.contains_key(&m.id));
+            .map(|m| m.id)
+            .filter(|id| !result.outcomes.contains_key(id))
+            .collect();
         let mut killed_by = cache::KilledBy::new();
-        if open {
+        if options.cached_only {
+            if !open.is_empty() {
+                result.notes.push(format!(
+                    "--cached: {} mutants have no cached result and were not tested; run without --cached to test them",
+                    open.len()
+                ));
+            }
+            result
+                .untested
+                .extend(open.iter().map(|id| (*id, Untested::NotCached)));
+        } else if !open.is_empty() {
+            let total = pending.iter().map(|t| t.mutants.len()).sum::<usize>();
+            progress(&format!(
+                "{} of {total} mutants come from the cache; testing the other {} (new or changed code, changed tests, or never tested; --cached tests nothing)",
+                total - open.len(),
+                open.len()
+            ));
             killed_by = run_language(&scope, &pending, options, &mut result)?;
         }
         // Only what this run tested: cached outcomes keep the evidence they have.
@@ -1265,6 +1295,7 @@ mod tests {
             low_priority: false,
             rerun_survivors: false,
             no_mix: false,
+            cached_only: false,
         }
     }
 

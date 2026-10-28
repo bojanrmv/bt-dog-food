@@ -189,6 +189,7 @@ dgf mutate [OPTIONS] [PATHS]...
 | `--sandbox closure\|full` | Copy only the projects the tests need, or the whole repository | `closure` |
 | `--no-mix` | One mutant per test run instead of packing several | packing on |
 | `--rerun-survivors` | Test survivors again even if nothing changed; kills still come from the cache, and so do survivors already tested again against the same tests | off |
+| `--cached` | With `--run`: report the cached results only and test nothing, such as to render another format of the last run; mutants without a cached result are listed as not in the cache | off |
 | `--neighbours` | With `--changes`: also mutate the lines of other functions (same language, not tests) that hold a string key of a changed function, such as `"MemberPlanId"` or a constant holding it; their survivors are listed under "next to your change" and left out of the score and exit code | off |
 | `--no-cache` | Test everything again, ignoring cached results | cache on |
 

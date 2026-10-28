@@ -236,7 +236,7 @@ impl Cache {
                         .map(|files| files.iter().cloned().collect())
                         .unwrap_or_default();
                     entry.reached_tests = reached_tests.get(&m.id).cloned().unwrap_or_default();
-                    entry.rechecked = self.rerun && outcome.undetected();
+                    entry.rechecked = self.rerun && outcome.retested_on_rerun();
                     Some(entry)
                 })
                 .collect();
@@ -626,6 +626,30 @@ mod tests {
         // Changed tests: the old result, rechecked or not, no longer holds.
         assert!(cache
             .rechecked(&[&target], &scope(root.path(), 1, 8))
+            .is_empty());
+    }
+
+    #[test]
+    fn a_crash_is_cached_so_a_render_does_not_test_it_again() {
+        let root = tempfile::tempdir().unwrap();
+        let target = target(
+            root.path(),
+            "Shop.cs",
+            "class C {\n  int F(int a) { return a + 1; }\n}\n",
+        );
+        let crashed = HashMap::from([(0, Outcome::RuntimeError)]);
+        let mut cache = Cache::load(&root.path().join("cache"));
+        cache.store(
+            &[&target],
+            &scope(root.path(), 1, 7),
+            &crashed,
+            &KilledBy::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(cache.lookup(&[&target], &scope(root.path(), 1, 7)), crashed);
+        assert!(cache
+            .lookup(&[&target], &scope(root.path(), 1, 8))
             .is_empty());
     }
 
