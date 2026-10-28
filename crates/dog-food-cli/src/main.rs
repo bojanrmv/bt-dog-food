@@ -512,7 +512,18 @@ fn apply_mutation(rows: &mut [Row], root: &Path, settings: &Settings) {
 /// `dgf changes`
 fn compare(args: ChangesArgs) -> Result<ExitCode, Failure> {
     only_for_mutate(args.out.format)?;
-    let settings = load_settings(&args.limits)?;
+    let mut settings = load_settings(&args.limits)?;
+    let own = &settings.config.changes;
+    if own.warn.is_some() || own.fail.is_some() {
+        // --warn and --fail still come first.
+        settings.limits = Limits::new(
+            &settings.config.limits,
+            &settings.config_dir,
+            args.limits.warn.or(own.warn),
+            args.limits.fail.or(own.fail),
+        )
+        .map_err(usage)?;
+    }
     let root = git::root(&settings.cwd).map_err(usage)?;
     let staged_base = args.staged.then(|| "HEAD".to_string());
     let (base, base_warnings) = base_for(args.base.clone().or(staged_base), &settings, &root)?;

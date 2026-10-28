@@ -187,6 +187,7 @@ fail = 15
 base = "main"
 scope = "lines"           # or "files"
 fail_on = "new-or-worse"  # or "touched"
+fail = 10                 # dgf changes only: hold new code to more than [limits] holds old code
 
 [coverage]
 paths = ["TestResults", "coverage/lcov.info"]   # used when --coverage is not given

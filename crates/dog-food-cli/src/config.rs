@@ -43,6 +43,9 @@ warn = 10
 # scope = "lines"
 # "new-or-worse": only new functions and higher scores can fail; "touched": any changed function.
 # fail_on = "new-or-worse"
+# Limits for `dgf changes` only (the hook and PR gates), over [limits]: new code
+# can be held to more than old code. `fail = 10` fails a new function above 10.
+# fail = 10
 
 [history]
 # Where `dgf analyze --save-history` keeps snapshots, relative to this file.
@@ -196,6 +199,10 @@ pub struct ChangesConfig {
     pub base: Option<String>,
     pub scope: Option<Scope>,
     pub fail_on: Option<FailOn>,
+    /// Limits for `dgf changes` only, over [limits]: a gate on new code can
+    /// be stricter than what `dgf analyze` asks of old code.
+    pub warn: Option<u32>,
+    pub fail: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
