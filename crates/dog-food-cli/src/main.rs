@@ -39,6 +39,7 @@ mod mutation;
 mod report;
 mod setup;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -895,6 +896,7 @@ fn add_tested_by_changed_tests(
     root: &Path,
     base_commit: &str,
     settings: &Settings,
+    scope: &mut Vec<String>,
 ) -> Result<(), Failure> {
     let changed: Vec<String> = git::changed_files(root, base_commit, false)
         .map_err(usage)?
@@ -906,13 +908,32 @@ fn add_tested_by_changed_tests(
         return Ok(());
     }
     let cache = mutation::cache::Cache::load(&cache_dir(root, settings));
-    for (file, name) in cache.reached_by(&changed) {
+    let mut added = 0;
+    let mut through = BTreeSet::new();
+    for ((file, name), tests) in cache.reached_by(&changed) {
         let known = wanted
             .iter()
             .any(|w| w.file == file && changes::stable_name(&w.name) == name);
         if !known {
-            wanted.extend(mutate::function_named(root, &file, &name));
+            let found = mutate::function_named(root, &file, &name);
+            added += found.len();
+            if !found.is_empty() {
+                through.extend(tests);
+            }
+            wanted.extend(found);
         }
+    }
+    if added > 0 {
+        let shown: Vec<&str> = through.iter().take(5).map(String::as_str).collect();
+        let more = if through.len() > shown.len() {
+            ", ..."
+        } else {
+            ""
+        };
+        scope.push(format!(
+            "tests: {added} functions outside the branch's diff come in because a test file it changed reaches them ({}{more}); their survivors are listed apart, and they count in the score",
+            shown.join(", ")
+        ));
     }
     Ok(())
 }
@@ -955,7 +976,7 @@ fn changed_functions(
     let warnings = base_warnings.iter().chain(&run.warnings);
     scope.extend(warnings.map(|w| format!("warning: {w}")));
     let mut wanted = mutate::from_changes(&run, &root, args.min_complexity);
-    add_tested_by_changed_tests(&mut wanted, &root, &run.base_commit, settings)?;
+    add_tested_by_changed_tests(&mut wanted, &root, &run.base_commit, settings, scope)?;
     if args.scope == Some(mutate::Scope::Lines) {
         let changed = git::changed_files(&root, &run.base_commit, false).map_err(usage)?;
         for w in &mut wanted {

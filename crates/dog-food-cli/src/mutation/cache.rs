@@ -14,7 +14,7 @@
 //! production code that makes a killing test miss the mutant; `--no-cache`
 //! tests everything again.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -286,19 +286,24 @@ impl Cache {
     }
 
     /// Functions (file, stable name) with a mutant that a test in one of
-    /// `test_files` reached, the last time it was tested.
-    pub fn reached_by(&self, test_files: &[String]) -> BTreeSet<(String, String)> {
+    /// `test_files` reached, the last time it was tested, with those files.
+    pub fn reached_by(
+        &self,
+        test_files: &[String],
+    ) -> BTreeMap<(String, String), BTreeSet<String>> {
         self.functions
             .iter()
-            .filter(|(_, entry)| {
-                entry
+            .filter_map(|(key, entry)| {
+                let files: BTreeSet<String> = entry
                     .mutants
                     .iter()
-                    .any(|m| m.reached.iter().any(|file| test_files.contains(file)))
-            })
-            .filter_map(|(key, _)| {
+                    .flat_map(|m| &m.reached)
+                    .filter(|file| test_files.contains(file))
+                    .cloned()
+                    .collect();
                 let mut parts = key.split('\u{0}');
-                Some((parts.next()?.to_string(), parts.next()?.to_string()))
+                let id = (parts.next()?.to_string(), parts.next()?.to_string());
+                (!files.is_empty()).then_some((id, files))
             })
             .collect()
     }
@@ -524,7 +529,10 @@ mod tests {
         let saved = Cache::load(&dir);
         assert_eq!(
             saved.reached_by(&["ShopTests.cs".to_string()]),
-            BTreeSet::from([("Shop.cs".to_string(), "C.F".to_string())])
+            BTreeMap::from([(
+                ("Shop.cs".to_string(), "C.F".to_string()),
+                BTreeSet::from(["ShopTests.cs".to_string()])
+            )])
         );
         assert!(saved.reached_by(&["OtherTests.cs".to_string()]).is_empty());
 

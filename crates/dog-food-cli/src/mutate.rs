@@ -1335,8 +1335,16 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
     );
     let (neighbours, gate): (Vec<_>, Vec<_>) =
         survivors(targets, result).partition(|(t, _)| t.reason == NEIGHBOUR);
-    for (t, m) in gate {
+    let (by_tests, own): (Vec<_>, Vec<_>) =
+        gate.into_iter().partition(|(t, _)| t.reason == "tests");
+    for (t, m) in own {
         agent_survivor(&mut out, t, m, result);
+    }
+    if !by_tests.is_empty() {
+        out.push_str("\n## in code a test file this branch changed reaches (not in the branch's own diff; counted in the score)\n");
+        for (t, m) in by_tests {
+            agent_survivor(&mut out, t, m, result);
+        }
     }
     if !neighbours.is_empty() {
         out.push_str("
