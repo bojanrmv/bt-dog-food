@@ -1248,6 +1248,33 @@ fn function_json(t: &Target, result: &RunResult) -> serde_json::Value {
     })
 }
 
+/// Kills from runs whose test host crashed: a failing test counted, but the
+/// crash may have caused it, so an equivalent mutant can pass for covered.
+fn crash_kills_text(targets: &[Target], result: &RunResult) -> String {
+    let mut out = String::new();
+    for (t, m) in targets
+        .iter()
+        .flat_map(|t| t.mutants.iter().map(move |m| (t, m)))
+        .filter(|(_, m)| result.crash_kills.contains(&m.id))
+    {
+        let _ = writeln!(
+            out,
+            "{}:{}:{} {} {} -> {} ({})",
+            t.file,
+            m.line,
+            m.column,
+            t.name,
+            short(&m.original),
+            m.replacement,
+            m.mutator
+        );
+    }
+    if out.is_empty() {
+        return out;
+    }
+    format!("killed in a run whose test host crashed (a failing test counted, but the crash may have caused it; check these by hand before calling one covered):\n{out}")
+}
+
 /// One survivor in the agent format: where, what, which tests reach it and
 /// what to assert.
 fn agent_survivor(out: &mut String, t: &Target, m: &Mutant, result: &RunResult) {
@@ -1312,6 +1339,7 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
             agent_survivor(&mut out, t, m, result);
         }
     }
+    out.push_str(&crash_kills_text(targets, result));
     let suppressed = suppressions_text(targets, "");
     if !suppressed.is_empty() {
         let _ = write!(
@@ -1468,6 +1496,40 @@ mod tests {
         );
         assert_eq!(near[0].lines, Some(vec![(4, 4)]));
         assert!(near.iter().all(|w| w.reason == NEIGHBOUR));
+    }
+
+    #[test]
+    fn kills_from_a_crashed_run_are_listed_for_a_check_by_hand() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Report.cs");
+        std::fs::write(
+            &path,
+            "class R {\n  bool F(object s) {\n    return s is null;\n  }\n}\n",
+        )
+        .unwrap();
+        let wanted = Wanted {
+            file: "Report.cs".into(),
+            path,
+            name: "R.F".into(),
+            start_line: 2,
+            end_line: 4,
+            complexity: 1,
+            reason: "selected",
+            lines: None,
+        };
+        let (mut targets, _) = targets(vec![wanted], &Settings::default()).unwrap();
+        for (id, m) in targets[0].mutants.iter_mut().enumerate() {
+            m.id = id;
+        }
+        let mut result = RunResult::default();
+        assert_eq!(crash_kills_text(&targets, &result), "");
+        result.crash_kills.insert(0);
+        let text = crash_kills_text(&targets, &result);
+        assert!(
+            text.starts_with("killed in a run whose test host crashed"),
+            "{text}"
+        );
+        assert!(text.contains("Report.cs:3:"), "{text}");
     }
 
     #[test]

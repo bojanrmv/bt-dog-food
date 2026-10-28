@@ -7,8 +7,9 @@
 //   DGF_PLAN    file of "test<TAB>mutant id" lines: a different mutant per test
 //   DGF_REACH   folder: write "test<TAB>mutant id" for every switch reached;
 //               the test is empty outside any test and inside a static
-//               constructor or field initializer, which runs once, in whichever
-//               test touches the type first, for every test after it
+//               constructor, a field initializer or a lazy cache's factory,
+//               which run once, in whichever test comes first, for every test
+//               after it
 // </auto-generated>
 #nullable disable
 #pragma warning disable
@@ -55,9 +56,10 @@ namespace DogFood.Mutation
             }
         }
 
-        /// Whether a static constructor (field initializers are part of it) of
-        /// another type is on the stack. Every frame is read: with inlining,
-        /// skipping a fixed number could skip the constructor itself.
+        /// Whether code that runs once for every test after it is on the
+        /// stack: a static constructor (field initializers are part of it) of
+        /// another type, or a lazy cache filling a value on first use. Every
+        /// frame is read: with inlining, skipping a fixed number could skip it.
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         private static bool InTypeInitializer()
         {
@@ -69,14 +71,40 @@ namespace DogFood.Mutation
             foreach (var frame in frames)
             {
                 var method = frame.GetMethod();
+                if (method == null || method.DeclaringType == typeof(DgfMutants))
+                {
+                    continue;
+                }
                 // IsConstructor is false for a static constructor: match its name.
-                if (method != null && method.Name == System.Reflection.ConstructorInfo.TypeConstructorName
-                    && method.DeclaringType != typeof(DgfMutants))
+                if (method.Name == System.Reflection.ConstructorInfo.TypeConstructorName || FillsLazily(method))
                 {
                     return true;
                 }
             }
             return false;
+        }
+
+        /// The framework's caches that run a factory once per key or value:
+        /// ConditionalWeakTable, Lazy, LazyInitializer and ConcurrentDictionary.GetOrAdd.
+        private static bool FillsLazily(System.Reflection.MethodBase method)
+        {
+            var type = method.DeclaringType;
+            if (type == null)
+            {
+                return false;
+            }
+            var name = type.Namespace + "." + type.Name;
+            switch (name)
+            {
+                case "System.Runtime.CompilerServices.ConditionalWeakTable`2":
+                case "System.Lazy`1":
+                case "System.Threading.LazyInitializer":
+                    return true;
+                case "System.Collections.Concurrent.ConcurrentDictionary`2":
+                    return method.Name == "GetOrAdd";
+                default:
+                    return false;
+            }
         }
 
         private static int ReadActive()

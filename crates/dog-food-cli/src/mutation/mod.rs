@@ -185,6 +185,9 @@ pub struct RunResult {
     pub test_runs: usize,
     /// Tests that fail without mutants, left out.
     pub set_aside: Vec<String>,
+    /// Killed in a run whose tests did not all report (the test host crashed
+    /// or was stopped): a failing test decided it, but the crash may have.
+    pub crash_kills: BTreeSet<usize>,
     /// Things the reader should know, such as a fallback to a full sandbox.
     pub notes: Vec<String>,
     /// Per tested mutant, up to three tests that reach it ("name (file)").
@@ -858,7 +861,11 @@ fn test_mutants(
     let runner = Runner::new(engine, reach, options)?;
     for (id, run) in runner.solos(&solo) {
         if let Ran::Done(run) = run? {
-            let (outcome, killed_by) = solo_outcome(&run, &reach.failing, reach.by_mutant.get(&id));
+            let expected = reach.by_mutant.get(&id);
+            let (outcome, killed_by) = solo_outcome(&run, &reach.failing, expected);
+            if outcome == Outcome::Killed && crashed(run.0, &run.1, expected) {
+                result.crash_kills.insert(id);
+            }
             result.outcomes.insert(id, outcome);
             killers.insert(id, killed_by);
         }

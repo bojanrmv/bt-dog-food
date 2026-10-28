@@ -456,7 +456,8 @@ fn copy_if_changed(from: &Path, to: &Path) -> Result<(), String> {
     if is_link(to) {
         remove_entry(to)?;
     }
-    if let Ok(target) = std::fs::metadata(to) {
+    let existed = std::fs::metadata(to).ok();
+    if let Some(target) = &existed {
         // A fresh checkout (another worktree) gives unchanged files a new
         // time: the copy keeps its old time, so the build stays incremental.
         let same_time = target.modified().ok() == source.modified().ok();
@@ -467,7 +468,15 @@ fn copy_if_changed(from: &Path, to: &Path) -> Result<(), String> {
     std::fs::create_dir_all(to.parent().expect("a file has a folder"))
         .map_err(|err| err.to_string())?;
     std::fs::copy(from, to).map_err(|err| format!("{}: {err}", from.display()))?;
-    keep_time(to, source.modified().ok())
+    // A file whose text changed gets the time now: its own time can be older
+    // than the build output another worktree's run left here, and the build
+    // would then take the project as up to date and compile nothing.
+    let time = if existed.is_some() {
+        SystemTime::now()
+    } else {
+        source.modified().unwrap_or_else(|_| SystemTime::now())
+    };
+    keep_time(to, Some(time))
 }
 
 fn same_content(a: &Path, b: &Path) -> bool {
@@ -755,6 +764,38 @@ mod tests {
         assert!(
             base.join("shared/lib/i.js").exists() && base.join("web/node_modules/x/i.js").exists()
         );
+    }
+
+    #[test]
+    fn a_changed_file_is_newer_than_build_output_left_by_another_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("worktree/Auth.cs");
+        let to = dir.path().join("sandbox/Auth.cs");
+        let output = dir.path().join("sandbox/Auth.dll");
+        std::fs::create_dir_all(from.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        let day_ago = SystemTime::now() - std::time::Duration::from_secs(86_400);
+        let hour_ago = SystemTime::now() - std::time::Duration::from_secs(3_600);
+        // The sandbox holds an older text, built an hour ago by another
+        // worktree's run; this worktree's newer text was checked out a day ago.
+        std::fs::write(&to, "class Auth {}").unwrap();
+        keep_time(&to, Some(day_ago)).unwrap();
+        std::fs::write(&output, "dll").unwrap();
+        keep_time(&output, Some(hour_ago)).unwrap();
+        std::fs::write(&from, "class Auth { void New() {} }").unwrap();
+        keep_time(&from, Some(day_ago)).unwrap();
+
+        copy_if_changed(&from, &to).unwrap();
+        let modified = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&to).unwrap(),
+            "class Auth { void New() {} }"
+        );
+        assert!(modified(&to) > modified(&output));
+        // A new file keeps its own time, and unchanged files are left alone.
+        let fresh = dir.path().join("sandbox/New.cs");
+        copy_if_changed(&from, &fresh).unwrap();
+        assert_eq!(modified(&fresh), modified(&from));
     }
 
     #[test]

@@ -244,7 +244,12 @@ fn mutation_runs_on_a_dotnet_solution() {
     assert_eq!(outcome(&first, "Unused.Twice", 5, "*"), "no-coverage");
     // Built in a static field initializer, inside whichever test touches the
     // class first: every test runs with it, so the one that checks the values kills it.
-    assert_eq!(outcome(&first, "Codes.Build", 13, "* -> /"), "killed");
+    assert_eq!(outcome(&first, "Codes.Build", 17, "* -> /"), "killed");
+    // Filled by a lazy cache on first use: the same, through GetOrAdd.
+    assert_eq!(
+        outcome(&first, "Codes.Square/lambda@23:60", 23, "* -> /"),
+        "killed"
+    );
     // The source generator behind [GeneratedRegex] still ran: nothing failed to build.
     assert_eq!(first["tally"]["compileError"], 0, "{first}");
     // The guard clause's comment turns its statement mutant off, with its reason.
