@@ -133,7 +133,8 @@ pub struct Request<'a> {
 pub fn collect(request: Request) -> Result<ChangesRun, String> {
     let started = Instant::now();
     let (base_commit, base_note) = git::merge_base(request.root, &request.base)?;
-    let files: Vec<FileChange> = git::changed_files(request.root, &base_commit, request.staged)?
+    let (files, merged) = git::own_changes(request.root, &base_commit, request.staged)?;
+    let files: Vec<FileChange> = files
         .into_iter()
         .filter(|file| is_source(&request, file))
         .collect();
@@ -144,6 +145,20 @@ pub fn collect(request: Request) -> Result<ChangesRun, String> {
 
     let mut rows = Vec::new();
     let mut warnings: Vec<String> = base_note.into_iter().collect();
+    if !merged.is_empty() {
+        let shown: Vec<&str> = merged.iter().take(3).map(String::as_str).collect();
+        let more = if merged.len() > shown.len() {
+            ", ..."
+        } else {
+            ""
+        };
+        warnings.push(format!(
+            "{} changed files came in only by merge commits since {} ({}{more}) and are left out; files the branch also changed are kept",
+            merged.len(),
+            git::short(request.root, &base_commit),
+            shown.join(", ")
+        ));
+    }
     for result in results {
         match result {
             Ok(mut list) => rows.append(&mut list),

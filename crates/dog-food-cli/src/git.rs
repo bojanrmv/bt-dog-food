@@ -1,6 +1,7 @@
 //! The few git commands dgf needs, run through the `git` executable, and a
 //! parser for the changed line ranges in `git diff -U0` output.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -204,6 +205,87 @@ pub fn show(root: &Path, commit: &str, path: &str) -> Option<String> {
 /// uncommitted edits) plus untracked files, or with `staged` only what is
 /// staged for the next commit. Deleted files are left out.
 pub fn changed_files(root: &Path, commit: &str, staged: bool) -> Result<Vec<FileChange>, String> {
+    Ok(own_changes(root, commit, staged)?.0)
+}
+
+/// The changes since `commit` (see `changed_files`) without the files that
+/// only merge commits on the way changed (a branch that merged its base
+/// after `commit`), and those files' paths.
+pub fn own_changes(
+    root: &Path,
+    commit: &str,
+    staged: bool,
+) -> Result<(Vec<FileChange>, Vec<String>), String> {
+    let files = all_changes(root, commit, staged)?;
+    let merged = merged_in(root, commit, &files);
+    let (dropped, own): (Vec<FileChange>, Vec<FileChange>) =
+        files.into_iter().partition(|f| merged.contains(&f.path));
+    Ok((own, dropped.into_iter().map(|f| f.path).collect()))
+}
+
+/// Files of `files` that only merges changed between `base` and HEAD: on
+/// the first-parent chain from HEAD back to `base`, a merge changed them and
+/// no commit of the branch did, and the working tree leaves them as in HEAD.
+fn merged_in(root: &Path, base: &str, files: &[FileChange]) -> HashSet<String> {
+    let merges: Vec<String> = run(
+        root,
+        &[
+            "rev-list",
+            "--first-parent",
+            "--merges",
+            &format!("{base}..HEAD"),
+        ],
+    )
+    .map(|text| text.lines().map(str::to_string).collect())
+    .unwrap_or_default();
+    if merges.is_empty() {
+        return HashSet::new();
+    }
+    let dirty: HashSet<String> = run(root, &["diff", "--name-only", "HEAD"])
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    let mut trees: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut blob = |rev: &str, path: &str| -> Option<String> {
+        trees
+            .entry(rev.to_string())
+            .or_insert_with(|| tree(root, rev))
+            .get(path)
+            .cloned()
+    };
+    files
+        .iter()
+        .filter(|f| !dirty.contains(&f.path))
+        .filter(|f| {
+            let mut current = "HEAD".to_string();
+            let mut merged = false;
+            for merge in &merges {
+                if blob(&current, &f.path) != blob(merge, &f.path) {
+                    return false;
+                }
+                let first = format!("{merge}^1");
+                merged |= blob(merge, &f.path) != blob(&first, &f.path);
+                current = first;
+            }
+            merged && blob(&current, &f.path) == blob(base, &f.path)
+        })
+        .map(|f| f.path.clone())
+        .collect()
+}
+
+/// Path → blob id of every file in `rev`.
+fn tree(root: &Path, rev: &str) -> HashMap<String, String> {
+    run(root, &["ls-tree", "-r", "--full-tree", rev])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (meta, path) = line.split_once('\t')?;
+            let id = meta.split_whitespace().nth(2)?;
+            Some((path.to_string(), id.to_string()))
+        })
+        .collect()
+}
+
+fn all_changes(root: &Path, commit: &str, staged: bool) -> Result<Vec<FileChange>, String> {
     let mut args = vec!["diff", "-U0", "--no-color", "--no-ext-diff", "-M"];
     if staged {
         args.push("--cached");
@@ -353,6 +435,57 @@ rename to new/Name.cs
         assert!(file.touches(12, 30));
         assert!(!file.touches(13, 30));
         assert!(FileChange::added("b").touches(500, 900));
+    }
+
+    #[test]
+    fn files_that_only_a_merge_brought_in_are_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            run(
+                root,
+                &[&["-c", "user.name=t", "-c", "user.email=t@t"], args].concat(),
+            )
+            .unwrap()
+        };
+        let commit = |name: &str, text: &str| {
+            std::fs::write(root.join(name), text).unwrap();
+            git(&["add", name]);
+            git(&["commit", "-q", "-m", name]);
+        };
+        git(&["init", "-q", "-b", "main"]);
+        commit("shared.cs", "1");
+        let base = run(root, &["rev-parse", "HEAD"])
+            .map(first_line)
+            .unwrap()
+            .unwrap();
+        git(&["checkout", "-q", "-b", "feature"]);
+        commit("own.cs", "mine");
+        git(&["checkout", "-q", "main"]);
+        commit("theirs.cs", "other slug");
+        commit("shared.cs", "2");
+        git(&["checkout", "-q", "feature"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "merge",
+            "-q",
+            "--no-edit",
+            "main",
+        ]);
+        commit("shared.cs", "2 and mine");
+        commit("after.cs", "mine too");
+
+        let (own, dropped) = own_changes(root, &base, false).unwrap();
+        let mut kept: Vec<&str> = own.iter().map(|f| f.path.as_str()).collect();
+        kept.sort();
+        assert_eq!(kept, ["after.cs", "own.cs", "shared.cs"]);
+        assert_eq!(dropped, ["theirs.cs"]);
+        // A working-tree edit makes the file the branch's own.
+        std::fs::write(root.join("theirs.cs"), "edited here").unwrap();
+        assert!(own_changes(root, &base, false).unwrap().1.is_empty());
     }
 
     #[test]
