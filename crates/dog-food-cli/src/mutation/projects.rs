@@ -94,9 +94,13 @@ pub fn select(
         );
     }
     let allowed = Globs::new(selection)?;
+    let names: Vec<String> = tests.iter().map(|(p, _)| stem(p)).collect();
+    let filters = Filters::parse(&selection.filters, &names);
+    // A project a filter names runs even when the globs leave it out: the
+    // user asked for it by name.
     let candidates: Vec<&(PathBuf, String)> = tests
         .iter()
-        .filter(|(p, _)| allowed.allows(&relative(&root, p)))
+        .filter(|(p, _)| allowed.allows(&relative(&root, p)) || filters.names(&stem(p)))
         .collect();
     if candidates.is_empty() {
         return Err("test_projects and exclude_test_projects leave no test project".into());
@@ -111,8 +115,6 @@ pub fn select(
     } else {
         relevant
     };
-    let names: Vec<String> = tests.iter().map(|(p, _)| stem(p)).collect();
-    let filters = Filters::parse(&selection.filters, &names);
     let projects: Vec<TestProject> = chosen
         .into_iter()
         .filter_map(|(path, text)| {
@@ -204,6 +206,11 @@ impl Filters {
             }
         }
         filters
+    }
+
+    /// Whether a "Name:filter" names this project.
+    fn names(&self, name: &str) -> bool {
+        self.per_project.iter().any(|(n, _)| n == name)
     }
 
     /// `None` when the project does not run; `Some(None)` when it runs unfiltered.
@@ -368,6 +375,16 @@ mod tests {
         assert_eq!(
             left_out(dir.path(), &lib(dir.path()), &chosen),
             ["App.Acceptance.Tests"]
+        );
+        // Naming an excluded project in a filter runs it anyway.
+        let named = TestSelection {
+            filters: vec!["App.Acceptance.Tests:Category=Fast".into()],
+            ..selection.clone()
+        };
+        let chosen = select(dir.path(), &lib(dir.path()), &named).unwrap();
+        assert_eq!(
+            names(&chosen),
+            [("App.Acceptance.Tests".into(), Some("Category=Fast".into()))]
         );
         let none = TestSelection {
             include: vec!["nothing/**".into()],

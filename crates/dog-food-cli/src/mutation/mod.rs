@@ -456,9 +456,19 @@ fn note_left_out(scope: &Scope, targets: &[&Target], result: &mut RunResult) {
         .filter(|m| result.outcomes.get(&m.id) == Some(&Outcome::NoCoverage))
         .count();
     if unreached > 0 {
+        // A filter naming a project wins over exclude_test_projects, but then
+        // only named projects run: name the ones that ran as well.
+        let flags: Vec<String> = scope
+            .tests
+            .iter()
+            .map(|t| t.name())
+            .chain(scope.left_out.iter().cloned())
+            .map(|name| format!("--test-filter \"{name}:FullyQualifiedName~.\""))
+            .collect();
         result.notes.push(format!(
-            "{unreached} mutants no test reaches, but these test projects use the mutated code and did not run (test_projects, exclude_test_projects or a filter for another project): {}; their tests may reach them",
-            scope.left_out.join(", ")
+            "{unreached} mutants no test reaches, but these test projects use the mutated code and did not run (test_projects, exclude_test_projects or a filter for another project): {}; their tests may reach them. To run them with the others: {} (narrow each filter as needed)",
+            scope.left_out.join(", "),
+            flags.join(" ")
         ));
     }
 }
