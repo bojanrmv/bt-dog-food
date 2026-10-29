@@ -1,6 +1,6 @@
 //! `dgf mutate`: chooses the functions worth mutating, lists the mutants in
 //! them, and reports what the engine (`crate::mutation`) found when they ran.
-//! See docs/mutation-testing.md.
+//! See docs/mutation/README.md.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write;

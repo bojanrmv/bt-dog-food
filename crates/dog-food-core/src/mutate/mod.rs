@@ -2,7 +2,7 @@
 //! notice. Each mutant replaces one byte range of the source with other text,
 //! so it can be applied on its own or compiled in next to the others.
 //!
-//! docs/mutation-testing.md#mutators lists the mutators. A mutator proposes a change
+//! docs/mutation/mutators.md lists the mutators. A mutator proposes a change
 //! and the expression or statement its switch goes around (its *site*); each
 //! language file then moves the site where a switch is valid, or drops the
 //! change when there is no such place.

@@ -44,11 +44,11 @@ Built from runs saved with `dgf analyze --save-history`, for example on every me
 
 ![Mutation report: the mutation score, mutants no test caught, and the results by function](images/mutation.png)
 
-- **Totals**: the mutation score (killed ÷ mutants that count), killed, survived, no tests, timeouts, from the cache.
+- **Totals**: the mutation score (detected ÷ detected, survived and no tests), killed, survived, no tests, timeouts, from the cache.
 - **Not caught by any test**: each mutant as the change it made (`>=` → `>`), why it survived ("tests still pass" or "no test runs this"), its function and line. Each one is a test to add or sharpen.
 - **By function**: the score of each function, next to its complexity.
 
-More: [mutation testing](mutation-testing.md).
+More: [mutation testing](mutation/README.md).
 
 ## Duplication
 

@@ -153,7 +153,7 @@ dgf history --format html -o dgf-history.html      # trend lines
 
 ## `dgf mutate`
 
-Mutation testing: changes the code on purpose (`>` becomes `>=`, a condition becomes `false`) and checks that a test fails. Without `--run` it only chooses functions and lists their mutants, which takes a second. With `--run` it builds and tests them. C#, TypeScript and JavaScript are run; Rust mutants are listed only. The full guide is [mutation-testing.md](mutation-testing.md).
+Mutation testing: changes the code on purpose (`>` becomes `>=`, a condition becomes `false`) and checks that a test fails. Without `--run` it only chooses functions and lists their mutants, which takes a second. With `--run` it builds and tests them. C#, TypeScript and JavaScript are run; Rust mutants are listed only. The full guide is [mutation/](mutation/README.md).
 
 ```
 dgf mutate [OPTIONS] [PATHS]...
@@ -215,7 +215,7 @@ dgf mutate --run --no-cache                           # everything again
 dgf mutate --run --format mutation-report -o mutation.json   # mutation-testing-elements JSON
 ```
 
-Turning single mutants off is done in code: `// dgf-disable-once <mutator>: <reason>`, `// dgf-disable-next-line`, `// dgf-disable` ... `// dgf-restore` (see [mutation-testing.md](mutation-testing.md#turning-mutants-off)).
+Turning single mutants off is done in code: `// dgf-disable-once <mutator>: <reason>`, `// dgf-disable-next-line`, `// dgf-disable` ... `// dgf-restore` (see [turning mutants off](mutation/turning-off.md)).
 
 ## `dgf duplication`
 

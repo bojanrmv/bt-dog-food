@@ -32,7 +32,7 @@ paths = ["TestResults", "coverage/lcov.info"]   # used when --coverage is not gi
 [history]
 dir = ".dgf/history"
 
-[mutate]                  # every key: mutation-testing.md#settings
+[mutate]                  # every key: mutation/settings.md
 exclude = ["**/Migrations/"]
 exclude_test_projects = ["**/*.Acceptance.Tests.csproj"]
 test_filter = ["Shop.Tests:FullyQualifiedName~Pricing"]
@@ -55,7 +55,7 @@ thresholds = { high = 80, low = 60, break = 50 }
 | Comment | Effect |
 | --- | --- |
 | `// dgf-ignore: reason` | above a function: it is reported but never fails |
-| `// dgf-disable-once <mutator>: reason` | the next mutant of that kind is not made ([mutation testing](mutation-testing.md#turning-mutants-off)) |
-| `// dgf-disable` … `// dgf-restore` | no mutants in between |
+| `// dgf-disable-once <mutator>: reason` | mutants of that kind on the next statement are not tested, and are reported as ignored with the reason ([turning mutants off](mutation/turning-off.md)) |
+| `// dgf-disable` … `// dgf-restore` | the same, for everything in between |
 
 To accept the functions already above the limits, so only new problems fail, use `dgf baseline` ([workflows](workflows.md#adopting-in-existing-code)).
