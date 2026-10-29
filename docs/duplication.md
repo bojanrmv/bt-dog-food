@@ -119,7 +119,8 @@ No AI, and no guessing: every step is exact on the syntax tree.
    - a copy inside a bigger copy;
    - a copy that overlaps another copy of its class;
    - a class that only wraps a class with more copies;
-   - a class whose copies all lie inside another class's copies of the same functions. So is a class with more than two parameters per statement: code that shares a shape but little else (mapping code, guard clauses on other fields).
+   - a class whose copies all lie inside another class's copies of the same functions;
+   - statements that only configure what the function was given: calls on a parameter that set nothing, such as EF Core's `builder.Property(...)` rows, `services.AddScoped<A, B>()` and `options.AddPolicy(...)`. Those are registration tables, not copies to unite. So is a class with more than two parameters per statement: code that shares a shape but little else (mapping code, guard clauses on other fields).
 4. Anti-unification of the copies' tokens gives the template: a hole at each position where their names or values differ, one hole per distinct set of differences.
 5. A long expression inside a statement (a call chain such as a LINQ query, an object built with its members, a `switch` expression; three lines or more) is also a block of its own. So a copy of it is found where the statements around it differ: `var rows = query...;` in one method and `foreach (var row in query...)` in another. A copy found this way inside a copy of whole statements is not reported twice.
 6. Reordered and interleaved copies: statements of two blocks are paired by shape, with one consistent renaming of locals (members and called functions keep their names). Only pairs whose data flows the same way are kept: every name a paired statement reads comes, in both copies, from partnered statements or from outside the copy. The largest group of paired statements linked by what they define and read is the copy, so statements that only look alike (a list of independent `builder.Property(...)` calls) are not one. Copies that are in order and side by side are left to the passes above.
@@ -180,6 +181,6 @@ Conditions on the key alone (`x.Id == id`, `ids.Contains(x.Id)`) are left out: t
 | with `--semantic` | 14 of 15 | 47 of 47 | recall 98%, no decoy or unrelated match, no near miss called equal |
 | with `--confirm` | | all 17 groups confirmed by running | every near miss it can run (12 of 12) disproved by `--compare` |
 
-Precision on real code is measured on hand-labelled scans of open-source repositories ([tests/corpus/real](../crates/dog-food-dup/tests/corpus/real/README.md)), scored with `dgf-dup-bench --real LABELS --report SCAN`. On dotnet/eShop it is 34 real findings of 35 (97%). It was 77% before generated files and nested copies were left out.
+Precision on real code is measured on hand-labelled scans of open-source repositories ([tests/corpus/real](../crates/dog-food-dup/tests/corpus/real/README.md)), scored with `dgf-dup-bench --real LABELS --report SCAN`. On dotnet/eShop it is 34 real findings of 34 (100%). It was 77% before generated files, nested copies and configuration lists were left out. On a sample of 83 findings from a large private ASP.NET Core backend, all 15 type-4 claims were right, and precision is 99%.
 
 On a large ASP.NET Core backend (2,000 files, 25 projects), `dgf-dup --semantic` takes about 25 seconds. The two engines run at the same time, and the C# engine binds one method at a time on every core, skipping before binding the methods whose syntax already shows they will be left out.

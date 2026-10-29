@@ -514,6 +514,13 @@ fn class_of(
         .chain(others.iter().map(|(o, _, _)| *o))
         .map(|u| whole(&blocks[units[u].block], units[u].block))
         .collect();
+    // Bodies that only configure what they were given are a table, not a copy.
+    if spans
+        .iter()
+        .all(|s| crate::find::configures(&blocks[s.block], s))
+    {
+        return (None, taken);
+    }
     let exact = others.iter().all(|(o, _, m)| {
         m.len() == units[center].shapes.len() && m.len() == units[*o].shapes.len()
     });

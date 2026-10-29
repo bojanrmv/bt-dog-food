@@ -69,7 +69,47 @@ pub struct Block {
     /// built with many members) as a block of its own, so a copy of it is
     /// found where the statements around it differ.
     pub is_expression: bool,
+    /// The parameters of the function or lambda the block is in.
+    pub parameters: Vec<String>,
     pub statements: Vec<Statement>,
+}
+
+impl Block {
+    /// Whether a statement only configures something it was given: a call
+    /// on a parameter (`builder.Property(...)`, `services.AddScoped<A, B>()`,
+    /// `options.AddPolicy(...)`) that sets nothing, or returns the parameter.
+    /// A list of them is a registration table, not a copy to unite.
+    pub fn configures(&self, statement: &Statement) -> bool {
+        let tokens = &statement.tokens;
+        let configures = self.calls_parameter(tokens) || self.returns_parameter(tokens);
+        configures && self.whole_statement(tokens) && !sets(tokens)
+    }
+
+    fn is_parameter(&self, token: Option<&Token>) -> bool {
+        token.is_some_and(|t| t.kind == Kind::Name && self.parameters.contains(&t.text))
+    }
+
+    /// `parameter.Call(...)`.
+    fn calls_parameter(&self, tokens: &[Token]) -> bool {
+        self.is_parameter(tokens.first()) && tokens.get(1).is_some_and(|t| t.text == ".")
+    }
+
+    /// `return parameter;`.
+    fn returns_parameter(&self, tokens: &[Token]) -> bool {
+        tokens.len() == 3 && tokens[0].text == "return" && self.is_parameter(tokens.get(1))
+    }
+
+    /// A whole statement: an expression inside one is used, not run for its effect.
+    fn whole_statement(&self, tokens: &[Token]) -> bool {
+        !self.is_expression && tokens.last().is_some_and(|t| t.text == ";")
+    }
+}
+
+/// Whether a statement assigns anything.
+fn sets(tokens: &[Token]) -> bool {
+    tokens
+        .iter()
+        .any(|t| t.kind == Kind::Other && t.text == "=")
 }
 
 /// A parsed source file.
@@ -137,6 +177,7 @@ fn collect(node: Node, src: &[u8], file: usize, tests: bool, out: &mut Vec<Block
             is_body: false,
             is_constructor: false,
             is_expression: true,
+            parameters: parameters(node, src),
             statements: vec![statement(node, src)],
         });
     }
@@ -161,6 +202,7 @@ fn statement_block(node: Node, src: &[u8], file: usize) -> Option<Block> {
         is_body: parent.is_some_and(|p| FUNCTIONS.contains(&p) || p == "arrow_function"),
         is_constructor: parent == Some("constructor_declaration"),
         is_expression: false,
+        parameters: parameters(node, src),
         statements,
     })
 }
@@ -329,6 +371,49 @@ const TYPES: &[&str] = &[
     "impl_item",
     "trait_item",
 ];
+
+/// Function-like nodes whose parameters a block in them sees, lambdas included.
+const PARAMETER_OWNERS: &[&str] = &[
+    "lambda_expression",
+    "arrow_function",
+    "closure_expression",
+    "function_expression",
+    "function",
+];
+
+/// `x => ...`: a lambda's one parameter, a child of its own.
+fn single_parameter(owner: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = owner.walk();
+    let first = owner.named_children(&mut cursor).next();
+    first.filter(|c| matches!(c.kind(), "identifier" | "implicit_parameter"))
+}
+
+/// The names of the parameters of the nearest function or lambda around `node`.
+fn parameters(node: Node, src: &[u8]) -> Vec<String> {
+    let owner = std::iter::successors(node.parent(), |n| n.parent())
+        .find(|n| FUNCTIONS.contains(&n.kind()) || PARAMETER_OWNERS.contains(&n.kind()));
+    let Some(list) = owner.and_then(|o| {
+        o.child_by_field_name("parameters")
+            .or_else(|| o.child_by_field_name("parameter"))
+            .or_else(|| single_parameter(o))
+    }) else {
+        return Vec::new();
+    };
+    let text = |n: Node| n.utf8_text(src).ok().map(str::to_string);
+    if matches!(list.kind(), "identifier" | "implicit_parameter") {
+        return text(list).into_iter().collect();
+    }
+    let mut cursor = list.walk();
+    list.named_children(&mut cursor)
+        .filter_map(|p| {
+            p.child_by_field_name("name")
+                .or_else(|| p.child_by_field_name("pattern"))
+                .or(Some(p))
+        })
+        .filter(|n| n.kind() == "identifier")
+        .filter_map(text)
+        .collect()
+}
 
 /// `Type.Method` (or `Method`) around `node`.
 fn enclosing_function(node: Node, src: &[u8]) -> Option<String> {

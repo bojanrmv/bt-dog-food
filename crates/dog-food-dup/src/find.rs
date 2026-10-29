@@ -269,6 +269,7 @@ pub fn clone_classes(
     // an earlier group, which finds them.
     work.retain(|group| !all_match_before(group, &shape));
     let mut classes = grow(work, blocks);
+    classes.retain(|spans| !spans.iter().all(|s| configures(&blocks[s.block], s)));
     let lines = classes_lines(&classes, blocks);
     classes.retain(|spans| !within_other_copies(spans, &lines, blocks));
     let mut found = outermost(classes, blocks, sources, display);
@@ -490,13 +491,20 @@ fn repeated_runs(blocks: &[Block], settings: Settings) -> Vec<Span> {
                 first,
                 last,
             };
-            if is_run(block, &span, settings) {
+            if is_run(block, &span, settings) && !configures(block, &span) {
                 runs.push(span);
             }
             first = last + 1;
         }
     }
     runs
+}
+
+/// A span of statements that only configure what the function was given.
+pub(crate) fn configures(block: &Block, span: &Span) -> bool {
+    block.statements[span.first..=span.last]
+        .iter()
+        .all(|s| block.configures(s))
 }
 
 /// The last statement from `first` on with the shape of `first`.

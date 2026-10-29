@@ -506,3 +506,52 @@ fn a_long_expression_copied_into_different_statements_is_found() {
     // Not also found as statements: the statements around it differ.
     assert_eq!(found.classes.len(), 1, "{:#?}", found.classes);
 }
+
+#[test]
+fn lists_of_calls_configuring_a_parameter_are_not_copies() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let configure = |name: &str, entity: &str| {
+        let rows: Vec<String> = ["Name", "Email", "Phone", "Notes", "City", "Street"]
+            .iter()
+            .map(|f| {
+                format!("        builder.Property(x => x.{f}).IsRequired().HasMaxLength(200);")
+            })
+            .collect();
+        format!(
+            "class {name}\n{{\n    public void Configure(EntityTypeBuilder<{entity}> builder)\n    {{\n        builder.ToTable(\"{entity}s\");\n{}\n    }}\n}}\n",
+            rows.join("\n")
+        )
+    };
+    write(root, "Orders.cs", &configure("OrderConfiguration", "Order"));
+    write(
+        root,
+        "Members.cs",
+        &configure("MemberConfiguration", "Member"),
+    );
+    // The same rows on a field are code, not configuration of what came in.
+    let mapping = |name: &str| {
+        format!(
+            "class {name}\n{{\n    Dto Map(Order order)\n    {{\n        var dto = new Dto();\n        dto.Name = order.Name.Trim();\n        dto.Email = order.Email.ToLowerInvariant();\n        dto.Total = order.Lines.Sum(l => l.Price * l.Quantity);\n        dto.Paid = order.Payments.Where(p => p.Settled).Sum(p => p.Amount);\n        return dto;\n    }}\n}}\n"
+        )
+    };
+    write(root, "A.cs", &mapping("A"));
+    write(root, "B.cs", &mapping("B"));
+    let found = run(root, false);
+    assert!(
+        found
+            .classes
+            .iter()
+            .all(|c| !c.template.contains("builder.Property")),
+        "{:#?}",
+        found.classes
+    );
+    assert!(
+        found
+            .classes
+            .iter()
+            .any(|c| c.template.contains("dto.Total")),
+        "{:#?}",
+        found.classes
+    );
+}

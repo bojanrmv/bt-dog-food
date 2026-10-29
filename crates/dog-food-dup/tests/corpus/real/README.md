@@ -9,9 +9,9 @@ Findings are keyed by their class id, which stays while the copies stay in the s
 
 | Repository | Commit | Findings | Precision |
 | --- | --- | --- | --- |
-| [dotnet/eShop](https://github.com/dotnet/eShop) | `913acea` | 35 | 97% (34 real, 1 noise) |
+| [dotnet/eShop](https://github.com/dotnet/eShop) | `913acea` | 34 | 100% (34 real) |
 
-The labels include the 9 findings that generated-file detection and nested-copy removal took out (77% before). If a change brings one back, it counts as noise again.
+The labels include the 10 findings that are now left out (77% before): generated code, nested copies, and a list of dependency-injection registrations. If a change brings one back, it counts as noise again.
 
 ## Scoring a scan
 
