@@ -198,11 +198,12 @@ impl Filters {
             per_project: Vec::new(),
         };
         for text in raw {
+            let text = unquote(text);
             match text.split_once(':') {
-                Some((name, filter)) if names.iter().any(|n| n == name.trim()) => filters
+                Some((name, filter)) if names.iter().any(|n| n == unquote(name)) => filters
                     .per_project
-                    .push((name.trim().to_string(), filter.trim().to_string())),
-                _ => filters.global.push(text.trim().to_string()),
+                    .push((unquote(name).to_string(), unquote(filter).to_string())),
+                _ => filters.global.push(text.to_string()),
             }
         }
         filters
@@ -230,6 +231,22 @@ impl Filters {
         let global: Vec<&String> = self.global.iter().collect();
         Some((!global.is_empty()).then(|| any_of(&global)))
     }
+}
+
+/// `text` without the quotes a shell script kept around it
+/// (`"Project:FullyQualifiedName~X"` or `Project:"FullyQualifiedName~X"`):
+/// with them, the filter matches no test at all.
+fn unquote(text: &str) -> &str {
+    let mut text = text.trim();
+    while text.len() >= 2 {
+        let first = text.as_bytes()[0];
+        if (first == b'"' || first == b'\'') && text.as_bytes()[text.len() - 1] == first {
+            text = text[1..text.len() - 1].trim();
+        } else {
+            break;
+        }
+    }
+    text
 }
 
 /// One filter that matches a test when any of `filters` does.
@@ -419,6 +436,23 @@ mod tests {
             names(&chosen),
             [("App.Tests".into(), Some("FullyQualifiedName~A.B:C".into()))]
         );
+        // Quotes a shell script kept around the filter do not end up in it.
+        for quoted in [
+            r#""App.Tests:FullyQualifiedName~A.B""#,
+            r#"App.Tests:"FullyQualifiedName~A.B""#,
+            "'App.Tests:FullyQualifiedName~A.B'",
+        ] {
+            let selection = TestSelection {
+                filters: vec![quoted.into()],
+                ..TestSelection::default()
+            };
+            let chosen = select(dir.path(), &lib(dir.path()), &selection).unwrap();
+            assert_eq!(
+                names(&chosen),
+                [("App.Tests".into(), Some("FullyQualifiedName~A.B".into()))],
+                "{quoted}"
+            );
+        }
     }
 
     #[test]

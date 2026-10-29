@@ -510,6 +510,52 @@ fn note_left_out(scope: &Scope, targets: &[&Target], result: &mut RunResult) {
     }
 }
 
+/// A test project whose filter selected no test makes every mutant only it
+/// reaches look untested: say so, with the filter.
+fn note_empty_filters(scope: &Scope, reach: &Reach, result: &mut RunResult) {
+    let empty: Vec<String> = scope
+        .tests
+        .iter()
+        .filter(|t| !reach.home.values().any(|home| *home == t.assembly))
+        .filter_map(|t| t.filter.as_ref().map(|f| format!("{} ({f})", t.name())))
+        .collect();
+    if !empty.is_empty()
+        && result
+            .notes
+            .iter()
+            .all(|n| !n.contains("has no `Project:` prefix"))
+    {
+        result.notes.push(format!(
+            "these test projects ran no test under their filter: {}; check the filter (stray quotes, a class name that changed), since mutants only they reach look untested",
+            empty.join(", ")
+        ));
+    }
+}
+
+/// A baseline that ran no test says why it may have: test projects that
+/// use the mutated code but were left out, and the filters of those that ran.
+fn with_test_hint(err: String, scope: &Scope) -> String {
+    let mut out = err;
+    if !scope.left_out.is_empty() {
+        out.push_str(&format!(
+            "; these test projects use the mutated code but did not run: {} (a `--test-filter \"<Project>:<filter>\"` naming one runs it even when dgf.toml excludes it)",
+            scope.left_out.join(", ")
+        ));
+    }
+    let filtered: Vec<String> = scope
+        .tests
+        .iter()
+        .filter_map(|t| t.filter.as_ref().map(|f| format!("{}: {f}", t.name())))
+        .collect();
+    if !filtered.is_empty() {
+        out.push_str(&format!(
+            "; the filters used: {} (a filter that matches no test, such as one with stray quotes, runs nothing)",
+            filtered.join("; ")
+        ));
+    }
+    out
+}
+
 /// A filter without `Project:` runs in every test project that uses the
 /// mutated code; the ones where it matched no test only cost a test host
 /// start each. Says which, and the flag when the filter is a project's name.
@@ -763,7 +809,11 @@ fn run_language(
         secs(built),
         secs(started)
     ));
-    let Some(mut reach) = prepared.engine.reach(budget)? else {
+    let Some(mut reach) = prepared
+        .engine
+        .reach(budget)
+        .map_err(|err| with_test_hint(err, scope))?
+    else {
         mark_untested(&prepared.files, result, Untested::Baseline);
         return Ok(cache::KilledBy::new());
     };
@@ -774,6 +824,7 @@ fn run_language(
         home_times(&reach)
     ));
     note_idle_projects(scope, &reach, options, result);
+    note_empty_filters(scope, &reach, result);
     note_failing(&reach, result);
     reach.set_aside_failing();
     let tested = Instant::now();
@@ -1574,6 +1625,33 @@ mod tests {
         let mut quiet = RunResult::default();
         note_idle_projects(&scope, &reach, &options, &mut quiet);
         assert!(quiet.notes.is_empty());
+    }
+
+    #[test]
+    fn a_project_whose_filter_ran_nothing_is_named_and_an_empty_baseline_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut scope = Scope::fixed(sandbox::Kind::CSharp, dir.path(), 1, 1);
+        scope.tests = vec![projects::TestProject {
+            path: PathBuf::from("Api.Tests/Api.Tests.csproj"),
+            assembly: "Api.Tests".into(),
+            filter: Some("FullyQualifiedName~MembersTests".into()),
+        }];
+        scope.left_out = vec!["Api.IntegrationTests".into()];
+        let mut result = RunResult::default();
+        note_empty_filters(&scope, &Reach::default(), &mut result);
+        assert!(
+            result.notes[0].contains(
+                "ran no test under their filter: Api.Tests (FullyQualifiedName~MembersTests)"
+            ),
+            "{:?}",
+            result.notes
+        );
+        let hint = with_test_hint("the tests did not run without mutants".into(), &scope);
+        assert!(hint.contains("did not run: Api.IntegrationTests"), "{hint}");
+        assert!(
+            hint.contains("Api.Tests: FullyQualifiedName~MembersTests"),
+            "{hint}"
+        );
     }
 
     #[test]
