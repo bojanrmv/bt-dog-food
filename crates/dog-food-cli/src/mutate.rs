@@ -1282,6 +1282,26 @@ fn crash_kills_text(targets: &[Target], result: &RunResult) -> String {
     format!("killed in a run whose test host crashed (a failing test counted, but the crash may have caused it; check these by hand before calling one covered):\n{out}")
 }
 
+/// How many survivors each mutator left, most first: a class of
+/// equivalent mutants (a string nobody reads, a bound that cannot be
+/// reached) shows at once, before reading every line.
+fn survivors_by_mutator(targets: &[Target], result: &RunResult) -> String {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for (_, m) in survivors(targets, result) {
+        *counts.entry(m.mutator).or_default() += 1;
+    }
+    if counts.is_empty() {
+        return String::new();
+    }
+    let mut order: Vec<(&str, usize)> = counts.into_iter().collect();
+    order.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let parts: Vec<String> = order.iter().map(|(m, n)| format!("{m} {n}")).collect();
+    format!(
+        "survivors by mutator: {} (when one class is all equivalent here, `ignore_mutators` in [mutate] turns it off)\n",
+        parts.join(", ")
+    )
+}
+
 /// One survivor in the agent format: where, what, which tests reach it and
 /// what to assert.
 fn agent_survivor(out: &mut String, t: &Target, m: &Mutant, result: &RunResult) {
@@ -1329,6 +1349,7 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
         out.push_str("budget: the time budget ran out; run again to test the rest (results so far are cached)\n");
     }
     out.push_str("survivors: each is a change no test noticed; add a test that fails for it\n");
+    out.push_str(&survivors_by_mutator(targets, result));
     out.push_str("columns: location function original -> replacement (mutator) why\n");
     out.push_str("        why ends in `cached` when this run took the result from the cache: new tests outside the chosen test projects and filter do not change it\n");
     out.push_str(
