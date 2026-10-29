@@ -1,6 +1,6 @@
 # Finding C# code that does the same thing: research and plan
 
-Status: research, for review before more code is written. Scope: C#, deterministic methods only (no machine learning), aimed at code that can be refactored into one shared version.
+Status: phases 0 and 1 done (the corpus and scorer; the syntactic tool with near misses and no seed cap): types 1-3 14 of 14 on the corpus, no wrong matches. Phases 2 on are next. Scope: C#, deterministic methods only (no machine learning), aimed at code that can be refactored into one shared version.
 
 ## 1. Summary
 

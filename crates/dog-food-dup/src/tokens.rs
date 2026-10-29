@@ -26,6 +26,11 @@ pub struct Token {
 }
 
 impl Token {
+    /// Hash of the token with its name or value taken out.
+    pub fn shape(&self) -> u64 {
+        fnv(&[self.normalized().as_bytes()])
+    }
+
     /// The token with its name or value taken out.
     fn normalized(&self) -> &str {
         match self.kind {
@@ -57,6 +62,9 @@ pub struct Block {
     pub function: Option<String>,
     /// Whether the block is a function's whole body.
     pub is_body: bool,
+    /// Whether it is a constructor's body: mostly wiring, fields set from
+    /// parameters, which looks alike everywhere.
+    pub is_constructor: bool,
     pub statements: Vec<Statement>,
 }
 
@@ -105,6 +113,9 @@ fn collect(node: Node, src: &[u8], file: usize, tests: bool, out: &mut Vec<Block
                 is_body: node
                     .parent()
                     .is_some_and(|p| FUNCTIONS.contains(&p.kind()) || p.kind() == "arrow_function"),
+                is_constructor: node
+                    .parent()
+                    .is_some_and(|p| p.kind() == "constructor_declaration"),
                 statements,
             });
         }

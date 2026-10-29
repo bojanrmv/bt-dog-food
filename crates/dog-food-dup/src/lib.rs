@@ -15,6 +15,7 @@
 pub mod bench;
 pub mod changes;
 mod find;
+mod near;
 pub mod report;
 mod tokens;
 
@@ -23,7 +24,7 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use serde::Serialize;
 
-pub use find::{CloneClass, Copy, Hole, HoleKind, Settings};
+pub use find::{CloneClass, Copy, Difference, Hole, HoleKind, Settings};
 
 /// What a duplication scan found.
 #[derive(Debug, Clone, Serialize)]

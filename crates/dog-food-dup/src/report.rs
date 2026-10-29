@@ -6,6 +6,8 @@ use crate::{CloneClass, HoleKind, Report};
 
 /// Lines of a template shown before it is cut.
 const TEMPLATE_LINES: usize = 20;
+/// Differences of a near-miss class shown before they are cut.
+const DIFFERENCES: usize = 8;
 
 pub fn table(report: &Report, top: usize) -> String {
     let mut out = summary(report);
@@ -21,12 +23,13 @@ pub fn table(report: &Report, top: usize) -> String {
         } else {
             let _ = writeln!(
                 out,
-                "\n{}. {} copies of {} lines ({} statement{}), saves about {} lines",
+                "\n{}. {} copies of {} lines ({} statement{}), {}, saves about {} lines",
                 n + 1,
                 class.copies.len(),
                 class.lines,
                 class.statements,
                 if class.statements == 1 { "" } else { "s" },
+                kind_text(class),
                 class.saves
             );
             for copy in &class.copies {
@@ -45,6 +48,9 @@ pub fn table(report: &Report, top: usize) -> String {
                 hole.kind.name(),
                 hole.values.join(" | ")
             );
+        }
+        for line in difference_lines(class) {
+            let _ = writeln!(out, "   {line}");
         }
         let _ = writeln!(out, "   unite: {}", class.unite);
         for caution in &class.cautions {
@@ -71,7 +77,7 @@ pub fn agent(report: &Report, top: usize) -> String {
     if let Some(scope) = &report.scope {
         let _ = writeln!(out, "scope: {scope}");
     }
-    out.push_str("each class: copies (file:lines function, `(changed)` when the branch changed it), the template with ⟨n⟩ holes, what each hole is, and how to unite them\n");
+    out.push_str("each class: its type (1 the same code, 2 renamed, 3 near miss: ⟪…⟫ marks what not every copy has), copies (file:lines function, `(changed)` when the branch changed it), the template with ⟨n⟩ holes, what each hole is, what each near-miss copy adds, leaves out or has instead, and how to unite them\n");
     for (n, class) in report.classes.iter().take(shown(report, top)).enumerate() {
         if let Some(run) = run(class) {
             let _ = writeln!(
@@ -86,9 +92,10 @@ pub fn agent(report: &Report, top: usize) -> String {
         }
         let _ = writeln!(
             out,
-            "\n## class {} · {} copies · {} lines each · saves ~{}",
+            "\n## class {} · {} copies · {} · {} lines each · saves ~{}",
             n + 1,
             class.copies.len(),
+            kind_text(class),
             class.lines,
             class.saves
         );
@@ -126,7 +133,61 @@ fn agent_template(out: &mut String, class: &CloneClass) {
             hole.values.join(" | ")
         );
     }
+    for line in difference_lines(class) {
+        let _ = writeln!(out, "{line}");
+    }
     let _ = writeln!(out, "unite: {}", class.unite);
+}
+
+/// The clone type in words.
+fn kind_text(class: &CloneClass) -> String {
+    match (class.clone_type, class.similarity) {
+        (1, _) => "type 1: the same code".to_string(),
+        (2, _) => "type 2: renamed".to_string(),
+        (_, Some(s)) => format!("type 3: near miss, {:.0}% alike", s * 100.0),
+        _ => "type 3: near miss".to_string(),
+    }
+}
+
+/// What each near-miss copy adds, leaves out or has instead, against the
+/// first copy.
+fn difference_lines(class: &CloneClass) -> Vec<String> {
+    let clip = |text: &str| {
+        if text.chars().count() > 80 {
+            format!("{}...", text.chars().take(80).collect::<String>())
+        } else {
+            text.to_string()
+        }
+    };
+    let mut lines: Vec<String> = class
+        .differences
+        .iter()
+        .take(DIFFERENCES)
+        .map(|d| {
+            let copy = &class.copies[d.copy];
+            let who = copy.function.as_deref().unwrap_or(copy.file.as_str());
+            let line = d.line;
+            match d.kind {
+                "added" => format!("differs: {who} (line {line}) adds `{}`", clip(&d.other)),
+                "removed" => format!(
+                    "differs: {who} (line {line}) leaves out `{}`",
+                    clip(&d.first)
+                ),
+                _ => format!(
+                    "differs: {who} (line {line}) has `{}` for `{}`",
+                    clip(&d.other),
+                    clip(&d.first)
+                ),
+            }
+        })
+        .collect();
+    if class.differences.len() > DIFFERENCES {
+        lines.push(format!(
+            "differs: ... and {} more (all in --format json)",
+            class.differences.len() - DIFFERENCES
+        ));
+    }
+    lines
 }
 
 /// A self-contained page: where the copies are, file by file, and a card

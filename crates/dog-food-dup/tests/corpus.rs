@@ -24,7 +24,8 @@ fn dgf_dup_keeps_its_scores_on_the_corpus() {
     assert!(card.unrelated.is_empty(), "{:?}", card.unrelated);
     // The levels reached so far; raise them as the finder improves.
     assert!(card.recall_of(1) >= 1.0);
-    assert!(card.recall_of(2) >= 0.66);
+    assert!(card.recall_of(2) >= 1.0);
+    assert!(card.recall_of(3) >= 1.0);
 }
 
 #[test]

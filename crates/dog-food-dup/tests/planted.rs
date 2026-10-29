@@ -138,7 +138,7 @@ fn the_html_report_carries_the_findings_and_cannot_be_broken_out_of() {
 }
 
 #[test]
-fn a_different_operator_is_not_a_copy() {
+fn a_different_operator_is_a_near_miss_not_a_copy() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let other = body("seat", "Fee", "sum").replace("* seat.Quantity", "- seat.Quantity");
@@ -152,8 +152,17 @@ fn a_different_operator_is_not_a_copy() {
     );
     let report = run(root, false);
     assert!(
-        report.classes.iter().all(|c| c.statements < 3),
-        "only the parts before the change may match: {report:#?}"
+        report
+            .classes
+            .iter()
+            .all(|c| c.statements < 3 || c.clone_type == 3),
+        "only the parts before the change match exactly: {report:#?}"
+    );
+    let near = report.classes.iter().find(|c| c.clone_type == 3).unwrap();
+    assert!(
+        near.differences.iter().any(|d| d.other.contains('-')),
+        "{:?}",
+        near.differences
     );
 }
 
@@ -211,5 +220,67 @@ fn test_code_is_left_out_unless_asked_for() {
         with_tests.classes[0].unite.contains("keep one function"),
         "whole bodies: {}",
         with_tests.classes[0].unite
+    );
+}
+
+#[test]
+fn a_pattern_copied_many_times_keeps_every_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let classes: String = (0..80)
+        .map(|n| {
+            format!(
+                "class Item{n} {{\n    decimal Add(Plan plan, decimal limit) {{\n{}    }}\n}}\n",
+                body("plan", &format!("Price{n}"), "total")
+            )
+        })
+        .collect();
+    write(root, "src/Items.cs", &classes);
+    let report = run(root, false);
+    assert_eq!(report.classes.len(), 1, "{report:#?}");
+    assert_eq!(report.classes[0].copies.len(), 80);
+}
+
+#[test]
+fn a_copy_with_one_more_statement_is_a_near_miss_with_its_difference() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let body = |extra: &str| {
+        format!(
+            "        var rows = new List<string>();
+        foreach (var line in order.Lines)
+        {{
+{extra}            var amount = line.Quantity * line.Price;
+            rows.Add(line.Sku + \" \" + line.Quantity + \" \" + amount);
+        }}
+        rows.Sort(StringComparer.Ordinal);
+        return rows;
+"
+        )
+    };
+    write(
+        root,
+        "src/Rows.cs",
+        &format!(
+            "class Invoices {{\n    List<string> Rows(Order order) {{\n{}    }}\n}}\n\nclass Receipts {{\n    List<string> Rows(Order order) {{\n{}    }}\n}}\n",
+            body(""),
+            body("            if (line.Quantity == 0)\n            {\n                continue;\n            }\n")
+        ),
+    );
+    let report = scan(&[root.to_path_buf()], root, false, Settings::default());
+    assert_eq!(report.classes.len(), 1, "{report:#?}");
+    let class = &report.classes[0];
+    assert_eq!(class.clone_type, 3);
+    assert!(class.similarity.unwrap() >= 0.8);
+    assert_eq!(class.differences.len(), 1, "{:#?}", class.differences);
+    let difference = &class.differences[0];
+    assert_eq!(difference.kind, "added");
+    assert!(
+        difference.other.starts_with("if (line.Quantity == 0)"),
+        "{difference:?}"
+    );
+    assert_eq!(
+        class.copies[difference.copy].function.as_deref(),
+        Some("Receipts.Rows")
     );
 }
