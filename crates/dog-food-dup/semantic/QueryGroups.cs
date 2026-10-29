@@ -277,7 +277,7 @@ public static class QueryGroups
 
     static string Display(ITypeSymbol type) => type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
 
-    /// <summary>A name from the conditions: <c>x.GymId == id</c> is ForGym, <c>!x.IsDeleted</c> NotDeleted.</summary>
+    /// <summary>A name from the conditions: <c>x.ShopId == id</c> is ForShop, <c>!x.IsDeleted</c> NotDeleted.</summary>
     static string MethodName(IEnumerable<Conjunct> conjuncts)
     {
         var parts = conjuncts.Select(Part).Where(p => p.Length > 0).Distinct().Take(3).ToList();
@@ -315,8 +315,8 @@ public static class QueryGroups
     }
 
     /// <summary>
-    /// <c>x.EndedAt == null</c> is WithoutEndedAt, <c>x.GymId == id</c>
-    /// ForGym, <c>!x.IsActive</c> NotActive, a comparison or call By....
+    /// <c>x.EndedAt == null</c> is WithoutEndedAt, <c>x.ShopId == id</c>
+    /// ForShop, <c>!x.IsActive</c> NotActive, a comparison or call By....
     /// </summary>
     static string Named(Node test, string member, bool negated)
     {
