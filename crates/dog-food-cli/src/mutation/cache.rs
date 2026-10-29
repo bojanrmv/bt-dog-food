@@ -236,7 +236,8 @@ impl Cache {
                         .map(|files| files.iter().cloned().collect())
                         .unwrap_or_default();
                     entry.reached_tests = reached_tests.get(&m.id).cloned().unwrap_or_default();
-                    entry.rechecked = self.rerun && outcome.retested_on_rerun();
+                    // A crash says nothing about the tests: every rerun tries it again.
+                    entry.rechecked = self.rerun && outcome.undetected();
                     Some(entry)
                 })
                 .collect();
@@ -626,6 +627,31 @@ mod tests {
         // Changed tests: the old result, rechecked or not, no longer holds.
         assert!(cache
             .rechecked(&[&target], &scope(root.path(), 1, 8))
+            .is_empty());
+    }
+
+    #[test]
+    fn a_crash_in_a_rerun_is_tried_again_by_the_next_rerun() {
+        let root = tempfile::tempdir().unwrap();
+        let target = target(
+            root.path(),
+            "Shop.cs",
+            "class C {\n  int F(int a) { return a + 1; }\n}\n",
+        );
+        let crashed = HashMap::from([(0, Outcome::RuntimeError)]);
+        let mut cache = Cache::load(&root.path().join("cache"));
+        cache.rerun = true;
+        cache.store(
+            &[&target],
+            &scope(root.path(), 1, 7),
+            &crashed,
+            &KilledBy::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        // A survivor tested again is not tested a third time; a crash is.
+        assert!(cache
+            .rechecked(&[&target], &scope(root.path(), 1, 7))
             .is_empty());
     }
 

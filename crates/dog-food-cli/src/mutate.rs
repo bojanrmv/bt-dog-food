@@ -1130,7 +1130,11 @@ const HINTS: &[(&[&str], &str)] = &[
         &["statement", "call", "block"],
         "the effect of this code: the state it changes, the call it makes or the exception it throws",
     ),
-    (&["string", "stringmethod", "method"], "the exact text"),
+    (&["string"], "the exact text"),
+    (
+        &["stringmethod", "method"],
+        "the exact text, from input that needs the call (spaces around it for trim, other casing for a case change); when every caller already passes such input cleaned (an <input type=email> strips spaces), test the function directly, or mark the mutant equivalent with `dgf-disable-once <mutator>: <why>`",
+    ),
     (&["linq"], "which elements come back: order, first or last, empty input"),
     (
         &["nullcoalescing", "optional"],
