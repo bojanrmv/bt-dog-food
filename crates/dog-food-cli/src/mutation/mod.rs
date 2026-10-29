@@ -201,6 +201,8 @@ pub struct RunResult {
     /// Killed in a run whose tests did not all report (the test host crashed
     /// or was stopped): a failing test decided it, but the crash may have.
     pub crash_kills: BTreeSet<usize>,
+    /// Runtime errors: what the run's output said as it ended.
+    pub crash_reasons: HashMap<usize, String>,
     /// Things the reader should know, such as a fallback to a full sandbox.
     pub notes: Vec<String>,
     /// Per tested mutant, up to three tests that reach it ("name (file)").
@@ -382,6 +384,11 @@ pub trait Engine: Sync {
         tag: &str,
     ) -> Result<SoloRun, String>;
     fn test_projects(&self) -> Vec<String>;
+    /// Why the run tagged `tag` ended without reporting its tests, from its
+    /// output.
+    fn crash_reason(&self, _tag: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Most tests in one pack, so a run stays short enough to repeat.
@@ -992,12 +999,17 @@ fn test_mutants(
         }
     }
     let runner = Runner::new(engine, reach, options)?;
-    for (id, run) in runner.solos(&solo) {
+    for (id, run, tag) in runner.solos(&solo) {
         if let Ran::Done(run) = run? {
             let expected = reach.by_mutant.get(&id);
             let (outcome, killed_by) = solo_outcome(&run, &reach.failing, expected);
             if outcome == Outcome::Killed && crashed(run.0, &run.1, expected) {
                 result.crash_kills.insert(id);
+            }
+            if outcome == Outcome::RuntimeError {
+                if let Some(reason) = engine.crash_reason(&tag) {
+                    result.crash_reasons.insert(id, reason);
+                }
             }
             result.outcomes.insert(id, outcome);
             killers.insert(id, killed_by);
@@ -1184,7 +1196,8 @@ impl<'a> Runner<'a> {
         })
     }
 
-    fn solos(&self, ids: &[usize]) -> Vec<(usize, Result<Ran<SoloRun>, String>)> {
+    /// Each mutant's solo run and the tag of its last run.
+    fn solos(&self, ids: &[usize]) -> Vec<(usize, Result<Ran<SoloRun>, String>, String)> {
         self.pool.install(|| {
             ids.par_iter()
                 .map(|&id| {
@@ -1199,7 +1212,8 @@ impl<'a> Runner<'a> {
                             |run| run.0 == TestRun::TimedOut,
                         )
                     };
-                    let mut run = solo(limit, &format!("s{id}"));
+                    let mut tag = format!("s{id}");
+                    let mut run = solo(limit, &tag);
                     // A busy machine makes slow runs, not endless ones: a
                     // timeout counts only when a run with four times the time
                     // (and at least 30 s more) also times out.
@@ -1207,9 +1221,10 @@ impl<'a> Runner<'a> {
                         let longer = (limit * 4).max(limit + Duration::from_secs(30));
                         self.again
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        run = solo(longer, &format!("s{id}-again"));
+                        tag = format!("s{id}-again");
+                        run = solo(longer, &tag);
                     }
-                    (id, run)
+                    (id, run, tag)
                 })
                 .collect()
         })

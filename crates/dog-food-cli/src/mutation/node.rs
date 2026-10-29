@@ -46,8 +46,8 @@ pub struct NodeTests {
     runner: Runner,
     /// The runner's script, found in node_modules above the package.
     script: PathBuf,
-    /// Angular only: the project name and its root, relative to the package.
-    angular: Option<(String, String)>,
+    /// Angular only: the project.
+    angular: Option<AngularProject>,
     sandbox: PathBuf,
     /// The mutated files: compiler errors elsewhere are not the mutants' doing.
     mutated: HashSet<PathBuf>,
@@ -104,20 +104,20 @@ impl NodeTests {
                 "--ci",
             ]),
             Runner::Angular => {
-                let (project, root) = self.angular.as_ref().expect("an Angular project");
+                let project = self.angular.as_ref().expect("an Angular project");
                 command.args([
                     "test",
-                    project,
+                    &project.name,
                     "--watch=false",
                     "--no-progress",
                     "--reporters=json",
                     &format!("--output-file={report}"),
                 ]);
-                // `--include` is relative to the project root.
-                let prefix = format!("{}/", root.trim_end_matches('/'));
-                command.args(files.iter().map(|f| {
-                    format!("--include={}", f.strip_prefix(prefix.as_str()).unwrap_or(f))
-                }));
+                command.args(
+                    files
+                        .iter()
+                        .map(|f| format!("--include={}", project.include(f))),
+                );
                 return command;
             }
         };
@@ -136,7 +136,7 @@ impl NodeTests {
         let report = folder.join("report.json");
         let mut command = self.command(&report, files);
         command.envs(env.iter().map(|(k, v)| (*k, v.as_str())));
-        let status = exec::run(command, limit)?;
+        let status = exec::run(command, limit, &folder.join(exec::log_name(0)))?;
         let parsed = Report::read(&report, &self.package);
         Ok((status, parsed))
     }
@@ -159,10 +159,10 @@ impl Engine for NodeTests {
     /// builder type-checks, and a mutant can break narrowing (`typeof a ===
     /// "number" && ...` turned into `||`): tsc finds those first.
     fn build(&self, _: Round, budget: Budget) -> Result<(), BuildError> {
-        let Some((_, root)) = &self.angular else {
+        let Some(project) = &self.angular else {
             return Ok(());
         };
-        let config = self.package.join(root).join("tsconfig.spec.json");
+        let config = self.package.join(&project.root).join("tsconfig.spec.json");
         let tsc = script_at(&self.package, "node_modules/typescript/bin/tsc");
         let (true, Some(tsc)) = (config.exists(), tsc) else {
             return Ok(());
@@ -297,11 +297,15 @@ impl Engine for NodeTests {
 
     fn test_projects(&self) -> Vec<String> {
         let runner = match (self.runner, &self.angular) {
-            (Runner::Angular, Some((project, _))) => format!("ng test {project}"),
+            (Runner::Angular, Some(project)) => format!("ng test {}", project.name),
             (Runner::Jest, _) => "jest".into(),
             _ => "vitest".into(),
         };
         vec![format!("{} ({runner})", self.package.display())]
+    }
+
+    fn crash_reason(&self, tag: &str) -> Option<String> {
+        exec::crash_reason(&exec::runs_folder(&self.sandbox).join(tag))
     }
 }
 
@@ -361,9 +365,37 @@ fn runner_of(dir: &Path) -> Option<Runner> {
     }
 }
 
+/// An Angular project from angular.json; paths are relative to the package.
+#[derive(Debug, PartialEq, Eq)]
+struct AngularProject {
+    name: String,
+    root: String,
+    /// Where `ng test` resolves `--include` (`<root>/src` when not set).
+    source_root: String,
+}
+
+impl AngularProject {
+    /// A test file (relative to the package) as `--include` takes it:
+    /// relative to the source root, with `..` for files beside it (a
+    /// library's secondary entry points sit next to its `src`).
+    fn include(&self, file: &str) -> String {
+        let file: Vec<&str> = file.split('/').filter(|p| !p.is_empty()).collect();
+        let base: Vec<&str> = self
+            .source_root
+            .split('/')
+            .filter(|p| !p.is_empty())
+            .collect();
+        let shared = file.iter().zip(&base).take_while(|(a, b)| a == b).count();
+        let up = std::iter::repeat_n("..", base.len() - shared);
+        up.chain(file[shared..].iter().copied())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+}
+
 /// The Angular project holding `file` whose `test` target is Angular's
-/// unit-test builder, from the package's angular.json: (name, root).
-fn angular_project(package: &Path, file: &Path) -> Option<(String, String)> {
+/// unit-test builder, from the package's angular.json.
+fn angular_project(package: &Path, file: &Path) -> Option<AngularProject> {
     let text = std::fs::read_to_string(package.join("angular.json")).ok()?;
     let workspace: serde_json::Value = serde_json::from_str(&text).ok()?;
     let relative = file
@@ -375,9 +407,21 @@ fn angular_project(package: &Path, file: &Path) -> Option<(String, String)> {
         .as_object()?
         .iter()
         .filter(|(_, p)| p["architect"]["test"]["builder"] == "@angular/build:unit-test")
-        .map(|(name, p)| (name.clone(), p["root"].as_str().unwrap_or("").to_string()))
-        .filter(|(_, root)| root.is_empty() || relative.starts_with(&format!("{root}/")))
-        .max_by_key(|(_, root)| root.len())
+        .map(|(name, p)| {
+            let root = p["root"].as_str().unwrap_or("").trim_end_matches('/');
+            let source_root = match p["sourceRoot"].as_str() {
+                Some(dir) => dir.trim_end_matches('/').to_string(),
+                None if root.is_empty() => "src".to_string(),
+                None => format!("{root}/src"),
+            };
+            AngularProject {
+                name: name.clone(),
+                root: root.to_string(),
+                source_root,
+            }
+        })
+        .filter(|p| p.root.is_empty() || relative.starts_with(&format!("{}/", p.root)))
+        .max_by_key(|p| p.root.len())
 }
 
 /// The runner's entry script in node_modules, looking upwards from the package.
@@ -532,13 +576,36 @@ mod tests {
         }});
         std::fs::write(dir.path().join("angular.json"), workspace.to_string()).unwrap();
         let file = |p: &str| dir.path().join(p);
+        let web = angular_project(dir.path(), &file("projects/web/src/a.ts")).unwrap();
         assert_eq!(
-            angular_project(dir.path(), &file("projects/web/src/a.ts")),
-            Some(("web".into(), "projects/web".into()))
+            (
+                web.name.as_str(),
+                web.root.as_str(),
+                web.source_root.as_str()
+            ),
+            ("web", "projects/web", "projects/web/src")
         );
         assert_eq!(
             angular_project(dir.path(), &file("projects/site/src/a.ts")),
             None
+        );
+    }
+
+    #[test]
+    fn angular_includes_are_relative_to_the_source_root() {
+        let core = AngularProject {
+            name: "core".into(),
+            root: "projects/core".into(),
+            source_root: "projects/core/src".into(),
+        };
+        assert_eq!(
+            core.include("projects/core/src/lib/a.spec.ts"),
+            "lib/a.spec.ts"
+        );
+        // A secondary entry point beside the source root.
+        assert_eq!(
+            core.include("projects/core/auth/src/lib/b.spec.ts"),
+            "../auth/src/lib/b.spec.ts"
         );
     }
 

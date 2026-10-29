@@ -939,7 +939,11 @@ fn report_status(m: &Mutant, result: &RunResult) -> (&'static str, Option<String
         .iter()
         .find(|(o, _)| o == outcome)
         .map_or("Pending", |(_, name)| name);
-    (status, m.ignored.clone())
+    let reason = match outcome {
+        Outcome::RuntimeError => result.crash_reasons.get(&m.id).cloned(),
+        _ => None,
+    };
+    (status, reason.or_else(|| m.ignored.clone()))
 }
 
 /// The schema's name for each outcome.
@@ -1282,6 +1286,39 @@ fn crash_kills_text(targets: &[Target], result: &RunResult) -> String {
     format!("killed in a run whose test host crashed (a failing test counted, but the crash may have caused it; check these by hand before calling one covered):\n{out}")
 }
 
+/// Mutants that crashed the test run, grouped by what the run's output said
+/// as it ended, most first: one reason for all of them points at the setup.
+fn crashes_text(targets: &[Target], result: &RunResult) -> String {
+    let mut by_reason: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (t, m) in targets
+        .iter()
+        .flat_map(|t| t.mutants.iter().map(move |m| (t, m)))
+        .filter(|(_, m)| result.outcomes.get(&m.id) == Some(&Outcome::RuntimeError))
+    {
+        let reason = result
+            .crash_reasons
+            .get(&m.id)
+            .map_or("no output kept (a result from the cache)", String::as_str);
+        by_reason
+            .entry(reason)
+            .or_default()
+            .push(format!("{}:{}", t.file, m.line));
+    }
+    if by_reason.is_empty() {
+        return String::new();
+    }
+    let mut groups: Vec<_> = by_reason.into_iter().collect();
+    groups.sort_by_key(|(_, at)| std::cmp::Reverse(at.len()));
+    let mut out = String::from(
+        "crashed the test run (by what its output said last):
+",
+    );
+    for (reason, at) in groups {
+        let _ = writeln!(out, "  {} mutants, e.g. {}: {reason}", at.len(), at[0]);
+    }
+    out
+}
+
 /// How many survivors each mutator left, most first: a class of
 /// equivalent mutants (a string nobody reads, a bound that cannot be
 /// reached) shows at once, before reading every line.
@@ -1377,6 +1414,7 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
         }
     }
     out.push_str(&crash_kills_text(targets, result));
+    out.push_str(&crashes_text(targets, result));
     let suppressed = suppressions_text(targets, "");
     if !suppressed.is_empty() {
         let _ = write!(

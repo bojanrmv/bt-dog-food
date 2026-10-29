@@ -10,10 +10,13 @@ use super::sandbox::{site_lines, FileMutants};
 use super::TestRun;
 use crate::discover::absolute;
 
-/// Runs `command` with its output discarded; stops it (and the processes it
-/// started) when it runs past `limit`.
-pub fn run(mut command: Command, limit: Duration) -> Result<TestRun, String> {
-    command.stdout(Stdio::null()).stderr(Stdio::null());
+/// Runs `command` with its output written to `log`; stops it (and the
+/// processes it started) when it runs past `limit`.
+pub fn run(mut command: Command, limit: Duration, log: &Path) -> Result<TestRun, String> {
+    let file = std::fs::File::create(log)
+        .map_err(|err| format!("could not create {}: {err}", log.display()))?;
+    let copy = file.try_clone().map_err(|err| err.to_string())?;
+    command.stdout(file).stderr(copy);
     let child = command
         .spawn()
         .map_err(|err| format!("could not start {:?}: {err}", command.get_program()))?;
@@ -217,6 +220,60 @@ pub fn fresh_folder(sandbox: &Path, tag: &str) -> Result<PathBuf, String> {
     }
     std::fs::create_dir_all(&folder).map_err(|err| err.to_string())?;
     Ok(folder)
+}
+
+/// The name of a run's output log in its folder (`index` tells apart the
+/// commands of one run).
+pub fn log_name(index: usize) -> String {
+    format!("output-{index}.log")
+}
+
+/// Why a run that did not report its tests ended, from the logs in
+/// `folder`: the lines that name an error, or else the last lines.
+pub fn crash_reason(folder: &Path) -> Option<String> {
+    let mut logs: Vec<PathBuf> = std::fs::read_dir(folder)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "log"))
+        .collect();
+    logs.sort();
+    let lines: Vec<String> = logs
+        .iter()
+        .flat_map(|p| {
+            std::fs::read_to_string(p)
+                .unwrap_or_default()
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let telling = |l: &&String| {
+        let l = l.to_lowercase();
+        l.contains("error") || l.contains("no tests found") || l.contains("exception")
+    };
+    let errors: Vec<&String> = lines.iter().filter(telling).take(3).collect();
+    let picked = if errors.is_empty() {
+        lines.iter().rev().take(3).rev().collect()
+    } else {
+        errors
+    };
+    let text = picked
+        .iter()
+        .map(|l| l.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    (!text.is_empty()).then(|| clip(&text, 400))
+}
+
+/// `text` cut to at most `max` characters.
+fn clip(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!("{}...", &text[..at]),
+        None => text.to_string(),
+    }
 }
 
 /// Every line of every file in `folder`.
@@ -458,8 +515,9 @@ mod tests {
             command.args(["-c", "while :; do :; done"]);
             command
         };
+        let dir = tempfile::tempdir().unwrap();
         let started = Instant::now();
-        let status = run(busy, Duration::from_secs(3)).unwrap();
+        let status = run(busy, Duration::from_secs(3), &dir.path().join("out.log")).unwrap();
         assert_eq!(status, TestRun::TimedOut);
         // Processor time catches up with the wall clock while it loops; a
         // little slack for a busy machine.
@@ -472,8 +530,14 @@ mod tests {
 
     #[test]
     fn a_run_that_waits_without_working_gets_more_time() {
+        let dir = tempfile::tempdir().unwrap();
         let started = Instant::now();
-        let status = run(sleeper(3), Duration::from_millis(1500)).unwrap();
+        let status = run(
+            sleeper(3),
+            Duration::from_millis(1500),
+            &dir.path().join("out.log"),
+        )
+        .unwrap();
         if cfg!(windows) {
             // Past the limit, but it hardly used the processor: it finishes.
             assert_eq!(status, TestRun::Passed);
@@ -481,6 +545,40 @@ mod tests {
             assert_eq!(status, TestRun::TimedOut);
         }
         assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    #[test]
+    fn a_crash_reason_is_the_error_lines_or_else_the_last_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(crash_reason(dir.path()), None);
+        let log = dir.path().join(log_name(0));
+        std::fs::write(
+            &log,
+            "building
+
+Error: No tests found matching the following patterns
+  x.spec.ts
+done
+",
+        )
+        .unwrap();
+        assert_eq!(
+            crash_reason(dir.path()).as_deref(),
+            Some("Error: No tests found matching the following patterns")
+        );
+        std::fs::write(
+            &log,
+            "one
+two
+three
+four
+",
+        )
+        .unwrap();
+        assert_eq!(
+            crash_reason(dir.path()).as_deref(),
+            Some("two | three | four")
+        );
     }
 
     #[test]

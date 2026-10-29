@@ -14,7 +14,7 @@ use dog_food_core::mutate::schemata;
 use dog_food_core::Mutant;
 
 use super::Outcome;
-use crate::discover::absolute;
+use crate::discover::{absolute, real};
 use crate::mutate::Target;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -520,9 +520,13 @@ fn keep_time(path: &Path, time: Option<SystemTime>) -> Result<(), String> {
 /// already a link.
 fn relink(target: &Path, at: &Path) -> Result<(), String> {
     if is_link(at) {
-        return Ok(());
-    }
-    if at.is_dir() {
+        // Worktrees share a sandbox: a link left by another one points at
+        // its node_modules, which may be different or gone.
+        if real(at).is_some() && real(at) == real(target) {
+            return Ok(());
+        }
+        remove_entry(at)?;
+    } else if at.is_dir() {
         std::fs::remove_dir_all(at)
             .map_err(|err| format!("could not clear {}: {err}", at.display()))?;
     } else if at.exists() {
@@ -778,6 +782,14 @@ mod tests {
         sync(&wanted, &dir).unwrap();
         assert!(is_link(&dir.join("web/lib")) && dir.join("web/lib/i.js").exists());
         assert!(dir.join("web/node_modules/x/i.js").exists());
+        // A link left by another worktree is pointed at this one's folder.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(other.path().join("y")).unwrap();
+        relink(other.path(), &dir.join("web/node_modules")).unwrap();
+        assert!(dir.join("web/node_modules/y").exists());
+        sync(&wanted, &dir).unwrap();
+        assert!(dir.join("web/node_modules/x/i.js").exists());
+        assert!(other.path().join("y").exists());
         // Bringing it up to date without them removes the links, not their targets.
         sync(&BTreeMap::new(), &dir).unwrap();
         assert!(!dir.join("web/lib").exists());

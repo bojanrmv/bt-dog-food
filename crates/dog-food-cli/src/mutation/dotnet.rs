@@ -120,7 +120,7 @@ impl Dotnet {
             let mut command = self.test_command(project, filter.as_deref(), folder, index)?;
             command.envs(env.iter().map(|(k, v)| (*k, v.as_str())));
             let started = Instant::now();
-            let status = exec::run(command, limit)?;
+            let status = exec::run(command, limit, &folder.join(exec::log_name(index)))?;
             Ok::<_, String>((status, project.assembly.clone(), started.elapsed()))
         };
         let statuses: Vec<Result<(TestRun, String, Duration), String>> = if parallel {
@@ -296,6 +296,11 @@ fn compiler_errors(errors: &[String]) -> bool {
     errors.iter().any(|e| e.contains(": error CS"))
 }
 
+/// CS0006: a referenced project's assembly is not there.
+fn missing_reference(errors: &[String]) -> bool {
+    errors.iter().any(|e| e.contains("error CS0006"))
+}
+
 fn worst(a: TestRun, b: TestRun) -> TestRun {
     match (a, b) {
         (TestRun::TimedOut, _) | (_, TestRun::TimedOut) => TestRun::TimedOut,
@@ -310,7 +315,14 @@ impl Engine for Dotnet {
     fn build(&self, round: Round, budget: Budget) -> Result<(), BuildError> {
         if round == Round::Mutated {
             let restore = !self.mutated_restored.load(Ordering::Relaxed);
-            let built = self.build_target(&self.mutated, restore, true, budget);
+            let mut built = self.build_target(&self.mutated, restore, true, budget);
+            // Built without their references, the mutated projects compile
+            // side by side: one whose mutants broke the last round has no
+            // reference assembly yet when a project using it reads it. Built
+            // with references, it comes first.
+            if matches!(&built, Err(BuildError::Errors(e)) if missing_reference(e)) {
+                built = self.build_target(&self.mutated, false, false, budget);
+            }
             if built.is_ok() || matches!(&built, Err(BuildError::Errors(e)) if compiler_errors(e)) {
                 self.mutated_restored.store(true, Ordering::Relaxed);
             }
@@ -406,6 +418,10 @@ impl Engine for Dotnet {
                 None => p.path.display().to_string(),
             })
             .collect()
+    }
+
+    fn crash_reason(&self, tag: &str) -> Option<String> {
+        exec::crash_reason(&exec::runs_folder(&self.sandbox).join(tag))
     }
 }
 
@@ -717,6 +733,15 @@ mod tests {
         assert!(path.to_string_lossy().ends_with(r"\Pricing.cs"));
         assert_eq!(number, 22);
         assert!(exec::error_location("Build succeeded.").is_none());
+    }
+
+    #[test]
+    fn a_missing_reference_assembly_is_told_apart_from_a_mutant() {
+        let line = r"CSC : error CS0006: Metadata file 'D:\s\Scheduling\obj\Debug\net10.0\ref\Scheduling.dll' could not be found [D:\s\Api.csproj]";
+        assert!(missing_reference(&[line.to_string()]));
+        assert!(!missing_reference(&[
+            r"D:\s\A.cs(3,1): error CS0165: Use of unassigned local variable 'f'".to_string()
+        ]));
     }
 
     #[test]
