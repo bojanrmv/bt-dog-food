@@ -198,34 +198,46 @@ pub fn score(report: &Value, labels: &Labels) -> Scorecard {
         let hit = found.get(&(a.clone(), b.clone()));
         let name = format!("{}: {a} vs {b} ({})", label.id, label.how);
         if label.kind > 0 {
-            let entry = card.by_type.entry(label.kind).or_default();
-            entry.1 += 1;
-            entry.0 += usize::from(hit.is_some());
-            if label.kind == 4 {
-                let entry = card.by_group.entry(label.id.clone()).or_default();
-                entry.1 += 1;
-                entry.0 += usize::from(hit.is_some());
-            }
-            if hit.is_none() {
-                card.missed.push(name.clone());
-            }
+            card.count(label, hit.is_some(), &name);
         } else if hit.is_some() {
             card.unrelated.push(name.clone());
         }
         if hit.is_some_and(|f| f.equal) {
-            if label.equal {
-                card.equal_right += 1;
-            } else {
-                card.equal_wrong.push(name);
-            }
+            card.claimed_equal(label, name);
         }
     }
-    for (a, b) in found.keys() {
-        if !labelled.contains_key(&(a.clone(), b.clone())) {
-            card.unlabelled.push(format!("{a} vs {b}"));
-        }
-    }
+    card.unlabelled = found
+        .keys()
+        .filter(|pair| !labelled.contains_key(*pair))
+        .map(|(a, b)| format!("{a} vs {b}"))
+        .collect();
     card
+}
+
+impl Scorecard {
+    /// A labelled clone pair, found or missed.
+    fn count(&mut self, label: &Label, hit: bool, name: &str) {
+        let entry = self.by_type.entry(label.kind).or_default();
+        entry.1 += 1;
+        entry.0 += usize::from(hit);
+        if label.kind == 4 {
+            let entry = self.by_group.entry(label.id.clone()).or_default();
+            entry.1 += 1;
+            entry.0 += usize::from(hit);
+        }
+        if !hit {
+            self.missed.push(name.to_string());
+        }
+    }
+
+    /// The report says the pair does the same thing: right or wrong.
+    fn claimed_equal(&mut self, label: &Label, name: String) {
+        if label.equal {
+            self.equal_right += 1;
+        } else {
+            self.equal_wrong.push(name);
+        }
+    }
 }
 
 /// The scorecard as text.

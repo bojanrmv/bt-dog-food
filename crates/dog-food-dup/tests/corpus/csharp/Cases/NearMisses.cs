@@ -258,3 +258,29 @@ public static class LineSum
         return sum - order.Discount;
     }
 }
+
+public static class Tickets
+{
+    static int next;
+
+    static int Take() => ++next;
+
+    public static int TakeOnce(int bonus)
+    {
+        var ticket = Take();
+        if (bonus > 0)
+        {
+            return ticket + ticket + bonus;
+        }
+        return ticket + ticket;
+    }
+
+    public static int TakeTwice(int bonus)
+    {
+        if (bonus > 0)
+        {
+            return Take() + Take() + bonus;
+        }
+        return Take() + Take();
+    }
+}

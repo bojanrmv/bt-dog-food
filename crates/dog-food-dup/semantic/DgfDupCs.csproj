@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    dgf-dup-cs: finds C# methods that do the same thing written differently.
+    It reduces every method to one canonical expression with Roslyn and groups
+    the methods whose expressions are equal. See README.md.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>dgf-dup-cs</AssemblyName>
+    <RootNamespace>DgfDup</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- A .NET tool: see README.md for packing and installing it. -->
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>dgf-dup-cs</ToolCommandName>
+    <PackageId>dgf-dup-cs</PackageId>
+    <Version>0.1.0</Version>
+    <Description>Finds C# methods that do the same thing written differently, for dgf-dup.</Description>
+    <PackageOutputPath>nupkg</PackageOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" />
+  </ItemGroup>
+
+</Project>

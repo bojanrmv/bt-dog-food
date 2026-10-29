@@ -33,6 +33,7 @@
     { "id": "same-customer", "a": "SameCustomer.Ordinal", "b": "SameCustomer.IgnoreCase", "type": 2, "equal": false, "note": "other comparison" },
     { "id": "waiting", "a": "Waiting.Paid", "b": "Waiting.Shipped", "type": 2, "equal": false, "note": "other status" },
     { "id": "line-sum", "a": "LineSum.Amounts", "b": "LineSum.Prices", "type": 3, "equal": false, "note": "price instead of amount" },
+    { "id": "tickets", "a": "Tickets.TakeOnce", "b": "Tickets.TakeTwice", "type": 3, "equal": false, "note": "one call kept in a local vs two calls" },
     { "id": "row-entry", "a": "Csv.Row", "b": "AuditLog.Entry", "type": 0, "equal": false, "note": "same shape, unrelated" },
     { "id": "check-line-order", "a": "Csv.CheckLine", "b": "AuditLog.CheckOrder", "type": 0, "equal": false, "note": "same shape, unrelated" }
   ]

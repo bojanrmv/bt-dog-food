@@ -17,6 +17,7 @@ pub mod changes;
 mod find;
 mod near;
 pub mod report;
+pub mod semantic;
 mod tokens;
 
 use std::path::{Path, PathBuf};

@@ -11,6 +11,7 @@ dgf-dup src --format json      # everything, for other tools
 dgf-dup src --format html -o dup.html   # a page: the files with their copies, and each group
 dgf-dup src --fail-above 5     # exit 1 when more than 5% of lines are copies
 
+dgf-dup --semantic             # also C# methods that do the same thing written differently (needs dgf-dup-cs)
 dgf-dup --changes              # only what this branch changed (since main, else master)
 dgf-dup --changes --base origin/development --fail-on-copies   # a PR gate: exit 1 on any new copy
 ```
@@ -68,7 +69,7 @@ C#, TypeScript/JavaScript (also TSX/JSX) and Rust. Test code (`*.spec.ts`, `*Tes
    unite: 8 statements in a row share this shape (23 lines): put what differs (⟨1⟩ members) in a list and loop over it, or call one helper 8 times
 ```
 
-- **Type**: 1, the same code; 2, renamed (names, values or types differ); 3, a near miss: whole function bodies whose tokens match for at least 80% of both, with statements or tokens added, left out or changed.
+- **Type**: 1, the same code; 2, renamed (names, values or types differ); 3, a near miss: whole function bodies whose tokens match for at least 80% of both, with statements or tokens added, left out or changed; 4 (with `--semantic`, C#), the same behaviour written differently, with the rules that show it (`loop that adds up → Sum`, `switch → conditionals`) and the conditions they need.
 - **Copies**: where each one is and the function it is in.
 - **Template**: the first copy, with `⟨n⟩` wherever the copies differ. The same differences everywhere are one hole.
 - **Holes** and what a shared version does with them: a *value* or *name* becomes a parameter, a *member* becomes a value or a selector (`x => x.Price`), a *call* becomes a function parameter, a *type* a generic parameter. A *local* the copy declares itself is only renamed and needs no parameter.
@@ -87,8 +88,17 @@ No AI, and no guessing: every step is exact on the syntax tree.
 4. Anti-unification of the copies' tokens gives the template: a hole at each position where their names or values differ, one hole per distinct set of differences.
 5. Near misses (type 3) compare whole function bodies of at least 25 tokens (constructors, which are mostly wiring, are left out). Bodies that share enough runs of 8 normalized tokens are candidates. A candidate pair is aligned in two steps: statements by shape (a shortest edit script, Myers' algorithm), then tokens only between statements that differ, and only where two statements are at least 70% alike, so unrelated statements in the same place do not lend each other tokens. Pairs matching at least 80% of both bodies' tokens are near misses. Connected pairs form a class around the body most like the others. When an exact copy is most (70%) of each body, the exact copy is reported instead, as extracting it is the cleaner refactor.
 
-The same logic written differently (a loop and its LINQ, `if` and `?:`) is not found yet: that needs the compiler's view of the code. See [the research and plan](research/csharp-semantic-duplication.md).
+## The same thing, written differently (C#)
+
+`--semantic` adds the C# engine `dgf-dup-cs` ([crates/dog-food-dup/semantic](../crates/dog-food-dup/semantic/README.md)). It reduces each method to one canonical expression with the compiler: locals inlined, `if`/early return/`?:`/`switch` as one decision tree, comparisons with one polarity, loops as the LINQ they compute (`Sum`, `Count`, `Any`, `First`, `Max`, `Where`/`Select`, a sum per key). Methods with the same expression are type 4. It is sound first: a near miss (`>=` vs `>`, `First` vs `FirstOrDefault`, a dropped null check) is never called equal, and a method it cannot model is left out, not guessed at. Install it once:
+
+```powershell
+dotnet pack crates/dog-food-dup/semantic -c Release
+dotnet tool install -g dgf-dup-cs --add-source crates/dog-food-dup/semantic/nupkg
+```
+
+The research behind it, and what comes next: [research and plan](research/csharp-semantic-duplication.md).
 
 ## Measuring it
 
-[crates/dog-food-dup/tests/corpus/csharp](../crates/dog-food-dup/tests/corpus/csharp/README.md) is a labelled C# corpus: copies (types 1-3), groups of methods that do the same thing written differently (type 4), near misses that do different things, and decoys. Running it checks its own labels on generated inputs. `cargo run -p dog-food-dup --bin dgf-dup-bench` scores `dgf-dup` on it, or any tool's JSON with `--report`. Now: types 1-3 14 of 14, no decoy matched, no unrelated match; type 4, 1 of 47.
+[crates/dog-food-dup/tests/corpus/csharp](../crates/dog-food-dup/tests/corpus/csharp/README.md) is a labelled C# corpus: copies (types 1-3), groups of methods that do the same thing written differently (type 4), near misses that do different things, and decoys. Running it checks its own labels on generated inputs. `cargo run -p dog-food-dup --bin dgf-dup-bench` scores `dgf-dup` on it, or any tool's JSON with `--report`. Now, `dgf-dup` alone: types 1-3, 14 of 15; type 4, 1 of 47. With `--semantic`: type 4, 47 of 47; recall 98%, no decoy or unrelated match, and no near miss called equal.

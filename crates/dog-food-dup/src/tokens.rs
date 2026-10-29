@@ -199,21 +199,31 @@ fn token_kind(node: Node) -> Kind {
     if kind == "identifier" || kind.ends_with("_identifier") {
         return Kind::Name;
     }
-    // A string with interpolations keeps its parts: what is inside matters.
-    let interpolated = kind.contains("interpolat") || kind == "template_string";
-    if !interpolated
-        && (kind.contains("string") || kind == "character_literal" || kind == "char_literal")
-    {
+    if is_text(kind) {
         return Kind::Text;
     }
-    if matches!(
-        kind,
-        "integer_literal" | "real_literal" | "float_literal" | "number" | "numeric_literal"
-    ) {
-        return Kind::Number;
+    if NUMBERS.contains(&kind) {
+        Kind::Number
+    } else {
+        Kind::Other
     }
-    Kind::Other
 }
+
+/// A string or character literal. A string with interpolations keeps its
+/// parts: what is inside matters.
+fn is_text(kind: &str) -> bool {
+    let interpolated = kind.contains("interpolat") || kind == "template_string";
+    !interpolated && (kind.contains("string") || CHARACTERS.contains(&kind))
+}
+
+const CHARACTERS: &[&str] = &["character_literal", "char_literal"];
+const NUMBERS: &[&str] = &[
+    "integer_literal",
+    "real_literal",
+    "float_literal",
+    "number",
+    "numeric_literal",
+];
 
 /// Kinds of function-like nodes, and of the types around them.
 const FUNCTIONS: &[&str] = &[
@@ -237,22 +247,19 @@ const TYPES: &[&str] = &[
 
 /// `Type.Method` (or `Method`) around `node`.
 fn enclosing_function(node: Node, src: &[u8]) -> Option<String> {
-    let mut current = node.parent();
-    let mut function = None;
-    let mut owner = None;
-    while let Some(n) = current {
-        let named = |field: &str| {
-            n.child_by_field_name(field)
-                .and_then(|c| c.utf8_text(src).ok())
-                .map(str::to_string)
-        };
-        if function.is_none() && FUNCTIONS.contains(&n.kind()) {
-            function = named("name");
-        } else if owner.is_none() && TYPES.contains(&n.kind()) {
-            owner = named("name").or_else(|| named("type"));
-        }
-        current = n.parent();
-    }
+    let named = |n: Node, field: &str| {
+        n.child_by_field_name(field)
+            .and_then(|c| c.utf8_text(src).ok())
+            .map(str::to_string)
+    };
+    let mut ancestors = std::iter::successors(node.parent(), |n| n.parent());
+    let function = ancestors
+        .clone()
+        .find(|n| FUNCTIONS.contains(&n.kind()))
+        .and_then(|n| named(n, "name"));
+    let owner = ancestors
+        .find(|n| TYPES.contains(&n.kind()))
+        .and_then(|n| named(n, "name").or_else(|| named(n, "type")));
     match (owner, function) {
         (Some(owner), Some(function)) => Some(format!("{owner}.{function}")),
         (None, function) => function,

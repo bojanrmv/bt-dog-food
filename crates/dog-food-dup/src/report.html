@@ -206,7 +206,7 @@ function template(text) {
   return pre;
 }
 
-const typeWord = { 1: "type 1 · the same code", 2: "type 2 · renamed", 3: "type 3 · near miss" };
+const typeWord = { 1: "type 1 · the same code", 2: "type 2 · renamed", 3: "type 3 · near miss", 4: "type 4 · same behaviour, written differently" };
 
 // What each near-miss copy adds, leaves out or has instead.
 function differences(c) {
@@ -234,7 +234,7 @@ function card(c) {
     el("span", { class: "title", text: `Group ${c.id} · ${title}` }),
     el("span", { class: "badge saves", text: `saves ~${c.saves} lines` }),
     c.kind === "repeated" ? el("span", { class: "badge", text: "repeated" })
-      : el("span", { class: c.type === 3 ? "badge type3" : "badge",
+      : el("span", { class: c.type >= 3 ? "badge type3" : "badge",
         text: typeWord[c.type] + (c.similarity ? ` · ${Math.round(c.similarity * 100)}% alike` : "") }),
     changed ? el("span", { class: "badge changed", text: "changed on this branch" }) : null);
 
@@ -249,7 +249,7 @@ function card(c) {
       copy.changed ? el("span", { class: "badge changed", text: "changed" }) : null));
   }
   const left = el("div", {}, el("div", { class: "label", text: c.kind === "repeated" ? "Where" : "Copies" }), list,
-    el("div", { class: "label", text: "Shared template" }), template(c.template));
+    el("div", { class: "label", text: c.type === 4 ? "What every copy computes" : "Shared template" }), template(c.template));
 
   const right = el("div", {});
   const holes = c.holes;
@@ -264,6 +264,11 @@ function card(c) {
         el("td", {}, el("code", { text: h.values.join("  |  ") }))));
     }
     right.append(table);
+  }
+  if ((c.rules || []).length) {
+    const rules = el("ul", { class: "diffs" });
+    for (const rule of c.rules) rules.append(el("li", { text: rule }));
+    right.append(el("div", { class: "label", text: "Same behaviour after" }), rules);
   }
   if ((c.differences || []).length) {
     right.append(el("div", { class: "label", text: "Where the copies part ways" }), differences(c));

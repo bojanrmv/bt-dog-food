@@ -1,6 +1,6 @@
 # Finding C# code that does the same thing: research and plan
 
-Status: phases 0 and 1 done (the corpus and scorer; the syntactic tool with near misses and no seed cap): types 1-3 14 of 14 on the corpus, no wrong matches. Phases 2 on are next. Scope: C#, deterministic methods only (no machine learning), aimed at code that can be refactored into one shared version.
+Status: phases 0-4 and most of 7 done. The corpus and scorer; the syntactic tool with near misses; and the Roslyn engine `dgf-dup-cs`, with canonical expressions, decision trees, loop folds and LINQ, merged into `dgf-dup --semantic`. On the corpus: types 1-3 14 of 15, type 4 47 of 47, no near miss called equal. Phase 5 (dependence graphs) and 6 (confirmation by running) are next. See [the engine](../../crates/dog-food-dup/semantic/README.md).
 
 ## 1. Summary
 

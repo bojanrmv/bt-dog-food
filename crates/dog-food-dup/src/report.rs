@@ -6,62 +6,75 @@ use crate::{CloneClass, HoleKind, Report};
 
 /// Lines of a template shown before it is cut.
 const TEMPLATE_LINES: usize = 20;
+/// Characters of a template line shown before it is cut.
+const LINE_CHARS: usize = 300;
 /// Differences of a near-miss class shown before they are cut.
 const DIFFERENCES: usize = 8;
 
 pub fn table(report: &Report, top: usize) -> String {
     let mut out = summary(report);
     for (n, class) in report.classes.iter().take(shown(report, top)).enumerate() {
-        if let Some(run) = run(class) {
-            let _ = writeln!(
-                out,
-                "\n{}. {} statements in a row with one shape, saves about {} lines\n   {run}",
-                n + 1,
-                class.copies.len(),
-                class.saves
-            );
-        } else {
-            let _ = writeln!(
-                out,
-                "\n{}. {} copies of {} lines ({} statement{}), {}, saves about {} lines",
-                n + 1,
-                class.copies.len(),
-                class.lines,
-                class.statements,
-                if class.statements == 1 { "" } else { "s" },
-                kind_text(class),
-                class.saves
-            );
-            for copy in &class.copies {
-                let _ = writeln!(out, "   {}", place(copy));
-            }
-        }
-        out.push_str("   template:\n");
-        for line in template_lines(class) {
-            let _ = writeln!(out, "     | {line}");
-        }
-        for hole in &class.holes {
-            let _ = writeln!(
-                out,
-                "   ⟨{}⟩ {}: {}",
-                hole.index,
-                hole.kind.name(),
-                hole.values.join(" | ")
-            );
-        }
-        for line in difference_lines(class) {
-            let _ = writeln!(out, "   {line}");
-        }
-        let _ = writeln!(out, "   unite: {}", class.unite);
-        for caution in &class.cautions {
-            let _ = writeln!(out, "   caution: {caution}");
-        }
+        table_head(&mut out, n + 1, class);
+        table_body(&mut out, class);
     }
     let rest = report.classes.len().saturating_sub(shown(report, top));
     if rest > 0 {
         let _ = writeln!(out, "\n... and {rest} more (--top 0 for all)");
     }
     out
+}
+
+/// A class's title line and where its copies are.
+fn table_head(out: &mut String, n: usize, class: &CloneClass) {
+    if let Some(run) = run(class) {
+        let _ = writeln!(
+            out,
+            "\n{n}. {} statements in a row with one shape, saves about {} lines\n   {run}",
+            class.copies.len(),
+            class.saves
+        );
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "\n{n}. {} copies of {} lines ({} statement{}), {}, saves about {} lines",
+        class.copies.len(),
+        class.lines,
+        class.statements,
+        if class.statements == 1 { "" } else { "s" },
+        kind_text(class),
+        class.saves
+    );
+    for copy in &class.copies {
+        let _ = writeln!(out, "   {}", place(copy));
+    }
+}
+
+/// A class's template, holes, differences, rules, advice and cautions.
+fn table_body(out: &mut String, class: &CloneClass) {
+    out.push_str("   template:\n");
+    for line in template_lines(class) {
+        let _ = writeln!(out, "     | {line}");
+    }
+    for hole in &class.holes {
+        let _ = writeln!(
+            out,
+            "   ⟨{}⟩ {}: {}",
+            hole.index,
+            hole.kind.name(),
+            hole.values.join(" | ")
+        );
+    }
+    for line in difference_lines(class) {
+        let _ = writeln!(out, "   {line}");
+    }
+    if !class.rules.is_empty() {
+        let _ = writeln!(out, "   same after: {}", class.rules.join("; "));
+    }
+    let _ = writeln!(out, "   unite: {}", class.unite);
+    for caution in &class.cautions {
+        let _ = writeln!(out, "   caution: {caution}");
+    }
 }
 
 /// Compact text for AI assistants: every class, one block each.
@@ -136,6 +149,9 @@ fn agent_template(out: &mut String, class: &CloneClass) {
     for line in difference_lines(class) {
         let _ = writeln!(out, "{line}");
     }
+    if !class.rules.is_empty() {
+        let _ = writeln!(out, "same after: {}", class.rules.join("; "));
+    }
     let _ = writeln!(out, "unite: {}", class.unite);
 }
 
@@ -144,6 +160,7 @@ fn kind_text(class: &CloneClass) -> String {
     match (class.clone_type, class.similarity) {
         (1, _) => "type 1: the same code".to_string(),
         (2, _) => "type 2: renamed".to_string(),
+        (4, _) => "type 4: the same behaviour, written differently".to_string(),
         (_, Some(s)) => format!("type 3: near miss, {:.0}% alike", s * 100.0),
         _ => "type 3: near miss".to_string(),
     }
@@ -261,10 +278,14 @@ fn shown(report: &Report, top: usize) -> usize {
 
 fn template_lines(class: &CloneClass) -> Vec<String> {
     let lines: Vec<&str> = class.template.lines().collect();
+    // A canonical expression (type 4) is one long line: shown cut.
     let mut shown: Vec<String> = lines
         .iter()
         .take(TEMPLATE_LINES)
-        .map(|l| l.to_string())
+        .map(|l| match l.char_indices().nth(LINE_CHARS) {
+            Some((at, _)) => format!("{}... (all of it in --format json)", &l[..at]),
+            None => l.to_string(),
+        })
         .collect();
     if lines.len() > TEMPLATE_LINES {
         shown.push(format!("... ({} more lines)", lines.len() - TEMPLATE_LINES));

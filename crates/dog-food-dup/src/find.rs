@@ -148,6 +148,9 @@ pub struct CloneClass {
     /// Type 3: what each copy adds, removes or changes against the first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub differences: Vec<Difference>,
+    /// Type 4: the rules that made the copies' meaning the same.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<String>,
 }
 
 /// One place where a near-miss copy differs from the first copy.
@@ -191,98 +194,12 @@ pub fn clone_classes(
 ) -> Vec<CloneClass> {
     let shape = |s: &Span, k: usize| blocks[s.block].statements[k].shape;
     let runs = repeated_runs(blocks, settings);
-    let in_run = |b: usize, first: usize, last: usize| {
-        runs.iter()
-            .any(|r| r.block == b && r.first <= first && last <= r.last)
-    };
-    // Seeds: the shortest run from each statement that is big enough.
-    let mut seeds: HashMap<u64, Vec<Span>> = HashMap::new();
-    for (b, block) in blocks.iter().enumerate() {
-        let statements = &block.statements;
-        for first in 0..statements.len() {
-            let mut tokens = 0;
-            for last in first..statements.len() {
-                tokens += statements[last].tokens.len();
-                let lines = statements[last].end_line + 1 - statements[first].start_line;
-                if tokens >= settings.min_tokens && lines >= settings.min_lines {
-                    if in_run(b, first, last) {
-                        break;
-                    }
-                    let bytes: Vec<[u8; 8]> = (first..=last)
-                        .map(|k| statements[k].shape.to_le_bytes())
-                        .collect();
-                    let parts: Vec<&[u8]> = bytes.iter().map(|b| b.as_slice()).collect();
-                    seeds.entry(fnv(&parts)).or_default().push(Span {
-                        block: b,
-                        first,
-                        last,
-                    });
-                    break;
-                }
-            }
-        }
-    }
-    // Each group of seeds grows together, splitting where its members' next
-    // statements differ: every copy grows as far as another stays alike,
-    // without comparing pairs, so a pattern copied hundreds of times costs
-    // no more than its copies. A group is recorded where it splits or ends.
-    let mut classes: Vec<Vec<Span>> = Vec::new();
-    let mut work: Vec<Vec<Span>> = Vec::new();
-    for group in seeds.into_values() {
-        let mut by_language: BTreeMap<Option<String>, Vec<Span>> = BTreeMap::new();
-        for span in group {
-            by_language
-                .entry(extension(blocks, sources, &span))
-                .or_default()
-                .push(span);
-        }
-        work.extend(by_language.into_values().map(apart).filter(|g| g.len() > 1));
-    }
+    let mut work = groups(seeds(blocks, settings, &runs), blocks, sources);
     // A group whose copies all match one statement earlier is the tail of
     // an earlier group, which finds them.
     work.retain(|group| !all_match_before(group, &shape));
-    while let Some(group) = work.pop() {
-        let mut next: HashMap<u64, Vec<Span>> = HashMap::new();
-        let mut ended = false;
-        for s in &group {
-            match blocks[s.block].statements.get(s.last + 1) {
-                Some(statement) => next.entry(statement.shape).or_default().push(Span {
-                    last: s.last + 1,
-                    ..*s
-                }),
-                None => ended = true,
-            }
-        }
-        let grown: Vec<Vec<Span>> = next
-            .into_values()
-            .map(apart)
-            .filter(|g| g.len() > 1)
-            .collect();
-        let growing: usize = grown.iter().map(Vec::len).sum();
-        if ended || growing < group.len() || grown.len() > 1 {
-            classes.push(group);
-        }
-        work.extend(grown);
-    }
-    // A copy inside a bigger copy is already reported with it.
-    let mut by_block: HashMap<usize, Vec<Span>> = HashMap::new();
-    for span in classes.iter().flatten() {
-        by_block.entry(span.block).or_default().push(*span);
-    }
-    let mut found: Vec<CloneClass> = classes
-        .into_iter()
-        .filter_map(|spans| {
-            let mut kept: Vec<Span> = Vec::new();
-            for s in spans {
-                let inside = by_block[&s.block].iter().any(|o| *o != s && o.contains(&s));
-                if !inside && !kept.iter().any(|k| k.overlaps(&s)) {
-                    kept.push(s);
-                }
-            }
-            (kept.len() > 1).then(|| describe(&kept, blocks, sources, display))
-        })
-        .filter(|c| c.saves > 0)
-        .collect();
+    let classes = grow(work, blocks);
+    let mut found = outermost(classes, blocks, sources, display);
     found.extend(
         runs.iter()
             .map(|r| repeated(r, blocks, sources, display))
@@ -297,6 +214,136 @@ pub fn clone_classes(
             .then(a.copies[0].file.cmp(&b.copies[0].file))
     });
     found
+}
+
+/// Seeds: from each statement, the shortest run that is big enough, by the
+/// hash of its shapes. Runs inside a repeated run are left to it.
+fn seeds(blocks: &[Block], settings: Settings, runs: &[Span]) -> HashMap<u64, Vec<Span>> {
+    let mut seeds: HashMap<u64, Vec<Span>> = HashMap::new();
+    for (b, block) in blocks.iter().enumerate() {
+        for first in 0..block.statements.len() {
+            let Some(last) = seed_end(&block.statements, first, settings) else {
+                continue;
+            };
+            let span = Span {
+                block: b,
+                first,
+                last,
+            };
+            if !runs.iter().any(|r| r.contains(&span)) {
+                seeds
+                    .entry(shapes_hash(block, first, last))
+                    .or_default()
+                    .push(span);
+            }
+        }
+    }
+    seeds
+}
+
+/// The last statement of the shortest run from `first` with enough tokens and lines.
+fn seed_end(
+    statements: &[crate::tokens::Statement],
+    first: usize,
+    settings: Settings,
+) -> Option<usize> {
+    let mut tokens = 0;
+    (first..statements.len()).find(|&last| {
+        tokens += statements[last].tokens.len();
+        let lines = statements[last].end_line + 1 - statements[first].start_line;
+        tokens >= settings.min_tokens && lines >= settings.min_lines
+    })
+}
+
+fn shapes_hash(block: &Block, first: usize, last: usize) -> u64 {
+    let bytes: Vec<[u8; 8]> = (first..=last)
+        .map(|k| block.statements[k].shape.to_le_bytes())
+        .collect();
+    let parts: Vec<&[u8]> = bytes.iter().map(|b| b.as_slice()).collect();
+    fnv(&parts)
+}
+
+/// Seeds of one shape, split by language, without copies that overlap.
+fn groups(seeds: HashMap<u64, Vec<Span>>, blocks: &[Block], sources: &[Source]) -> Vec<Vec<Span>> {
+    let mut work = Vec::new();
+    for group in seeds.into_values() {
+        let mut by_language: BTreeMap<Option<String>, Vec<Span>> = BTreeMap::new();
+        for span in group {
+            by_language
+                .entry(extension(blocks, sources, &span))
+                .or_default()
+                .push(span);
+        }
+        work.extend(by_language.into_values().map(apart).filter(|g| g.len() > 1));
+    }
+    work
+}
+
+/// Each group grows together, splitting where its members' next
+/// statements differ: every copy grows as far as another stays alike,
+/// without comparing pairs, so a pattern copied hundreds of times costs no
+/// more than its copies. A group is recorded where it splits or ends.
+fn grow(mut work: Vec<Vec<Span>>, blocks: &[Block]) -> Vec<Vec<Span>> {
+    let mut classes = Vec::new();
+    while let Some(group) = work.pop() {
+        let (grown, ended) = next_statements(&group, blocks);
+        let growing: usize = grown.iter().map(Vec::len).sum();
+        if ended || growing < group.len() || grown.len() > 1 {
+            classes.push(group);
+        }
+        work.extend(grown);
+    }
+    classes
+}
+
+/// The group's members one statement longer, by the shape of that
+/// statement; and whether a member reached the end of its block.
+fn next_statements(group: &[Span], blocks: &[Block]) -> (Vec<Vec<Span>>, bool) {
+    let mut next: HashMap<u64, Vec<Span>> = HashMap::new();
+    let mut ended = false;
+    for s in group {
+        match blocks[s.block].statements.get(s.last + 1) {
+            Some(statement) => next.entry(statement.shape).or_default().push(Span {
+                last: s.last + 1,
+                ..*s
+            }),
+            None => ended = true,
+        }
+    }
+    let grown = next
+        .into_values()
+        .map(apart)
+        .filter(|g| g.len() > 1)
+        .collect();
+    (grown, ended)
+}
+
+/// The classes with each copy that is inside a bigger copy left out (it is
+/// reported with that one), described.
+fn outermost(
+    classes: Vec<Vec<Span>>,
+    blocks: &[Block],
+    sources: &[Source],
+    display: &dyn Fn(&std::path::Path) -> String,
+) -> Vec<CloneClass> {
+    let mut by_block: HashMap<usize, Vec<Span>> = HashMap::new();
+    for span in classes.iter().flatten() {
+        by_block.entry(span.block).or_default().push(*span);
+    }
+    let inside = |s: &Span| by_block[&s.block].iter().any(|o| o != s && o.contains(s));
+    classes
+        .into_iter()
+        .filter_map(|spans| {
+            let mut kept: Vec<Span> = Vec::new();
+            for s in spans.into_iter().filter(|s| !inside(s)) {
+                if !kept.iter().any(|k| k.overlaps(&s)) {
+                    kept.push(s);
+                }
+            }
+            (kept.len() > 1).then(|| describe(&kept, blocks, sources, display))
+        })
+        .filter(|c| c.saves > 0)
+        .collect()
 }
 
 /// Copies that share a shape but little else: more than two parameters per
@@ -320,30 +367,39 @@ const MIN_REPEATS: usize = 3;
 fn repeated_runs(blocks: &[Block], settings: Settings) -> Vec<Span> {
     let mut runs = Vec::new();
     for (b, block) in blocks.iter().enumerate() {
-        let statements = &block.statements;
         let mut first = 0;
-        while first < statements.len() {
-            let mut last = first;
-            while last + 1 < statements.len()
-                && statements[last + 1].shape == statements[first].shape
-            {
-                last += 1;
-            }
-            let tokens: usize = statements[first..=last]
-                .iter()
-                .map(|s| s.tokens.len())
-                .sum();
-            if last + 1 - first >= MIN_REPEATS && tokens >= settings.min_tokens {
-                runs.push(Span {
-                    block: b,
-                    first,
-                    last,
-                });
+        while first < block.statements.len() {
+            let last = same_shape_end(&block.statements, first);
+            let span = Span {
+                block: b,
+                first,
+                last,
+            };
+            if is_run(block, &span, settings) {
+                runs.push(span);
             }
             first = last + 1;
         }
     }
     runs
+}
+
+/// The last statement from `first` on with the shape of `first`.
+fn same_shape_end(statements: &[crate::tokens::Statement], first: usize) -> usize {
+    let shape = statements[first].shape;
+    first
+        + statements[first + 1..]
+            .iter()
+            .take_while(|s| s.shape == shape)
+            .count()
+}
+
+fn is_run(block: &Block, span: &Span, settings: Settings) -> bool {
+    let tokens: usize = block.statements[span.first..=span.last]
+        .iter()
+        .map(|s| s.tokens.len())
+        .sum();
+    span.last + 1 - span.first >= MIN_REPEATS && tokens >= settings.min_tokens
 }
 
 /// A repeated run as a class: each statement is a copy of the template.
@@ -481,25 +537,69 @@ pub(crate) fn describe(
 ) -> CloneClass {
     let copies: Vec<Copy> = spans
         .iter()
-        .map(|s| {
-            let block = &blocks[s.block];
-            Copy {
-                file: display(&sources[block.file].path),
-                start_line: block.statements[s.first].start_line,
-                end_line: block.statements[s.last].end_line,
-                function: block.function.clone(),
-                changed: false,
-            }
-        })
+        .map(|s| copy_of(s, blocks, sources, display))
         .collect();
     let streams: Vec<Vec<&Token>> = spans.iter().map(|s| tokens(blocks, s)).collect();
     let first = &streams[0];
     let declared = declarations(first);
-    // Anti-unification: a hole wherever the copies differ; the same
-    // differences everywhere are one hole.
+    let (holes, at) = anti_unify(&streams, &declared);
+    let span = spans[0];
+    let lines = copies[0].end_line + 1 - copies[0].start_line;
+    let parameters = holes.iter().filter(|h| h.kind != HoleKind::Local).count();
+    let saves =
+        ((copies.len() - 1) * lines) as i64 - copies.len() as i64 - 2 - (parameters / 3) as i64;
+    // Whole bodies are kept as one function: its returns stay as they are.
+    let cautions = if whole_bodies(spans, blocks) {
+        Vec::new()
+    } else {
+        cautions(first, &declared, blocks, &span)
+    };
+    CloneClass {
+        kind: "copies",
+        clone_type: if holes.is_empty() { 1 } else { 2 },
+        evidence: "syntax",
+        similarity: None,
+        differences: Vec::new(),
+        rules: Vec::new(),
+        unite: unite(&copies, &holes, spans, blocks),
+        copies,
+        lines,
+        tokens: first.len(),
+        statements: span.last + 1 - span.first,
+        template: template(&span, first, &at, blocks, sources),
+        holes,
+        saves,
+        cautions,
+    }
+}
+
+fn copy_of(
+    span: &Span,
+    blocks: &[Block],
+    sources: &[Source],
+    display: &dyn Fn(&std::path::Path) -> String,
+) -> Copy {
+    let block = &blocks[span.block];
+    Copy {
+        file: display(&sources[block.file].path),
+        start_line: block.statements[span.first].start_line,
+        end_line: block.statements[span.last].end_line,
+        function: block.function.clone(),
+        changed: false,
+    }
+}
+
+/// Anti-unification: a hole wherever the copies differ, the same
+/// differences everywhere being one hole; and where each hole is, as
+/// (token position, hole number).
+fn anti_unify(
+    streams: &[Vec<&Token>],
+    declared: &BTreeSet<usize>,
+) -> (Vec<Hole>, Vec<(usize, usize)>) {
+    let first = &streams[0];
     let mut holes: Vec<Hole> = Vec::new();
     let mut by_values: BTreeMap<Vec<String>, usize> = BTreeMap::new();
-    let mut at: Vec<(usize, usize)> = Vec::new();
+    let mut at = Vec::new();
     for position in 0..first.len() {
         let values: Vec<String> = streams.iter().map(|s| s[position].text.clone()).collect();
         if first[position].kind == Kind::Other || values.iter().all(|v| *v == values[0]) {
@@ -509,7 +609,7 @@ pub(crate) fn describe(
             holes.push(Hole {
                 index: holes.len() + 1,
                 kind: hole_kind(first, position),
-                values: values.clone(),
+                values,
             });
             holes.len()
         });
@@ -518,81 +618,75 @@ pub(crate) fn describe(
         }
         at.push((position, index));
     }
-    let span = spans[0];
+    (holes, at)
+}
+
+/// The first copy's text with `⟨n⟩` at each hole, without its shared indentation.
+fn template(
+    span: &Span,
+    first: &[&Token],
+    at: &[(usize, usize)],
+    blocks: &[Block],
+    sources: &[Source],
+) -> String {
     let block = &blocks[span.block];
     let text = &sources[block.file].text;
     let start = block.statements[span.first].start_byte;
     let end = block.statements[span.last].end_byte;
     let mut template = String::new();
     let mut cursor = start;
-    for (position, index) in &at {
+    for (position, index) in at {
         let token = first[*position];
         template.push_str(&text[cursor..token.start_byte]);
         template.push_str(&format!("⟨{index}⟩"));
         cursor = token.end_byte;
     }
     template.push_str(&text[cursor..end]);
-    let lines = copies[0].end_line + 1 - copies[0].start_line;
-    let parameters = holes.iter().filter(|h| h.kind != HoleKind::Local).count();
-    let saves =
-        ((copies.len() - 1) * lines) as i64 - copies.len() as i64 - 2 - (parameters / 3) as i64;
-    let mut cautions = cautions(first, &declared, blocks, &span);
-    // Whole bodies are kept as one function: its returns stay as they are.
-    let whole_bodies = spans.iter().all(|s| {
+    dedent(
+        &template,
+        start - text[..start].rfind('\n').map_or(0, |n| n + 1),
+    )
+}
+
+/// Every copy is a function's whole body.
+fn whole_bodies(spans: &[Span], blocks: &[Block]) -> bool {
+    spans.iter().all(|s| {
         blocks[s.block].is_body && s.first == 0 && s.last + 1 == blocks[s.block].statements.len()
-    });
-    if whole_bodies {
-        cautions.clear();
-    }
-    CloneClass {
-        kind: "copies",
-        clone_type: if holes.is_empty() { 1 } else { 2 },
-        evidence: "syntax",
-        similarity: None,
-        differences: Vec::new(),
-        unite: unite(&copies, &holes, spans, blocks),
-        copies,
-        lines,
-        tokens: first.len(),
-        statements: span.last + 1 - span.first,
-        template: dedent(
-            &template,
-            start - text[..start].rfind('\n').map_or(0, |n| n + 1),
-        ),
-        holes,
-        saves,
-        cautions,
-    }
+    })
 }
 
 /// Positions of names the copy declares: `var x`, `let x`, `int x =`,
 /// `foreach (var x in`, lambda parameters `x =>`.
 pub(crate) fn declarations(tokens: &[&Token]) -> BTreeSet<usize> {
-    let mut found = BTreeSet::new();
-    for (n, token) in tokens.iter().enumerate() {
-        if token.kind != Kind::Name {
-            continue;
-        }
-        let before = n.checked_sub(1).map(|p| tokens[p].text.as_str());
-        let after = tokens.get(n + 1).map(|t| t.text.as_str());
-        let keyword = matches!(before, Some("var" | "let" | "const" | "mut"));
-        let typed = n > 0
-            && (tokens[n - 1].kind == Kind::Name
-                || PRIMITIVES.contains(&tokens[n - 1].text.as_str()))
-            && matches!(after, Some("=" | "in" | ";"));
-        let lambda = after == Some("=>");
-        if keyword || typed || lambda {
-            found.insert(n);
-        }
-    }
+    let names: BTreeSet<&str> = (0..tokens.len())
+        .filter(|&n| declares(tokens, n))
+        .map(|n| tokens[n].text.as_str())
+        .collect();
     // Every later use of a declared name is the same local.
-    let names: BTreeSet<&str> = found.iter().map(|n| tokens[*n].text.as_str()).collect();
     tokens
         .iter()
         .enumerate()
         .filter(|(_, t)| t.kind == Kind::Name && names.contains(t.text.as_str()))
         .map(|(n, _)| n)
         .collect()
+}
+
+/// Whether the name at `n` is declared there.
+fn declares(tokens: &[&Token], n: usize) -> bool {
+    if tokens[n].kind != Kind::Name {
+        return false;
+    }
+    let before = n.checked_sub(1).map(|p| tokens[p]);
+    let after = tokens.get(n + 1).map(|t| t.text.as_str());
+    let keyword =
+        before.is_some_and(|b| matches!(b.text.as_str(), "var" | "let" | "const" | "mut"));
+    keyword || after == Some("=>") || before.is_some_and(|b| typed(b, after))
+}
+
+/// `Type name =`, `int name;`, `Type name in`: a name after a type.
+fn typed(before: &Token, after: Option<&str>) -> bool {
+    let a_type = before.kind == Kind::Name || PRIMITIVES.contains(&before.text.as_str());
+    a_type && matches!(after, Some("=" | "in" | ";"))
 }
 
 const PRIMITIVES: &[&str] = &[
@@ -602,33 +696,29 @@ const PRIMITIVES: &[&str] = &[
 ];
 
 pub(crate) fn hole_kind(tokens: &[&Token], position: usize) -> HoleKind {
-    let token = tokens[position];
-    match token.kind {
-        Kind::Text | Kind::Number => return HoleKind::Value,
-        Kind::Other => return HoleKind::Value,
-        Kind::Name => {}
+    if tokens[position].kind != Kind::Name {
+        return HoleKind::Value;
     }
     let before = position.checked_sub(1).map(|p| tokens[p].text.as_str());
-    let after = tokens.get(position + 1).map(|t| t.text.as_str());
-    let member = matches!(before, Some("." | "?." | "->" | "::"));
-    if after == Some("(") {
+    let after = tokens.get(position + 1);
+    if after.is_some_and(|a| a.text == "(") {
         return HoleKind::Call;
     }
-    if member {
+    if matches!(before, Some("." | "?." | "->" | "::")) {
         return HoleKind::Member;
     }
-    let capital = token.text.chars().next().is_some_and(char::is_uppercase);
-    let typed_position = matches!(before, Some("new" | ":" | "<" | "as" | "is"))
-        || after.is_some_and(|a| {
-            a == ">"
-                || tokens
-                    .get(position + 1)
-                    .is_some_and(|t| t.kind == Kind::Name)
-        });
-    if capital && typed_position {
+    if is_type(&tokens[position].text, before, after) {
         return HoleKind::Type;
     }
     HoleKind::Name
+}
+
+/// A capitalized name where a type goes: after `new`, `:`, `<`, `as`,
+/// `is`, or before `>` or a name.
+fn is_type(text: &str, before: Option<&str>, after: Option<&&Token>) -> bool {
+    let capital = text.chars().next().is_some_and(char::is_uppercase);
+    let after_type = after.is_some_and(|a| a.text == ">" || a.kind == Kind::Name);
+    capital && (matches!(before, Some("new" | ":" | "<" | "as" | "is")) || after_type)
 }
 
 /// What makes extracting the copy harder.
@@ -681,35 +771,7 @@ fn unite(copies: &[Copy], holes: &[Hole], spans: &[Span], blocks: &[Block]) -> S
         .map(|h| h.kind.advice())
         .collect();
     let parameters: Vec<&str> = kinds.into_iter().collect();
-    let owner = |c: &Copy| {
-        c.function
-            .as_deref()
-            .and_then(|f| f.rsplit_once('.'))
-            .map(|(owner, _)| owner.to_string())
-    };
-    let files: BTreeSet<&str> = copies.iter().map(|c| c.file.as_str()).collect();
-    let owners: BTreeSet<Option<String>> = copies.iter().map(owner).collect();
-    let whole = spans.iter().all(|s| {
-        blocks[s.block].is_body && s.first == 0 && s.last + 1 == blocks[s.block].statements.len()
-    });
-    let place = if whole && copies.iter().all(|c| c.function.is_some()) {
-        "the functions' bodies are copies: keep one function and call it from the others"
-            .to_string()
-    } else if files.len() == 1 && owners.len() == 1 {
-        match owners.into_iter().next().flatten() {
-            Some(owner) => {
-                format!("extract a private method in {owner} and call it from each copy")
-            }
-            None => "extract a function in this file and call it from each copy".to_string(),
-        }
-    } else if files.len() == 1 {
-        "extract a shared function in this file (a static helper the types call)".to_string()
-    } else {
-        format!(
-            "move it into one shared helper that the {} files call (a static method, an extension or a base type)",
-            files.len()
-        )
-    };
+    let place = place(copies, whole_bodies(spans, blocks));
     if parameters.is_empty() {
         format!(
             "{place}; the copies are identical apart from local names, so it takes no parameters"
@@ -720,6 +782,33 @@ fn unite(copies: &[Copy], holes: &[Hole], spans: &[Span], blocks: &[Block]) -> S
             holes_text(holes),
             parameters.join("; ")
         )
+    }
+}
+
+/// Where a shared version goes: one function kept, a private method in the
+/// type, a function in the file, or a helper the files share.
+fn place(copies: &[Copy], whole: bool) -> String {
+    let owner = |c: &Copy| {
+        c.function
+            .as_deref()
+            .and_then(|f| f.rsplit_once('.'))
+            .map(|(owner, _)| owner.to_string())
+    };
+    let files: BTreeSet<&str> = copies.iter().map(|c| c.file.as_str()).collect();
+    let owners: BTreeSet<Option<String>> = copies.iter().map(owner).collect();
+    if whole && copies.iter().all(|c| c.function.is_some()) {
+        return "the functions' bodies are copies: keep one function and call it from the others"
+            .to_string();
+    }
+    match (files.len(), owners.len()) {
+        (1, 1) => match owners.into_iter().next().flatten() {
+            Some(owner) => format!("extract a private method in {owner} and call it from each copy"),
+            None => "extract a function in this file and call it from each copy".to_string(),
+        },
+        (1, _) => "extract a shared function in this file (a static helper the types call)".to_string(),
+        (n, _) => format!(
+            "move it into one shared helper that the {n} files call (a static method, an extension or a base type)"
+        ),
     }
 }
 

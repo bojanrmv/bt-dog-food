@@ -171,21 +171,44 @@ type Pairs = BTreeMap<(usize, usize), (f64, Matches)>;
 type Member = (usize, f64, Matches);
 
 fn similar_pairs(units: &[Unit], blocks: &[Block], sources: &[Source]) -> Pairs {
-    let grams: Vec<Vec<u64>> = units
-        .iter()
-        .map(|u| {
-            let set: BTreeSet<u64> = u
-                .shapes
-                .windows(GRAM)
-                .map(|w| {
-                    let bytes: Vec<[u8; 8]> = w.iter().map(|s| s.to_le_bytes()).collect();
-                    let parts: Vec<&[u8]> = bytes.iter().map(|b| b.as_slice()).collect();
-                    fnv(&parts)
-                })
-                .collect();
-            set.into_iter().collect()
+    let grams: Vec<Vec<u64>> = units.iter().map(grams_of).collect();
+    let language = |u: &Unit| {
+        sources[blocks[u.block].file]
+            .path
+            .extension()
+            .map(|e| e.to_ascii_lowercase())
+    };
+    let mut pairs = Pairs::new();
+    for ((a, b), count) in shared_grams(&grams) {
+        let (ua, ub) = (&units[a], &units[b]);
+        let enough_grams = count * 10 >= 3 * grams[a].len().min(grams[b].len());
+        if !enough_grams || !close_sizes(ua, ub) || language(ua) != language(ub) {
+            continue;
+        }
+        if let Some(found) = compare(ua, ub) {
+            pairs.insert((a, b), found);
+        }
+    }
+    pairs
+}
+
+/// The distinct runs of `GRAM` normalized tokens in a unit, hashed.
+fn grams_of(unit: &Unit) -> Vec<u64> {
+    let set: BTreeSet<u64> = unit
+        .shapes
+        .windows(GRAM)
+        .map(|w| {
+            let bytes: Vec<[u8; 8]> = w.iter().map(|s| s.to_le_bytes()).collect();
+            let parts: Vec<&[u8]> = bytes.iter().map(|b| b.as_slice()).collect();
+            fnv(&parts)
         })
         .collect();
+    set.into_iter().collect()
+}
+
+/// For each pair of units, how many runs they share; runs in more than
+/// `COMMON` units are boilerplate and count for nothing.
+fn shared_grams(grams: &[Vec<u64>]) -> HashMap<(usize, usize), usize> {
     let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
     for (unit, set) in grams.iter().enumerate() {
         for gram in set {
@@ -200,27 +223,13 @@ fn similar_pairs(units: &[Unit], blocks: &[Block], sources: &[Source]) -> Pairs 
             }
         }
     }
-    let language = |u: &Unit| {
-        sources[blocks[u.block].file]
-            .path
-            .extension()
-            .map(|e| e.to_ascii_lowercase())
-    };
-    let mut pairs = Pairs::new();
-    for ((a, b), count) in shared {
-        let (ua, ub) = (&units[a], &units[b]);
-        let (n, m) = (ua.shapes.len(), ub.shapes.len());
-        // Similarity is at most 2·min / (n + m).
-        let enough_grams = count * 10 >= 3 * grams[a].len().min(grams[b].len());
-        let close_sizes = (2 * n.min(m)) as f64 >= SIMILARITY * (n + m) as f64;
-        if !enough_grams || !close_sizes || language(ua) != language(ub) {
-            continue;
-        }
-        if let Some((similarity, matches)) = compare(ua, ub) {
-            pairs.insert((a, b), (similarity, matches));
-        }
-    }
-    pairs
+    shared
+}
+
+/// Similarity is at most 2·min / (n + m): sizes too far apart cannot reach it.
+fn close_sizes(a: &Unit, b: &Unit) -> bool {
+    let (n, m) = (a.shapes.len(), b.shapes.len());
+    (2 * n.min(m)) as f64 >= SIMILARITY * (n + m) as f64
 }
 
 /// The similarity of two token sequences and where they match, when it
@@ -271,26 +280,43 @@ fn changed_statements(
     if n == 0 || m == 0 || n * m > GAP_PAIRS {
         return Vec::new();
     }
-    let local = |x: usize, y: usize| -> Option<Vec<(usize, usize)>> {
-        let (ra, rb) = (
-            range(a, ga.start + x, ga.start + x + 1),
-            range(b, gb.start + y, gb.start + y + 1),
-        );
-        let size = ra.len() + rb.len();
-        let bound = ((1.0 - LOCAL_SIMILARITY) * size as f64).floor() as usize;
-        let found = align(&a.shapes[ra.clone()], &b.shapes[rb.clone()], bound)?;
-        let alike = 2.0 * found.len() as f64 >= LOCAL_SIMILARITY * size as f64;
-        alike.then(|| {
-            found
-                .iter()
-                .map(|(p, q)| (ra.start + p, rb.start + q))
+    let pairs: Vec<Vec<Option<Matches>>> = (0..n)
+        .map(|x| {
+            (0..m)
+                .map(|y| {
+                    let ra = range(a, ga.start + x, ga.start + x + 1);
+                    let rb = range(b, gb.start + y, gb.start + y + 1);
+                    one_changed(a, b, ra, rb)
+                })
                 .collect()
         })
-    };
-    let pairs: Vec<Vec<Option<Matches>>> = (0..n)
-        .map(|x| (0..m).map(|y| local(x, y)).collect())
         .collect();
-    // best[x][y]: most tokens matched pairing statements x.. with y..
+    walk(&pairs, &best_pairing(&pairs))
+}
+
+/// The token matches of two statements alike enough to be one changed, by
+/// their positions in the units.
+fn one_changed(
+    a: &Unit,
+    b: &Unit,
+    ra: std::ops::Range<usize>,
+    rb: std::ops::Range<usize>,
+) -> Option<Matches> {
+    let size = ra.len() + rb.len();
+    let bound = ((1.0 - LOCAL_SIMILARITY) * size as f64).floor() as usize;
+    let found = align(&a.shapes[ra.clone()], &b.shapes[rb.clone()], bound)?;
+    let alike = 2.0 * found.len() as f64 >= LOCAL_SIMILARITY * size as f64;
+    alike.then(|| {
+        found
+            .iter()
+            .map(|(p, q)| (ra.start + p, rb.start + q))
+            .collect()
+    })
+}
+
+/// `best[x][y]`: most tokens matched pairing statements `x..` with `y..`, in order.
+fn best_pairing(pairs: &[Vec<Option<Matches>>]) -> Vec<Vec<usize>> {
+    let (n, m) = (pairs.len(), pairs[0].len());
     let mut best = vec![vec![0usize; m + 1]; n + 1];
     for x in (0..n).rev() {
         for y in (0..m).rev() {
@@ -300,6 +326,12 @@ fn changed_statements(
             best[x][y] = paired.max(best[x + 1][y]).max(best[x][y + 1]);
         }
     }
+    best
+}
+
+/// The token matches of the best pairing, read back from `best`.
+fn walk(pairs: &[Vec<Option<Matches>>], best: &[Vec<usize>]) -> Vec<(usize, usize)> {
+    let (n, m) = (pairs.len(), pairs[0].len());
     let mut out = Vec::new();
     let (mut x, mut y) = (0, 0);
     while x < n && y < m {
@@ -321,61 +353,83 @@ fn changed_statements(
 /// than `max_edits` insertions and deletions.
 pub(crate) fn align(a: &[u64], b: &[u64], max_edits: usize) -> Option<Vec<(usize, usize)>> {
     let (n, m) = (a.len() as isize, b.len() as isize);
-    let max = max_edits as isize;
-    let offset = max + 1;
-    let at = |k: isize| (k + offset) as usize;
+    let offset = max_edits as isize + 1;
     let mut v = vec![0isize; 2 * offset as usize + 1];
     let mut trace: Vec<Vec<isize>> = Vec::new();
-    for d in 0..=max {
+    for d in 0..offset {
         trace.push(v.clone());
-        let mut k = -d;
-        while k <= d {
-            let mut x = if k == -d || (k != d && v[at(k - 1)] < v[at(k + 1)]) {
-                v[at(k + 1)]
-            } else {
-                v[at(k - 1)] + 1
-            };
-            let mut y = x - k;
-            while x < n && y < m && a[x as usize] == b[y as usize] {
-                x += 1;
-                y += 1;
-            }
-            v[at(k)] = x;
+        for k in (-d..=d).step_by(2) {
+            let x = start(&v, k, d, offset);
+            let (x, y) = snake(a, b, x, x - k);
+            v[(k + offset) as usize] = x;
             if x >= n && y >= m {
                 return Some(backtrack(&trace, n, m, offset));
             }
-            k += 2;
         }
     }
     None
 }
 
-fn backtrack(trace: &[Vec<isize>], n: isize, m: isize, offset: isize) -> Vec<(usize, usize)> {
+/// Whether diagonal `k` at `d` edits is reached from the diagonal above (an insertion).
+fn from_above(v: &[isize], k: isize, d: isize, offset: isize) -> bool {
     let at = |k: isize| (k + offset) as usize;
+    k == -d || k != d && v[at(k - 1)] < v[at(k + 1)]
+}
+
+/// Where diagonal `k` starts at `d` edits: from the diagonal above, or one
+/// step on from the one below.
+fn start(v: &[isize], k: isize, d: isize, offset: isize) -> isize {
+    let at = |k: isize| (k + offset) as usize;
+    if from_above(v, k, d, offset) {
+        v[at(k + 1)]
+    } else {
+        v[at(k - 1)] + 1
+    }
+}
+
+/// Along the diagonal while the sequences match.
+fn snake(a: &[u64], b: &[u64], mut x: isize, mut y: isize) -> (isize, isize) {
+    while x < a.len() as isize && y < b.len() as isize && a[x as usize] == b[y as usize] {
+        x += 1;
+        y += 1;
+    }
+    (x, y)
+}
+
+fn backtrack(trace: &[Vec<isize>], n: isize, m: isize, offset: isize) -> Vec<(usize, usize)> {
     let mut matches = Vec::new();
     let (mut x, mut y) = (n, m);
     for d in (0..trace.len() as isize).rev() {
         let v = &trace[d as usize];
         let k = x - y;
-        let previous = if k == -d || (k != d && v[at(k - 1)] < v[at(k + 1)]) {
+        let previous = if from_above(v, k, d, offset) {
             k + 1
         } else {
             k - 1
         };
-        let px = v[at(previous)];
+        let px = v[(previous + offset) as usize];
         let py = px - previous;
-        while x > px && y > py && x > 0 && y > 0 {
-            x -= 1;
-            y -= 1;
-            matches.push((x as usize, y as usize));
-        }
+        (x, y) = diagonal(&mut matches, (x, y), (px, py));
         if d > 0 {
-            x = px;
-            y = py;
+            (x, y) = (px, py);
         }
     }
     matches.reverse();
     matches
+}
+
+/// The matches on the diagonal from `(x, y)` back to `(px, py)`.
+fn diagonal(
+    matches: &mut Vec<(usize, usize)>,
+    (mut x, mut y): (isize, isize),
+    (px, py): (isize, isize),
+) -> (isize, isize) {
+    while x > px.max(0) && y > py.max(0) {
+        x -= 1;
+        y -= 1;
+        matches.push((x as usize, y as usize));
+    }
+    (x, y)
 }
 
 /// Groups of units connected by near-miss pairs.
@@ -491,31 +545,70 @@ fn near_class(
     display: &dyn Fn(&std::path::Path) -> String,
 ) -> CloneClass {
     let first = &units[center].tokens;
-    // For each token of the center, the token each other copy has there.
-    let mapped: Vec<Vec<Option<usize>>> = others
+    let mapped = mapped(first.len(), others);
+    let shared: Vec<bool> = (0..first.len())
+        .map(|p| mapped.iter().all(|m| m[p].is_some()))
+        .collect();
+    let (holes, hole_at) = near_holes(first, &shared, &mapped, others, units);
+    let source = &sources[blocks[units[center].block].file].text;
+    let mut class = describe(&spans[..1], blocks, sources, display);
+    class.copies = spans
+        .iter()
+        .map(|s| describe(&[*s], blocks, sources, display).copies.remove(0))
+        .collect();
+    class.differences = others
+        .iter()
+        .enumerate()
+        .flat_map(|(n, (o, _, matches))| {
+            differences(n + 1, first, &units[*o].tokens, matches, source, {
+                &sources[blocks[units[*o].block].file].text
+            })
+        })
+        .collect();
+    let similarity = others.iter().map(|(_, s, _)| *s).fold(1.0, f64::min);
+    class.saves = near_saves(&class, &holes);
+    class.unite = near_unite(class.differences.len(), &holes);
+    class.clone_type = 3;
+    class.similarity = Some((similarity * 100.0).round() / 100.0);
+    class.template = near_template(first, &shared, &hole_at, source);
+    class.holes = holes;
+    class.cautions.clear();
+    class
+}
+
+/// For each token of the center, the token each other copy has there.
+fn mapped(len: usize, others: &[Member]) -> Vec<Vec<Option<usize>>> {
+    others
         .iter()
         .map(|(_, _, matches)| {
-            let mut at = vec![None; first.len()];
+            let mut at = vec![None; len];
             for (i, j) in matches {
                 at[*i] = Some(*j);
             }
             at
         })
-        .collect();
-    let shared = |p: usize| mapped.iter().all(|m| m[p].is_some());
+        .collect()
+}
+
+/// Holes where every copy has a token but not the same one; and the hole at
+/// each such position of the center.
+fn near_holes(
+    first: &[&Token],
+    shared: &[bool],
+    mapped: &[Vec<Option<usize>>],
+    others: &[Member],
+    units: &[Unit],
+) -> (Vec<Hole>, BTreeMap<usize, usize>) {
     let declared = declarations(first);
     let mut holes: Vec<Hole> = Vec::new();
     let mut by_values: BTreeMap<Vec<String>, usize> = BTreeMap::new();
     let mut hole_at: BTreeMap<usize, usize> = BTreeMap::new();
-    for p in 0..first.len() {
-        if first[p].kind == Kind::Other || !shared(p) {
-            continue;
-        }
+    for p in (0..first.len()).filter(|&p| first[p].kind != Kind::Other && shared[p]) {
         let values: Vec<String> = std::iter::once(first[p].text.clone())
             .chain(
                 others
                     .iter()
-                    .zip(&mapped)
+                    .zip(mapped)
                     .map(|((o, _, _), m)| units[*o].tokens[m[p].expect("shared")].text.clone()),
             )
             .collect();
@@ -535,77 +628,69 @@ fn near_class(
         }
         hole_at.insert(p, index);
     }
-    let source = &sources[blocks[units[center].block].file].text;
+    (holes, hole_at)
+}
+
+/// The center's text, with `⟨n⟩` at holes and `⟪…⟫` around what not every
+/// copy has, without its shared indentation.
+fn near_template(
+    first: &[&Token],
+    shared: &[bool],
+    hole_at: &BTreeMap<usize, usize>,
+    source: &str,
+) -> String {
     let start = first[0].start_byte;
-    let end = first[first.len() - 1].end_byte;
     let mut template = String::new();
     let mut cursor = start;
     let mut p = 0;
     while p < first.len() {
-        if !shared(p) {
-            let mut q = p;
-            while q + 1 < first.len() && !shared(q + 1) {
-                q += 1;
+        let (text, end, next) = if shared[p] {
+            let mark = hole_at.get(&p).map(|index| format!("⟨{index}⟩"));
+            match mark {
+                Some(mark) => (mark, first[p].end_byte, p + 1),
+                None => (String::new(), cursor, p + 1),
             }
-            template.push_str(&source[cursor..first[p].start_byte]);
-            template.push('⟪');
-            template.push_str(&source[first[p].start_byte..first[q].end_byte]);
-            template.push('⟫');
-            cursor = first[q].end_byte;
-            p = q + 1;
-            continue;
-        }
-        if let Some(index) = hole_at.get(&p) {
-            template.push_str(&source[cursor..first[p].start_byte]);
-            template.push_str(&format!("⟨{index}⟩"));
-            cursor = first[p].end_byte;
-        }
-        p += 1;
-    }
-    template.push_str(&source[cursor..end]);
-    let mut class = describe(&spans[..1], blocks, sources, display);
-    let copies: Vec<crate::Copy> = spans
-        .iter()
-        .map(|s| describe(&[*s], blocks, sources, display).copies.remove(0))
-        .collect();
-    let differences: Vec<Difference> = others
-        .iter()
-        .enumerate()
-        .flat_map(|(n, (o, _, matches))| {
-            differences(n + 1, first, &units[*o].tokens, matches, source, {
-                &sources[blocks[units[*o].block].file].text
-            })
-        })
-        .collect();
-    let similarity = others.iter().map(|(_, s, _)| *s).fold(1.0, f64::min);
-    let lines = class.lines;
-    let parameters = holes.iter().filter(|h| h.kind != HoleKind::Local).count();
-    let edits = differences.len();
-    class.saves = ((copies.len() - 1) * lines) as i64
-        - copies.len() as i64
-        - 2
-        - (parameters / 3) as i64
-        - edits as i64;
-    class.unite = format!(
-        "the functions' bodies are alike apart from {edits} {}: keep one function and pass what differs as a parameter, a flag or a delegate (marked ⟪…⟫, and in the `differs` lines), or move the shared steps into one helper they all call{}",
-        if edits == 1 { "edit" } else { "edits" },
-        if holes.iter().any(|h| h.kind != HoleKind::Local) {
-            format!("; the shared parts differ in {}", holes_list(&holes))
         } else {
-            String::new()
+            let q = p + shared[p..].iter().take_while(|s| !**s).count() - 1;
+            let gap = format!("⟪{}⟫", &source[first[p].start_byte..first[q].end_byte]);
+            (gap, first[q].end_byte, q + 1)
+        };
+        if !text.is_empty() {
+            template.push_str(&source[cursor..first[p].start_byte]);
+            template.push_str(&text);
+            cursor = end;
         }
-    );
-    class.copies = copies;
-    class.clone_type = 3;
-    class.similarity = Some((similarity * 100.0).round() / 100.0);
-    class.template = crate::find::dedent(
+        p = next;
+    }
+    template.push_str(&source[cursor..first[first.len() - 1].end_byte]);
+    crate::find::dedent(
         &template,
         start - source[..start].rfind('\n').map_or(0, |n| n + 1),
-    );
-    class.holes = holes;
-    class.differences = differences;
-    class.cautions.clear();
-    class
+    )
+}
+
+/// Lines a shared version saves, after its signature, calls, parameters and
+/// what each copy needs differently.
+fn near_saves(class: &CloneClass, holes: &[Hole]) -> i64 {
+    let parameters = holes.iter().filter(|h| h.kind != HoleKind::Local).count();
+    let copies = class.copies.len();
+    ((copies - 1) * class.lines) as i64
+        - copies as i64
+        - 2
+        - (parameters / 3) as i64
+        - class.differences.len() as i64
+}
+
+fn near_unite(edits: usize, holes: &[Hole]) -> String {
+    let differ = if holes.iter().any(|h| h.kind != HoleKind::Local) {
+        format!("; the shared parts differ in {}", holes_list(holes))
+    } else {
+        String::new()
+    };
+    format!(
+        "the functions' bodies are alike apart from {edits} {}: keep one function and pass what differs as a parameter, a flag or a delegate (marked ⟪…⟫, and in the `differs` lines), or move the shared steps into one helper they all call{differ}",
+        if edits == 1 { "edit" } else { "edits" },
+    )
 }
 
 fn holes_list(holes: &[Hole]) -> String {
