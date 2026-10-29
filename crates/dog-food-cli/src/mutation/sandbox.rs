@@ -154,10 +154,22 @@ fn claim(root: &Path, kind: Kind) -> Result<Sandbox, String> {
             base.with_file_name(format!("{name}-{}", n + 1))
         }
     };
-    for n in 0..SLOTS {
+    // The slot this worktree used last first: its files and build output
+    // match this checkout, where another worktree's (another branch) makes
+    // the sync compare and the build recompile far more. Then unused slots.
+    let me = absolute(root).to_string_lossy().into_owned();
+    let owner = |dir: &Path| std::fs::read_to_string(dir.with_extension("owner")).ok();
+    let mut order: Vec<usize> = (0..SLOTS).collect();
+    order.sort_by_key(|&n| match owner(&slot(n)) {
+        Some(o) if o == me => 0,
+        None => 1,
+        Some(_) => 2,
+    });
+    for n in order {
         let dir = slot(n);
         let lock = lock_file(&dir)?;
         if lock.try_lock().is_ok() {
+            let _ = std::fs::write(dir.with_extension("owner"), &me);
             return Ok(Sandbox { dir, _lock: lock });
         }
     }
@@ -815,6 +827,20 @@ mod tests {
         let dir = first.dir.clone();
         drop(first);
         assert_eq!(claim(root.path(), Kind::CSharp).unwrap().dir, dir);
+    }
+
+    #[test]
+    fn a_worktree_gets_back_the_sandbox_it_used_last() {
+        let root = tempfile::tempdir().unwrap();
+        let first = claim(root.path(), Kind::CSharp).unwrap();
+        let second = claim(root.path(), Kind::CSharp).unwrap();
+        let (first_dir, second_dir) = (first.dir.clone(), second.dir.clone());
+        drop((first, second));
+        // Another worktree used the first slot last; this one the second.
+        std::fs::write(first_dir.with_extension("owner"), "D:/elsewhere").unwrap();
+        let me = absolute(root.path()).to_string_lossy().into_owned();
+        std::fs::write(second_dir.with_extension("owner"), &me).unwrap();
+        assert_eq!(claim(root.path(), Kind::CSharp).unwrap().dir, second_dir);
     }
 
     #[test]
