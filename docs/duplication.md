@@ -18,7 +18,22 @@ dgf-dup --changes --base origin/development --fail-on-copies   # a PR gate: exit
 
 With `--changes`, the whole repository is still scanned, since a new copy is usually a copy of code the branch did not touch, but only groups with a copy in the branch's changed lines are reported (uncommitted edits and new files count). Changed copies are marked `(changed)`.
 
-The HTML page draws every file with copies to scale, with a mark per copy in its group's color; clicking a file or a mark shows the groups it is in. Each group is a card with its type, its copies, the template with each hole highlighted (and, for near copies, what not every copy has), a table of what each copy has in each hole, where near copies part ways, and how to unite them. It filters by file, function or code, and by "only changed".
+The HTML page is a review dashboard. It shows:
+- what is open, reviewed and saveable, as numbers;
+- the groups by kind of copy;
+- the projects with the most duplicated lines, and the pairs of projects that share copies (click any of them to filter);
+- a queue of groups to work through, with filters for kind, project, status, changed lines and text.
+
+A group opens with its copies' code side by side, the lines only one of them has marked, then the template, holes, differences, rules and how to unite them.
+
+Each group can be marked *to fix*, *intentional* or *false positive*, with a note. Keys `j`/`k` move, and `f`/`i`/`x`/`u` decide. A link to a group is `dup.html#group=<id>`. Decisions stay in the browser until **Export decisions** saves `dup-decisions.json`; **Import** loads one. Commit that file and pass it back:
+
+```powershell
+dgf-dup --decisions dup-decisions.json --format html -o dup.html   # reviewed groups left out, decisions shown
+dgf-dup --changes --decisions dup-decisions.json --fail-on-copies  # a gate that only sees unreviewed copies
+```
+
+Groups decided as intentional or a false positive are left out (and counted). Groups to fix stay, and the agent format marks them `review: to-fix`. A group's id comes from its kind and the files and functions its copies are in. It stays the same while the code moves around inside those functions, so decisions survive later scans.
 
 C#, TypeScript/JavaScript (also TSX/JSX) and Rust. Test code (`*.spec.ts`, `*Tests.cs`, `tests/`, `e2e/`, Rust `mod tests`), generated files and migrations are left out unless `--tests` is given.
 

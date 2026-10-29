@@ -90,6 +90,7 @@ pub fn agent(report: &Report, top: usize) -> String {
     if let Some(scope) = &report.scope {
         let _ = writeln!(out, "scope: {scope}");
     }
+    out.push_str(&suppressed(report));
     out.push_str("each class: its type (1 the same code, 2 renamed, 3 near miss: ⟪…⟫ marks what not every copy has), copies (file:lines function, `(changed)` when the branch changed it), the template with ⟨n⟩ holes, what each hole is, what each near-miss copy adds, leaves out or has instead, and how to unite them\n");
     for (n, class) in report.classes.iter().take(shown(report, top)).enumerate() {
         if let Some(run) = run(class) {
@@ -112,6 +113,7 @@ pub fn agent(report: &Report, top: usize) -> String {
             class.lines,
             class.saves
         );
+        review_line(&mut out, report, class);
         for copy in &class.copies {
             let _ = writeln!(
                 out,
@@ -153,6 +155,18 @@ fn agent_template(out: &mut String, class: &CloneClass) {
         let _ = writeln!(out, "same after: {}", class.rules.join("; "));
     }
     let _ = writeln!(out, "unite: {}", class.unite);
+}
+
+/// A class's review decision (with `--decisions`), with its note.
+fn review_line(out: &mut String, report: &Report, class: &CloneClass) {
+    if let Some(decision) = report.decisions.get(&class.id) {
+        let note = if decision.note.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", decision.note)
+        };
+        let _ = writeln!(out, "review: {}{note}", decision.status);
+    }
 }
 
 /// The clone type in words.
@@ -223,6 +237,17 @@ pub fn json(report: &Report) -> String {
     serde_json::to_string_pretty(report).expect("the report serializes") + "\n"
 }
 
+/// Classes left out by review decisions, when any were.
+fn suppressed(report: &Report) -> String {
+    if report.suppressed == 0 {
+        return String::new();
+    }
+    format!(
+        "{} groups left out as reviewed (intentional or a false positive, in --decisions)\n",
+        report.suppressed
+    )
+}
+
 fn summary(report: &Report) -> String {
     let scope = report
         .scope
@@ -230,6 +255,7 @@ fn summary(report: &Report) -> String {
         .map(|s| format!("{s}\n"))
         .unwrap_or_default();
     scope
+        + &suppressed(report)
         + &format!(
             "{} clone classes, {} duplicated lines ({:.1}% of {} statement lines in {} files)\n",
             report.classes.len(),
@@ -264,6 +290,7 @@ fn run(class: &CloneClass) -> Option<String> {
     let last = class.copies.last()?;
     Some(place(&crate::Copy {
         end_line: last.end_line,
+        code: String::new(),
         ..first.clone()
     }))
 }

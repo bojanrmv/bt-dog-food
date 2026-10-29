@@ -284,3 +284,40 @@ fn a_copy_with_one_more_statement_is_a_near_miss_with_its_difference() {
         Some("Receipts.Rows")
     );
 }
+
+#[test]
+fn decisions_leave_out_reviewed_groups_by_their_stable_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "src/Billing.cs",
+        &format!(
+            "class Orders {{\n    decimal Add(Plan plan, decimal limit) {{\n{}    }}\n}}\n\nclass Seats {{\n    decimal Add(Seat seat, decimal limit) {{\n{}    }}\n}}\n",
+            body("plan", "Price", "total"),
+            body("seat", "Fee", "sum")
+        ),
+    );
+    write(root, "src/Shop.csproj", "<Project />");
+    let first = run(root, false);
+    let id = first.classes[0].id.clone();
+    assert_eq!(id.len(), 12, "{id}");
+    assert_eq!(first.projects["src/Billing.cs"], "Shop");
+    assert!(first.classes[0].copies[0]
+        .code
+        .starts_with("var total = 0m;"));
+    // The same code scanned again has the same id.
+    assert_eq!(run(root, false).classes[0].id, id);
+    let decisions = root.join("dup-decisions.json");
+    std::fs::write(
+        &decisions,
+        format!(r#"{{ "version": 1, "decisions": {{ "{id}": {{ "status": "intentional", "note": "kept apart on purpose" }} }} }}"#),
+    )
+    .unwrap();
+    let mut report = first;
+    report.apply(dog_food_dup::decisions::load(&decisions).unwrap());
+    assert!(report.classes.is_empty());
+    assert_eq!(report.suppressed, 1);
+    assert_eq!(report.duplicated_lines, 0);
+    assert_eq!(report.decisions[&id].note, "kept apart on purpose");
+}

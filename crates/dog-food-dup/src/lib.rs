@@ -14,6 +14,7 @@
 
 pub mod bench;
 pub mod changes;
+pub mod decisions;
 mod find;
 mod near;
 pub mod report;
@@ -42,6 +43,19 @@ pub struct Report {
     pub classes: Vec<CloneClass>,
     /// Line counts of the files that hold a copy, for drawing them to scale.
     pub file_lines: std::collections::BTreeMap<String, usize>,
+    /// The project each file with a copy belongs to: its nearest folder with
+    /// a .csproj, package.json or Cargo.toml.
+    pub projects: std::collections::BTreeMap<String, String>,
+    /// With `--decisions`: classes left out as decided (intentional or a false positive).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub suppressed: usize,
+    /// With `--decisions`: every decision, by class id.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub decisions: std::collections::BTreeMap<String, decisions::Decision>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl Report {
@@ -75,6 +89,24 @@ impl Report {
         ));
     }
 
+    /// Names each class by its type and the functions its copies are in, and
+    /// finds the project of each file with a copy. A second class in the same
+    /// functions gets `-2`, and so on.
+    pub fn index(&mut self, root: &Path) {
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for class in &mut self.classes {
+            let base = class_id(class);
+            let n = seen.entry(base.clone()).or_default();
+            *n += 1;
+            class.id = if *n == 1 { base } else { format!("{base}-{n}") };
+        }
+        let mut found = std::collections::HashMap::new();
+        for file in self.file_lines.keys() {
+            let project = project_of(root, Path::new(file), &mut found);
+            self.projects.insert(file.clone(), project);
+        }
+    }
+
     /// Duplicated lines as a share of all statement lines, in percent.
     pub fn percent(&self) -> f64 {
         if self.lines == 0 {
@@ -83,6 +115,66 @@ impl Report {
             self.duplicated_lines as f64 * 100.0 / self.lines as f64
         }
     }
+}
+
+/// A hash of the class's type and its copies' files and functions.
+fn class_id(class: &CloneClass) -> String {
+    let mut places: Vec<String> = class
+        .copies
+        .iter()
+        .map(|c| format!("{}\0{}", c.file, c.function.as_deref().unwrap_or("")))
+        .collect();
+    places.sort();
+    let kind = format!("{}{}", class.kind, class.clone_type);
+    let mut parts: Vec<&[u8]> = vec![kind.as_bytes()];
+    parts.extend(places.iter().map(|p| p.as_bytes()));
+    format!("{:012x}", tokens::fnv(&parts) & 0xffff_ffff_ffff)
+}
+
+/// The project a file belongs to: the name of the nearest .csproj above it,
+/// or the folder of the nearest package.json or Cargo.toml; `.` at the root.
+fn project_of(
+    root: &Path,
+    file: &Path,
+    found: &mut std::collections::HashMap<PathBuf, String>,
+) -> String {
+    let full = root.join(file);
+    for dir in full.ancestors().skip(1).take_while(|d| d.starts_with(root)) {
+        if let Some(name) = found.get(dir) {
+            return name.clone();
+        }
+        if let Some(name) = project_in(root, dir) {
+            found.insert(dir.to_path_buf(), name.clone());
+            return name;
+        }
+    }
+    ".".to_string()
+}
+
+fn project_in(root: &Path, dir: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut marker = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "csproj") {
+            return path.file_stem().map(|s| s.to_string_lossy().into_owned());
+        }
+        marker |= path
+            .file_name()
+            .is_some_and(|n| n == "package.json" || n == "Cargo.toml");
+    }
+    let relative = dir
+        .strip_prefix(root)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    marker.then(|| {
+        if relative.is_empty() {
+            ".".to_string()
+        } else {
+            relative
+        }
+    })
 }
 
 /// Scans the C#, TypeScript/JavaScript and Rust files under `paths`
@@ -137,14 +229,19 @@ pub fn scan_files(files: &[PathBuf], root: &Path, tests: bool, settings: Setting
         .filter(|(file, _)| used.contains(file.as_str()))
         .collect();
     let duplicated_lines = classes.iter().map(|c| c.lines * (c.copies.len() - 1)).sum();
-    Report {
+    let mut report = Report {
         scope: None,
         files: sources.len(),
         lines,
         duplicated_lines,
         classes,
         file_lines,
-    }
+        projects: Default::default(),
+        suppressed: 0,
+        decisions: Default::default(),
+    };
+    report.index(root);
+    report
 }
 
 /// Lines covered by the outermost blocks' statements.

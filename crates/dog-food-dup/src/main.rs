@@ -55,6 +55,10 @@ struct Args {
     /// The C# engine to run: an executable, or its .dll [default: DGF_DUP_CS, else dgf-dup-cs on PATH]
     #[arg(long, value_name = "PATH", requires = "semantic")]
     semantic_engine: Option<PathBuf>,
+    /// Review decisions saved from the HTML report: groups marked intentional
+    /// or a false positive are left out, so gates only see unreviewed ones
+    #[arg(long, value_name = "FILE")]
+    decisions: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -89,10 +93,9 @@ fn run(args: &Args) -> Result<ExitCode, (u8, String)> {
     let changes = changes(args)?;
     let (paths, root) = scope(args, changes.as_ref());
     let mut found = scan(&paths, &root, args.tests, settings);
-    if args.semantic {
-        let engine = semantic::command(args.semantic_engine.as_deref());
-        let classes = semantic::classes(engine, &paths, &root, args.tests).map_err(|e| (2, e))?;
-        semantic::merge(&mut found, classes, &root);
+    add_semantic(&mut found, args, &paths, &root)?;
+    if let Some(path) = &args.decisions {
+        found.apply(dog_food_dup::decisions::load(path).map_err(|e| (2, e))?);
     }
     if let Some(changes) = &changes {
         found.keep_changed(changes);
@@ -105,6 +108,22 @@ fn run(args: &Args) -> Result<ExitCode, (u8, String)> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// With --semantic, the C# engine's classes in the report.
+fn add_semantic(
+    found: &mut dog_food_dup::Report,
+    args: &Args,
+    paths: &[PathBuf],
+    root: &std::path::Path,
+) -> Result<(), (u8, String)> {
+    if !args.semantic {
+        return Ok(());
+    }
+    let engine = semantic::command(args.semantic_engine.as_deref());
+    let classes = semantic::classes(engine, paths, root, args.tests).map_err(|e| (2, e))?;
+    semantic::merge(found, classes, root);
+    Ok(())
 }
 
 fn changes(args: &Args) -> Result<Option<Changes>, (u8, String)> {

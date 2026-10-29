@@ -36,6 +36,40 @@ pub struct Copy {
     /// With `--changes`: the copy overlaps lines the branch changed.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub changed: bool,
+    /// The copy's code, without its shared indentation, for showing copies
+    /// side by side (cut after `CODE_LINES` lines).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub code: String,
+}
+
+/// Lines of a copy's code kept in the report.
+pub const CODE_LINES: usize = 150;
+
+/// Lines `start..=end` (1-based) of `text`, without the indentation they
+/// share, cut after `CODE_LINES`.
+pub fn excerpt(text: &str, start: usize, end: usize) -> String {
+    let lines: Vec<&str> = text
+        .lines()
+        .skip(start.saturating_sub(1))
+        .take(end + 1 - start.min(end + 1))
+        .collect();
+    let indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut kept: Vec<&str> = lines
+        .iter()
+        .take(CODE_LINES)
+        .map(|l| l.get(indent..).unwrap_or(l.trim_start()))
+        .collect();
+    let more = lines.len().saturating_sub(CODE_LINES);
+    let cut = format!("... ({more} more lines)");
+    if more > 0 {
+        kept.push(&cut);
+    }
+    kept.join("\n")
 }
 
 /// What differs at a hole of the template, which decides how a shared
@@ -118,6 +152,9 @@ pub struct Hole {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloneClass {
+    /// A name for the class that stays while its copies stay in the same
+    /// functions: decisions about it are kept by it (see `decisions`).
+    pub id: String,
     /// `copies` of a piece of code, or `repeated`: one statement shape
     /// written several times in a row.
     pub kind: &'static str,
@@ -555,6 +592,7 @@ pub(crate) fn describe(
         cautions(first, &declared, blocks, &span)
     };
     CloneClass {
+        id: String::new(),
         kind: "copies",
         clone_type: if holes.is_empty() { 1 } else { 2 },
         evidence: "syntax",
@@ -586,6 +624,11 @@ fn copy_of(
         end_line: block.statements[span.last].end_line,
         function: block.function.clone(),
         changed: false,
+        code: excerpt(
+            &sources[block.file].text,
+            block.statements[span.first].start_line,
+            block.statements[span.last].end_line,
+        ),
     }
 }
 

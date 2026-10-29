@@ -3,12 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Duplication report</title>
+<title>Duplication review</title>
 <style>
 :root {
   --bg: #f3f5f9; --surface: #ffffff; --surface-2: #f6f8fb; --ink: #111827; --muted: #586174; --faint: #8b93a3;
   --line: #e0e5ed; --accent: #3b5bdb; --accent-soft: #e8edfd; --ok: #2b9a66; --ok-soft: #e3f4ec;
-  --warn: #d48806; --warn-soft: #fcf1d9; --code: #f6f8fb; --hole-l: 42%; --hole-bg-l: 92%;
+  --warn: #b26f00; --warn-soft: #fcf1d9; --bad: #c4362f; --bad-soft: #fbe6e4; --code: #f6f8fb;
+  --hole-l: 42%; --hole-bg-l: 92%; --add: #fff3cd; --add-ink: #6b4b00;
+  --t1: #2a78d6; --t2: #eb6834; --t3: #1baf7a; --t4: #eda100; --t5: #e87ba4; --bar: #2a78d6;
   --shadow: 0 1px 2px rgba(17, 24, 39, 0.05), 0 4px 16px rgba(17, 24, 39, 0.04);
   --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   --mono: "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, ui-monospace, monospace;
@@ -18,79 +20,126 @@
   :root:not([data-theme="light"]) {
     --bg: #0b0f17; --surface: #121823; --surface-2: #171f2d; --ink: #e7ebf3; --muted: #9ba5b8; --faint: #687389;
     --line: #232c3c; --accent: #7c9cff; --accent-soft: #1c2645; --ok: #4cc38a; --ok-soft: #12291f;
-    --warn: #f2b544; --warn-soft: #2e2410; --code: #0f141d; --hole-l: 70%; --hole-bg-l: 20%;
+    --warn: #f2b544; --warn-soft: #2e2410; --bad: #f07a72; --bad-soft: #33171a; --code: #0f141d;
+    --hole-l: 70%; --hole-bg-l: 20%; --add: #3a2f10; --add-ink: #f6d88a;
+    --t1: #3987e5; --t2: #d95926; --t3: #199e70; --t4: #c98500; --t5: #d55181; --bar: #3987e5;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4); color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #0b0f17; --surface: #121823; --surface-2: #171f2d; --ink: #e7ebf3; --muted: #9ba5b8; --faint: #687389;
   --line: #232c3c; --accent: #7c9cff; --accent-soft: #1c2645; --ok: #4cc38a; --ok-soft: #12291f;
-  --warn: #f2b544; --warn-soft: #2e2410; --code: #0f141d; --hole-l: 70%; --hole-bg-l: 20%;
+  --warn: #f2b544; --warn-soft: #2e2410; --bad: #f07a72; --bad-soft: #33171a; --code: #0f141d;
+  --hole-l: 70%; --hole-bg-l: 20%; --add: #3a2f10; --add-ink: #f6d88a;
+  --t1: #3987e5; --t2: #d95926; --t3: #199e70; --t4: #c98500; --t5: #d55181; --bar: #3987e5;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4); color-scheme: dark;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--sans); }
-main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
+main { max-width: 1440px; margin: 0 auto; padding: 24px 16px 64px; }
 header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
 h1 { margin: 0; font-size: 24px; letter-spacing: -0.01em; }
-h2 { margin: 32px 0 12px; font-size: 16px; }
-.sub { color: var(--muted); margin-top: 4px; }
-button.theme { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
-.numbers { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 20px; }
-.number { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow); }
+h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+.sub { color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+button { font: inherit; color: var(--ink); }
+.btn { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+.numbers { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-top: 20px; }
+.number { padding: 14px 16px; }
 .number b { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
 .number span { color: var(--muted); font-size: 12px; }
-.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
-.files { padding: 8px 16px; }
-.file { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) 70px; gap: 12px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); cursor: pointer; }
-.file:first-child { border-top: 0; }
-.file:hover .name, .file.on .name { color: var(--accent); }
-.file .name { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
-.file .count { color: var(--muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
-.strip { position: relative; height: 14px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 4px; }
-.mark { position: absolute; top: -1px; bottom: -1px; min-width: 3px; border-radius: 2px; opacity: 0.9; cursor: pointer; }
-.mark:hover, .mark.on { opacity: 1; outline: 2px solid var(--ink); z-index: 1; }
-.tools { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
-.tools input[type=search] { flex: 1; min-width: 220px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font: inherit; }
-.tools label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
-.clear { border: 0; background: none; color: var(--accent); cursor: pointer; font: inherit; }
-.class { margin-top: 14px; overflow: hidden; }
-.class > .head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 12px 16px; border-bottom: 1px solid var(--line); }
-.swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
-.class .title { font-weight: 600; }
-.badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); }
-.badge.saves { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
-.badge.changed { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
-.body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-.body > div { padding: 12px 16px; min-width: 0; }
-.body > div + div { border-left: 1px solid var(--line); }
-.label { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; margin: 4px 0 6px; }
-.copies { list-style: none; margin: 0 0 8px; padding: 0; }
-.copies li { padding: 4px 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-.copies li > * { min-width: 0; }
-.copies .where { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
-.copies .fn { color: var(--muted); }
-pre { margin: 0; background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; overflow: auto; font: 12px/1.55 var(--mono); max-height: 420px; }
+.progress { height: 6px; border-radius: 3px; background: var(--surface-2); border: 1px solid var(--line); margin-top: 8px; overflow: hidden; }
+.progress i { display: block; height: 100%; background: var(--ok); border-radius: 3px; }
+.overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.overview > .card { padding: 14px 16px; min-width: 0; }
+.stack { display: flex; height: 14px; gap: 2px; margin: 4px 0 12px; }
+.stack i { display: block; height: 100%; border-radius: 4px; min-width: 4px; cursor: pointer; }
+.legend { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
+.legend li { display: flex; gap: 8px; align-items: center; cursor: pointer; border-radius: 6px; padding: 2px 4px; }
+.legend li:hover, .legend li.on { background: var(--surface-2); }
+.legend .key { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.legend .n { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.bars { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.bars li { display: grid; grid-template-columns: minmax(0, 1fr) 46px; gap: 4px 8px; align-items: center; cursor: pointer; border-radius: 6px; padding: 2px 4px; }
+.bars li:hover, .bars li.on { background: var(--surface-2); }
+.bars .name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bars .n { font-size: 12px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.bars .track { grid-column: 1 / -1; height: 6px; }
+.bars .fill { height: 100%; border-radius: 0 4px 4px 0; background: var(--bar); min-width: 3px; }
+.hint { color: var(--faint); font-size: 12px; }
+.review { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 12px; margin-top: 12px; align-items: start; }
+.queue { overflow: hidden; }
+.filters { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px; border-bottom: 1px solid var(--line); }
+.filters input[type=search] { flex: 1 1 200px; min-width: 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font: inherit; }
+.filters select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font: inherit; max-width: 100%; }
+.filters label { color: var(--muted); display: flex; gap: 6px; align-items: center; font-size: 13px; }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.chip { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 3px 10px; cursor: pointer; font-size: 12px; display: flex; gap: 6px; align-items: center; }
+.chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
+.chip .key { width: 8px; height: 8px; border-radius: 2px; }
+.list { max-height: calc(100vh - 140px); overflow: auto; position: relative; }
+.row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 12px; border-top: 1px solid var(--line); cursor: pointer; }
+.row:first-child { border-top: 0; }
+.row:hover { background: var(--surface-2); }
+.row.on { background: var(--accent-soft); }
+.row .dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line); }
+.row .dot.to-fix { background: var(--warn); border-color: var(--warn); }
+.row .dot.intentional { background: var(--ok); border-color: var(--ok); }
+.row .dot.false-positive { background: var(--faint); border-color: var(--faint); }
+.row .what { min-width: 0; }
+.row .fn { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .meta { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .saves { font-variant-numeric: tabular-nums; color: var(--ok); font-size: 12px; text-align: right; }
+.tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--surface); }
+.tag .key { width: 8px; height: 8px; border-radius: 2px; }
+.tag.changed { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.detail { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; }
+.detail .head { padding: 14px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+.detail .title { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.status { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.status button { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 4px 10px; cursor: pointer; font-size: 13px; }
+.status button[aria-pressed="true"].to-fix { background: var(--warn-soft); border-color: var(--warn); }
+.status button[aria-pressed="true"].intentional { background: var(--ok-soft); border-color: var(--ok); }
+.status button[aria-pressed="true"].false-positive { background: var(--surface-2); border-color: var(--faint); }
+textarea { width: 100%; min-height: 54px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; background: var(--surface); color: var(--ink); font: 13px/1.4 var(--sans); }
+.section { padding: 12px 16px; border-bottom: 1px solid var(--line); min-width: 0; }
+.section:last-child { border-bottom: 0; }
+.label { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 6px; }
+.compare-pick { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; font-size: 13px; color: var(--muted); }
+.compare { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.side { min-width: 0; }
+.side .where { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-bottom: 4px; overflow-wrap: anywhere; }
+pre { margin: 0; background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 8px 0; overflow: auto; font: 12px/1.55 var(--mono); max-height: 460px; }
+pre .ln { display: block; padding: 0 10px 0 0; white-space: pre; }
+pre .ln::before { content: attr(data-n); display: inline-block; width: 42px; padding-right: 10px; text-align: right; color: var(--faint); user-select: none; }
+pre .ln.diff { background: var(--add); color: var(--add-ink); }
+pre.template { padding: 8px 12px; white-space: pre; }
 .hole { border-radius: 4px; padding: 0 3px; font-weight: 600; }
-table.holes { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+.gap { background: var(--add); color: var(--add-ink); border-radius: 4px; padding: 0 2px; }
+table.holes { width: 100%; border-collapse: collapse; font-size: 12px; }
 table.holes td, table.holes th { text-align: left; padding: 4px 6px; border-top: 1px solid var(--line); vertical-align: top; }
 table.holes th { color: var(--faint); font-weight: 500; }
-table.holes code { font-family: var(--mono); }
-.unite { margin: 10px 0 0; padding: 10px 12px; background: var(--accent-soft); border-radius: 8px; }
-.gap { background: var(--warn-soft); border-radius: 4px; padding: 0 2px; }
-.badge.type3 { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
-ul.diffs { list-style: none; margin: 0; padding: 0; font-size: 12px; }
-ul.diffs li { padding: 4px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
-ul.diffs code { font-family: var(--mono); }
-ul.diffs .verb { color: var(--muted); }
-.caution { margin: 8px 0 0; padding: 8px 12px; background: var(--warn-soft); color: var(--ink); border-radius: 8px; font-size: 13px; }
-.empty { padding: 32px; text-align: center; color: var(--muted); }
-@media (max-width: 760px) {
-  .body { grid-template-columns: 1fr; }
-  .body > div + div { border-left: 0; border-top: 1px solid var(--line); }
-  .file { grid-template-columns: 1fr; gap: 4px; }
-  .file .count { text-align: left; }
+table.holes code { font-family: var(--mono); overflow-wrap: anywhere; }
+ul.plain { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+ul.plain li { padding: 4px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+ul.plain li:first-child { border-top: 0; }
+ul.plain code { font-family: var(--mono); font-size: 12px; }
+.verb { color: var(--muted); }
+.unite { padding: 10px 12px; background: var(--accent-soft); border-radius: 8px; }
+.caution { margin-top: 8px; padding: 8px 12px; background: var(--warn-soft); border-radius: 8px; font-size: 13px; }
+.empty { padding: 32px 16px; text-align: center; color: var(--muted); }
+kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--surface-2); }
+@media (max-width: 1100px) { .overview { grid-template-columns: 1fr; } }
+@media (max-width: 900px) {
+  .review { grid-template-columns: 1fr; }
+  .detail { position: static; max-height: none; }
+  .list { max-height: 60vh; }
+  .compare { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -98,23 +147,51 @@ ul.diffs .verb { color: var(--muted); }
 <main>
   <header>
     <div>
-      <h1>Duplication</h1>
+      <h1>Duplication review</h1>
       <div class="sub" id="scope"></div>
     </div>
-    <button class="theme" id="theme" type="button">Theme</button>
+    <div class="actions">
+      <button class="btn primary" id="export" type="button">Export decisions</button>
+      <button class="btn" id="import" type="button">Import</button>
+      <input type="file" id="importFile" accept=".json,application/json" hidden>
+      <button class="btn" id="theme" type="button">Theme</button>
+    </div>
   </header>
+
   <section class="numbers" id="numbers"></section>
 
-  <h2>Where the copies are</h2>
-  <div class="card files" id="files"></div>
+  <section class="overview">
+    <div class="card"><h2>By kind of copy</h2><div class="stack" id="stack" role="img"></div><ul class="legend" id="legend"></ul></div>
+    <div class="card"><h2>Projects with the most duplicated lines</h2><ul class="bars" id="projects"></ul></div>
+    <div class="card"><h2>Projects that share copies</h2><ul class="bars" id="pairs"></ul></div>
+  </section>
 
-  <h2>Copies and how to unite them</h2>
-  <div class="tools">
-    <input type="search" id="search" placeholder="Filter by file, function or code">
-    <label><input type="checkbox" id="changed"> only changed</label>
-    <button class="clear" id="clear" type="button" hidden>show all</button>
-  </div>
-  <div id="classes"></div>
+  <section class="review">
+    <div class="card queue">
+      <div class="filters">
+        <input type="search" id="search" placeholder="Search function, file or code" aria-label="Search">
+        <div class="chips" id="types"></div>
+        <select id="status" aria-label="Status">
+          <option value="open">Not reviewed</option>
+          <option value="all">All statuses</option>
+          <option value="to-fix">To fix</option>
+          <option value="intentional">Intentional</option>
+          <option value="false-positive">False positive</option>
+        </select>
+        <select id="project" aria-label="Project"><option value="">All projects</option></select>
+        <select id="sort" aria-label="Sort">
+          <option value="saves">Most lines saved</option>
+          <option value="copies">Most copies</option>
+          <option value="lines">Longest</option>
+          <option value="type">By kind</option>
+        </select>
+        <label><input type="checkbox" id="changed"> changed only</label>
+      </div>
+      <div class="list" id="list"></div>
+    </div>
+    <div class="card detail" id="detail"></div>
+  </section>
+  <p class="hint">Keys: <kbd>j</kbd>/<kbd>k</kbd> next and previous · <kbd>f</kbd> to fix · <kbd>i</kbd> intentional · <kbd>x</kbd> false positive · <kbd>u</kbd> clear. Decisions stay in this browser until exported; <code>dgf-dup --decisions dup-decisions.json</code> then leaves the intentional and false-positive groups out.</p>
 </main>
 <script>
 const DATA = /*DATA*/;
@@ -122,200 +199,405 @@ const DATA = /*DATA*/;
 const el = (tag, attrs = {}, ...children) => {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
     if (k === "text") node.textContent = v;
     else if (k === "style") node.style.cssText = v;
-    else node.setAttribute(k, v);
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v === true ? "" : v);
   }
   for (const c of children) if (c != null) node.append(c);
   return node;
 };
-const color = (i) => `hsl(${(i * 137.5) % 360} 62% 50%)`;
+const fmt = (n) => Number(n).toLocaleString();
+
+// Kinds of copy, in the categorical order of the palette.
+const KINDS = [
+  { key: "1", name: "Same code", word: "type 1", color: "var(--t1)" },
+  { key: "2", name: "Renamed", word: "type 2", color: "var(--t2)" },
+  { key: "3", name: "Near miss", word: "type 3", color: "var(--t3)" },
+  { key: "4", name: "Same behaviour, written differently", word: "type 4", color: "var(--t4)" },
+  { key: "r", name: "Repeated statements", word: "repeated", color: "var(--t5)" },
+];
+const kindOf = (c) => KINDS.find((k) => k.key === (c.kind === "repeated" ? "r" : String(c.type))) || KINDS[1];
+const STATUS = { "to-fix": "To fix", intentional: "Intentional", "false-positive": "False positive" };
 const holeColor = (n) => `color: hsl(${(n * 83 + 200) % 360} 70% var(--hole-l)); background: hsl(${(n * 83 + 200) % 360} 70% var(--hole-bg-l));`;
-const classes = DATA.classes.map((c, i) => ({ ...c, id: i + 1, color: color(i) }));
 const kindWord = { value: "value", name: "variable", member: "member", call: "call", type: "type", local: "local (renamed only)" };
-const FILES_SHOWN = 20;
-let fileFilter = null;
-let classFilter = null;
 
-// Numbers.
-const saves = classes.reduce((sum, c) => sum + Math.max(c.saves, 0), 0);
-const pct = DATA.lines ? (DATA.duplicatedLines * 100 / DATA.lines).toFixed(1) : "0.0";
-document.getElementById("scope").textContent = DATA.scope || `${DATA.files} files scanned`;
-for (const [value, label] of [
-  [classes.length, "groups of copies"],
-  [DATA.duplicatedLines, `duplicated lines (${pct}%)`],
-  [saves, "lines a refactor would save"],
-  [DATA.files, "files scanned"],
-]) {
-  document.getElementById("numbers").append(el("div", { class: "number" }, el("b", { text: String(value) }), el("span", { text: label })));
+const projectOf = (file) => (DATA.projects || {})[file] || ".";
+const classes = DATA.classes.map((c, i) => ({
+  ...c,
+  n: i + 1,
+  projects: [...new Set(c.copies.map((x) => projectOf(x.file)))],
+  dup: c.lines * (c.copies.length - 1),
+}));
+
+// ---- decisions: the report's, then this browser's on top ------------------------
+const STORE = "dgf-dup-decisions";
+const readLocal = () => { try { return JSON.parse(localStorage.getItem(STORE) || "{}"); } catch { return {}; } };
+const writeLocal = (d) => { try { localStorage.setItem(STORE, JSON.stringify(d)); } catch { /* private mode */ } };
+let local = readLocal();
+const decision = (id) => local[id] || (DATA.decisions || {})[id] || null;
+const statusOf = (c) => (decision(c.id) || {}).status || "";
+function decide(c, status, note) {
+  const old = decision(c.id) || {};
+  const next = { status: status ?? old.status ?? "", note: note ?? old.note ?? "", at: new Date().toISOString() };
+  if (!next.status && !next.note) delete local[c.id];
+  else local[c.id] = next;
+  writeLocal(local);
+  renderNumbers();
+  renderList();
+}
+function allDecisions() {
+  const merged = { ...(DATA.decisions || {}), ...local };
+  for (const [id, d] of Object.entries(merged)) if (!d.status && !d.note) delete merged[id];
+  return merged;
 }
 
-// Files, drawn to scale, each copy a mark in its group's color.
-const byFile = new Map();
-for (const c of classes) for (const copy of c.copies) {
-  if (!byFile.has(copy.file)) byFile.set(copy.file, []);
-  byFile.get(copy.file).push({ c, copy });
+// ---- state ------------------------------------------------------------------------
+const state = { search: "", kinds: new Set(), status: "open", project: "", pair: null, sort: "saves", changed: false, selected: null };
+
+// ---- header and numbers ---------------------------------------------------------------
+document.getElementById("scope").textContent =
+  (DATA.scope ? DATA.scope + " · " : "") + `${fmt(DATA.files)} files scanned`;
+function renderNumbers() {
+  const reviewed = classes.filter((c) => statusOf(c)).length;
+  const toFix = classes.filter((c) => statusOf(c) === "to-fix");
+  const saves = classes.filter((c) => statusOf(c) !== "intentional" && statusOf(c) !== "false-positive")
+    .reduce((s, c) => s + Math.max(0, c.saves), 0);
+  const pct = DATA.lines ? (DATA.duplicatedLines * 100 / DATA.lines).toFixed(1) + "% of statement lines" : "lines in copies";
+  const box = document.getElementById("numbers");
+  box.replaceChildren(...[
+    tile(fmt(classes.length - reviewed), "groups not reviewed"),
+    tile(fmt(DATA.duplicatedLines), "duplicated lines · " + pct),
+    tile(fmt(saves), "lines a refactor would save"),
+    tile(fmt(toFix.length), "marked to fix"),
+    tile(`${fmt(reviewed)} of ${fmt(classes.length)}`, "reviewed", classes.length ? reviewed / classes.length : 0),
+    DATA.suppressed ? tile(fmt(DATA.suppressed), "left out as reviewed earlier") : null,
+  ].filter(Boolean));
 }
-const files = [...byFile.entries()].sort((a, b) =>
-  b[1].reduce((s, x) => s + x.c.lines, 0) - a[1].reduce((s, x) => s + x.c.lines, 0));
-const filesBox = document.getElementById("files");
-if (!files.length) filesBox.append(el("div", { class: "empty", text: "No copies found." }));
-for (const [file, copies] of files) {
-  const total = Math.max(DATA.fileLines[file] || 1, ...copies.map((x) => x.copy.endLine));
-  const strip = el("div", { class: "strip" });
-  for (const { c, copy } of copies) {
-    const left = ((copy.startLine - 1) / total) * 100;
-    const width = Math.max(((copy.endLine - copy.startLine + 1) / total) * 100, 0.6);
-    const mark = el("div", {
-      class: "mark",
-      style: `left:${left}%;width:${width}%;background:${c.color}`,
-      title: `group ${c.id}: lines ${copy.startLine}-${copy.endLine}${copy.function ? " in " + copy.function : ""}`,
-      "data-class": String(c.id),
-    });
-    mark.addEventListener("click", (e) => { e.stopPropagation(); classFilter = c.id; fileFilter = null; render(); });
-    strip.append(mark);
+function tile(value, label, progress) {
+  return el("div", { class: "card number" }, el("b", { text: value }), el("span", { text: label }),
+    progress == null ? null : el("div", { class: "progress" }, el("i", { style: `width:${(progress * 100).toFixed(1)}%` })));
+}
+
+// ---- overview ---------------------------------------------------------------------------
+function renderOverview() {
+  const counts = KINDS.map((k) => ({ ...k, n: classes.filter((c) => kindOf(c).key === k.key).length })).filter((k) => k.n);
+  const total = counts.reduce((s, k) => s + k.n, 0) || 1;
+  const stack = document.getElementById("stack");
+  stack.setAttribute("aria-label", counts.map((k) => `${k.name}: ${k.n}`).join(", "));
+  stack.replaceChildren(...counts.map((k) => el("i", {
+    style: `flex:${k.n / total};background:${k.color}`, title: `${k.name}: ${k.n} groups`,
+    onclick: () => toggleKind(k.key),
+  })));
+  document.getElementById("legend").replaceChildren(...counts.map((k) => el("li", {
+    class: state.kinds.has(k.key) ? "on" : null, onclick: () => toggleKind(k.key), title: "Filter the queue",
+  }, el("span", { class: "key", style: `background:${k.color}` }), el("span", { text: `${k.name} (${k.word})` }), el("span", { class: "n", text: fmt(k.n) }))));
+
+  const byProject = new Map();
+  for (const c of classes) for (const x of c.copies) {
+    const p = projectOf(x.file);
+    byProject.set(p, (byProject.get(p) || 0) + (x.endLine - x.startLine + 1));
   }
-  const lines = copies.reduce((s, x) => s + (x.copy.endLine - x.copy.startLine + 1), 0);
-  const row = el("div", { class: "file", "data-file": file },
-    el("div", { class: "name", title: file, text: file }),
-    strip,
-    el("div", { class: "count", text: `${lines} lines` }));
-  row.addEventListener("click", () => { fileFilter = fileFilter === file ? null : file; classFilter = null; render(); });
-  if (filesBox.children.length >= FILES_SHOWN) row.hidden = true;
-  filesBox.append(row);
+  const projects = [...byProject].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  bars("projects", projects, (p) => p[0], (p) => p[1], "lines in copies",
+    (p) => { state.project = state.project === p[0] ? "" : p[0]; state.pair = null; sync(); }, (p) => state.project === p[0] && !state.pair);
+
+  const pairs = new Map();
+  for (const c of classes) {
+    const ps = c.projects.slice().sort();
+    for (let i = 0; i < ps.length; i++) for (let j = i + 1; j < ps.length; j++) {
+      const key = ps[i] + "\u0000" + ps[j];
+      pairs.set(key, (pairs.get(key) || 0) + 1);
+    }
+  }
+  const shared = [...pairs].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  if (!shared.length) {
+    document.getElementById("pairs").replaceChildren(el("li", { class: "hint", text: "Every group stays inside one project." }));
+  } else {
+    bars("pairs", shared, (p) => p[0].replace("\u0000", " ↔ "), (p) => p[1], "groups",
+      (p) => { state.pair = state.pair === p[0] ? null : p[0]; state.project = ""; sync(); }, (p) => state.pair === p[0]);
+  }
+  const select = document.getElementById("project");
+  const names = [...byProject.keys()].sort();
+  select.replaceChildren(el("option", { value: "", text: "All projects" }), ...names.map((n) => el("option", { value: n, text: n })));
+  select.value = state.project;
 }
-if (files.length > FILES_SHOWN) {
-  const more = el("button", { class: "clear", type: "button", text: `show all ${files.length} files` });
-  more.addEventListener("click", () => {
-    for (const row of filesBox.querySelectorAll(".file")) row.hidden = false;
-    more.remove();
-  });
-  filesBox.append(el("div", { style: "padding:8px 0" }, more));
+function bars(id, rows, name, value, unit, click, on) {
+  const max = Math.max(1, ...rows.map(value));
+  document.getElementById(id).replaceChildren(...rows.map((r) => el("li", {
+    class: on(r) ? "on" : null, onclick: () => click(r), title: `${name(r)}: ${fmt(value(r))} ${unit}`,
+  }, el("span", { class: "name", text: name(r) }), el("span", { class: "n", text: fmt(value(r)) }),
+     el("div", { class: "track" }, el("div", { class: "fill", style: `width:${(value(r) / max * 100).toFixed(1)}%` })))));
+}
+function toggleKind(key) {
+  state.kinds.has(key) ? state.kinds.delete(key) : state.kinds.add(key);
+  sync();
 }
 
-// A template with each hole in its own color, and what not every copy has
-// (⟪…⟫ in near misses) marked.
-function template(text) {
-  const pre = el("pre");
-  for (const part of text.split(/(⟨\d+⟩|⟪[^⟫]*⟫)/)) {
+// ---- queue --------------------------------------------------------------------------------
+document.getElementById("types").replaceChildren(...KINDS.filter((k) => classes.some((c) => kindOf(c).key === k.key)).map((k) =>
+  el("button", { class: "chip", type: "button", "data-kind": k.key, "aria-pressed": "false", onclick: () => toggleKind(k.key), title: k.name },
+    el("span", { class: "key", style: `background:${k.color}` }), k.word)));
+
+function visible() {
+  const q = state.search.toLowerCase();
+  const list = classes.filter((c) => {
+    const s = statusOf(c);
+    if (state.status === "open" && s) return false;
+    if (state.status !== "open" && state.status !== "all" && s !== state.status) return false;
+    if (state.kinds.size && !state.kinds.has(kindOf(c).key)) return false;
+    if (state.project && !c.projects.includes(state.project)) return false;
+    if (state.pair) { const [a, b] = state.pair.split("\u0000"); if (!c.projects.includes(a) || !c.projects.includes(b)) return false; }
+    if (state.changed && !c.copies.some((x) => x.changed)) return false;
+    if (q && !(c.template.toLowerCase().includes(q) || c.copies.some((x) => x.file.toLowerCase().includes(q) || (x.function || "").toLowerCase().includes(q)))) return false;
+    return true;
+  });
+  const by = {
+    saves: (a, b) => b.saves - a.saves,
+    copies: (a, b) => b.copies.length - a.copies.length || b.saves - a.saves,
+    lines: (a, b) => b.lines - a.lines,
+    type: (a, b) => KINDS.indexOf(kindOf(a)) - KINDS.indexOf(kindOf(b)) || b.saves - a.saves,
+  }[state.sort];
+  return list.sort(by);
+}
+
+function renderList() {
+  const rows = visible();
+  const box = document.getElementById("list");
+  if (!rows.length) {
+    box.replaceChildren(el("div", { class: "empty", text: classes.length ? "Nothing matches these filters." : "No duplication found." }));
+    renderDetail(null);
+    return;
+  }
+  if (!rows.some((c) => c.id === state.selected)) state.selected = rows[0].id;
+  box.replaceChildren(...rows.map((c) => {
+    const k = kindOf(c);
+    const fns = [...new Set(c.copies.map((x) => x.function || x.file.split("/").pop()))];
+    const row = el("div", { class: "row" + (c.id === state.selected ? " on" : ""), role: "button", tabindex: "0", "data-id": c.id,
+      onclick: () => select(c.id) },
+      el("span", { class: "dot " + statusOf(c), title: STATUS[statusOf(c)] || "Not reviewed" }),
+      el("div", { class: "what" },
+        el("div", { class: "fn", text: fns.slice(0, 2).join(" · ") + (fns.length > 2 ? ` +${fns.length - 2}` : "") }),
+        el("div", { class: "meta" },
+          el("span", { class: "tag" }, el("span", { class: "key", style: `background:${k.color}` }), k.word), " ",
+          `${c.copies.length} copies · ${c.lines} lines · ${c.projects.join(", ")}`,
+          c.copies.some((x) => x.changed) ? el("span", { class: "tag changed", text: "changed", style: "margin-left:6px" }) : null)),
+      el("span", { class: "saves", text: c.saves > 0 ? `−${fmt(c.saves)}` : "" , title: "lines a refactor would save" }));
+    return row;
+  }));
+  renderDetail(classes.find((c) => c.id === state.selected));
+}
+
+function select(id) {
+  state.selected = id;
+  try { history.replaceState(null, "", "#group=" + encodeURIComponent(id)); } catch { /* file: in some browsers */ }
+  for (const row of document.querySelectorAll(".row")) row.classList.toggle("on", row.dataset.id === id);
+  renderDetail(classes.find((c) => c.id === id));
+  reveal(id, false);
+}
+
+// Scrolls the queue (not the page) to a group's row.
+function reveal(id, center) {
+  const list = document.getElementById("list");
+  const row = list.querySelector(`.row[data-id="${CSS.escape(id)}"]`);
+  if (!row) return;
+  const top = row.offsetTop - list.offsetTop;
+  if (center) list.scrollTop = top - list.clientHeight / 2;
+  else if (top < list.scrollTop) list.scrollTop = top;
+  else if (top + row.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = top + row.offsetHeight - list.clientHeight;
+}
+
+// ---- detail ---------------------------------------------------------------------------------
+function renderDetail(c) {
+  const box = document.getElementById("detail");
+  if (!c) { box.replaceChildren(el("div", { class: "empty", text: "Pick a group to review it." })); return; }
+  const k = kindOf(c);
+  const d = decision(c.id) || {};
+  const status = el("div", { class: "status" },
+    ...Object.entries(STATUS).map(([key, word]) => el("button", {
+      type: "button", class: key, "aria-pressed": d.status === key ? "true" : "false",
+      onclick: () => { decide(c, d.status === key ? "" : key); renderDetail(c); },
+    }, word)));
+  const note = el("textarea", { placeholder: "Note: why it is intentional, who will fix it…", "aria-label": "Note" });
+  note.value = d.note || "";
+  note.addEventListener("change", () => decide(c, null, note.value));
+  box.replaceChildren(...[
+    el("div", { class: "head" },
+      el("div", { class: "title", text: `Group ${c.n}: ${c.copies.length} copies of ${c.lines} lines` }),
+      el("div", { class: "badges" },
+        el("span", { class: "tag" }, el("span", { class: "key", style: `background:${k.color}` }), `${k.name}`),
+        c.similarity ? el("span", { class: "tag", text: `${Math.round(c.similarity * 100)}% alike` }) : null,
+        el("span", { class: "tag", text: c.saves > 0 ? `saves ~${fmt(c.saves)} lines` : "saves little" }),
+        el("span", { class: "tag", text: `id ${c.id}` })),
+      status, note),
+    compareSection(c),
+    templateSection(c),
+    holesSection(c),
+    listSection("Where the copies part ways", (c.differences || []).map(difference(c))),
+    listSection("Same behaviour after", (c.rules || []).map((r) => el("li", { text: r }))),
+    el("div", { class: "section" }, el("div", { class: "label", text: "How to unite" }), el("div", { class: "unite", text: c.unite }),
+      ...c.cautions.map((x) => el("div", { class: "caution", text: x }))),
+    listSection("All copies", c.copies.map((x) => el("li", {}, el("code", { text: `${x.file}:${x.startLine}-${x.endLine}` }), " ",
+      el("span", { class: "verb", text: x.function || "" }), x.changed ? el("span", { class: "tag changed", text: "changed", style: "margin-left:6px" }) : null))),
+  ].filter(Boolean));
+}
+
+function compareSection(c) {
+  const section = el("div", { class: "section" }, el("div", { class: "label", text: c.kind === "repeated" ? "The statements" : "Side by side" }));
+  if (!c.copies.some((x) => x.code)) { section.append(el("div", { class: "hint", text: "No code in this report." })); return section; }
+  let left = 0, right = Math.min(1, c.copies.length - 1);
+  const pick = (value, onchange) => {
+    const s = el("select", { "aria-label": "Copy" }, ...c.copies.map((x, i) => el("option", { value: String(i), text: x.function ? `${x.function} (${x.file.split("/").pop()}:${x.startLine})` : `${x.file}:${x.startLine}` })));
+    s.value = String(value);
+    s.addEventListener("change", () => onchange(Number(s.value)));
+    return s;
+  };
+  const view = el("div", { class: "compare" });
+  const draw = () => view.replaceChildren(...sides(c.copies[left], c.copies[right]));
+  if (c.copies.length > 2) {
+    section.append(el("div", { class: "compare-pick" }, "Compare", pick(left, (v) => { left = v; draw(); }), "with", pick(right, (v) => { right = v; draw(); })));
+  }
+  draw();
+  section.append(view);
+  return section;
+}
+
+// Two copies, the lines only one of them has marked.
+function sides(a, b) {
+  const la = (a.code || "").split("\n"), lb = (b.code || "").split("\n");
+  const [ka, kb] = common(la.map(squash), lb.map(squash));
+  const side = (copy, lines, kept) => el("div", { class: "side" },
+    el("div", { class: "where", text: `${copy.file}:${copy.startLine}-${copy.endLine}${copy.function ? "  " + copy.function : ""}` }),
+    el("pre", {}, ...lines.map((line, i) => el("span", { class: "ln" + (kept.has(i) ? "" : " diff"), "data-n": String(copy.startLine + i), text: line || " " }))));
+  return a === b ? [side(a, la, new Set(la.keys()))] : [side(a, la, ka), side(b, lb, kb)];
+}
+const squash = (line) => line.trim().replace(/\s+/g, " ");
+// Lines on a longest common subsequence: the ones both copies share.
+function common(a, b) {
+  const n = a.length, m = b.length;
+  if (n * m > 160000) return [new Set(a.keys()), new Set(b.keys())];
+  const t = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    t[i][j] = a[i] === b[j] ? t[i + 1][j + 1] + 1 : Math.max(t[i + 1][j], t[i][j + 1]);
+  const ka = new Set(), kb = new Set();
+  for (let i = 0, j = 0; i < n && j < m;) {
+    if (a[i] === b[j]) { ka.add(i++); kb.add(j++); }
+    else if (t[i + 1][j] >= t[i][j + 1]) i++;
+    else j++;
+  }
+  return [ka, kb];
+}
+
+function templateSection(c) {
+  const pre = el("pre", { class: "template", style: c.type === 4 ? "white-space: pre-wrap; overflow-wrap: anywhere" : null });
+  for (const part of c.template.split(/(⟨\d+⟩|⟪[^⟫]*⟫)/)) {
     const hole = part.match(/^⟨(\d+)⟩$/);
     if (hole) pre.append(el("span", { class: "hole", style: holeColor(Number(hole[1])), text: part }));
     else if (part.startsWith("⟪")) pre.append(el("span", { class: "gap", title: "not in every copy", text: part.slice(1, -1) }));
     else pre.append(part);
   }
-  return pre;
+  const title = c.type === 4 ? "What every copy computes" : "Shared template (⟨n⟩ where the copies differ)";
+  return el("div", { class: "section" }, el("div", { class: "label", text: title }), pre);
 }
 
-const typeWord = { 1: "type 1 · the same code", 2: "type 2 · renamed", 3: "type 3 · near miss", 4: "type 4 · same behaviour, written differently" };
-
-// What each near-miss copy adds, leaves out or has instead.
-function differences(c) {
-  const list = el("ul", { class: "diffs" });
-  for (const d of c.differences || []) {
-    const copy = c.copies[d.copy];
-    const who = `${copy.function || copy.file} (line ${d.line})`;
-    const li = el("li", {}, el("span", { class: "fn", text: who + " " }));
-    if (d.kind === "added") li.append(el("span", { class: "verb", text: "adds " }), el("code", { text: d.other }));
-    else if (d.kind === "removed") li.append(el("span", { class: "verb", text: "leaves out " }), el("code", { text: d.first }));
-    else li.append(el("span", { class: "verb", text: "has " }), el("code", { text: d.other }),
-      el("span", { class: "verb", text: " for " }), el("code", { text: d.first }));
-    list.append(li);
-  }
-  return list;
+function holesSection(c) {
+  const holes = c.holes.filter((h) => h.kind !== "local");
+  if (!holes.length) return null;
+  const table = el("table", { class: "holes" }, el("tr", {}, el("th", { text: "hole" }), el("th", { text: "kind" }), el("th", { text: "each copy has" })));
+  for (const h of holes) table.append(el("tr", {},
+    el("td", {}, el("span", { class: "hole", style: holeColor(h.index), text: `⟨${h.index}⟩` })),
+    el("td", { text: kindWord[h.kind] || h.kind }),
+    el("td", {}, el("code", { text: h.values.join("  |  ") }))));
+  return el("div", { class: "section" }, el("div", { class: "label", text: "What differs" }), table);
 }
 
-function card(c) {
-  const changed = c.copies.some((x) => x.changed);
-  const title = c.kind === "repeated"
-    ? `${c.copies.length} statements in a row with one shape`
-    : `${c.copies.length} copies of ${c.lines} lines`;
-  const head = el("div", { class: "head" },
-    el("span", { class: "swatch", style: `background:${c.color}` }),
-    el("span", { class: "title", text: `Group ${c.id} · ${title}` }),
-    el("span", { class: "badge saves", text: `saves ~${c.saves} lines` }),
-    c.kind === "repeated" ? el("span", { class: "badge", text: "repeated" })
-      : el("span", { class: c.type >= 3 ? "badge type3" : "badge",
-        text: typeWord[c.type] + (c.similarity ? ` · ${Math.round(c.similarity * 100)}% alike` : "") }),
-    changed ? el("span", { class: "badge changed", text: "changed on this branch" }) : null);
+const difference = (c) => (d) => {
+  const copy = c.copies[d.copy];
+  const who = `${copy.function || copy.file} (line ${d.line}) `;
+  if (d.kind === "added") return el("li", {}, who, el("span", { class: "verb", text: "adds " }), el("code", { text: d.other }));
+  if (d.kind === "removed") return el("li", {}, who, el("span", { class: "verb", text: "leaves out " }), el("code", { text: d.first }));
+  return el("li", {}, who, el("span", { class: "verb", text: "has " }), el("code", { text: d.other }), el("span", { class: "verb", text: " for " }), el("code", { text: d.first }));
+};
 
-  const list = el("ul", { class: "copies" });
-  const copies = c.kind === "repeated"
-    ? [{ ...c.copies[0], endLine: c.copies[c.copies.length - 1].endLine, changed }]
-    : c.copies;
-  for (const copy of copies) {
-    list.append(el("li", {},
-      el("span", { class: "where", text: `${copy.file}:${copy.startLine}-${copy.endLine}` }),
-      copy.function ? el("span", { class: "fn", text: copy.function }) : null,
-      copy.changed ? el("span", { class: "badge changed", text: "changed" }) : null));
-  }
-  const left = el("div", {}, el("div", { class: "label", text: c.kind === "repeated" ? "Where" : "Copies" }), list,
-    el("div", { class: "label", text: c.type === 4 ? "What every copy computes" : "Shared template" }), template(c.template));
-
-  const right = el("div", {});
-  const holes = c.holes;
-  if (holes.length) {
-    right.append(el("div", { class: "label", text: "What differs" }));
-    const table = el("table", { class: "holes" });
-    table.append(el("tr", {}, el("th", { text: "hole" }), el("th", { text: "kind" }), el("th", { text: "values" })));
-    for (const h of holes) {
-      table.append(el("tr", {},
-        el("td", {}, el("span", { class: "hole", style: holeColor(h.index), text: `⟨${h.index}⟩` })),
-        el("td", { text: kindWord[h.kind] || h.kind }),
-        el("td", {}, el("code", { text: h.values.join("  |  ") }))));
-    }
-    right.append(table);
-  }
-  if ((c.rules || []).length) {
-    const rules = el("ul", { class: "diffs" });
-    for (const rule of c.rules) rules.append(el("li", { text: rule }));
-    right.append(el("div", { class: "label", text: "Same behaviour after" }), rules);
-  }
-  if ((c.differences || []).length) {
-    right.append(el("div", { class: "label", text: "Where the copies part ways" }), differences(c));
-  }
-  right.append(el("div", { class: "label", text: "How to unite" }), el("div", { class: "unite", text: c.unite }));
-  for (const caution of c.cautions) right.append(el("div", { class: "caution", text: caution }));
-  return el("article", { class: "card class", id: `group-${c.id}` }, head, el("div", { class: "body" }, left, right));
+function listSection(title, items) {
+  if (!items.length) return null;
+  return el("div", { class: "section" }, el("div", { class: "label", text: title }), el("ul", { class: "plain" }, ...items));
 }
 
-const search = document.getElementById("search");
-const onlyChanged = document.getElementById("changed");
-const clear = document.getElementById("clear");
-function render() {
-  const query = search.value.trim().toLowerCase();
-  const box = document.getElementById("classes");
-  box.replaceChildren();
-  const shown = classes.filter((c) =>
-    (!classFilter || c.id === classFilter) &&
-    (!fileFilter || c.copies.some((x) => x.file === fileFilter)) &&
-    (!onlyChanged.checked || c.copies.some((x) => x.changed)) &&
-    (!query || c.template.toLowerCase().includes(query) ||
-      c.copies.some((x) => x.file.toLowerCase().includes(query) || (x.function || "").toLowerCase().includes(query))));
-  for (const c of shown) box.append(card(c));
-  if (!shown.length) box.append(el("div", { class: "card empty", text: "Nothing matches." }));
-  clear.hidden = !(classFilter || fileFilter || query || onlyChanged.checked);
-  for (const row of document.querySelectorAll(".file")) row.classList.toggle("on", row.dataset.file === fileFilter);
-  for (const mark of document.querySelectorAll(".mark")) mark.classList.toggle("on", Number(mark.dataset.class) === classFilter);
+// ---- controls -------------------------------------------------------------------------------
+function sync() {
+  for (const chip of document.querySelectorAll(".chip")) chip.setAttribute("aria-pressed", String(state.kinds.has(chip.dataset.kind)));
+  renderOverview();
+  renderList();
 }
-search.addEventListener("input", render);
-onlyChanged.addEventListener("change", render);
-clear.addEventListener("click", () => { classFilter = null; fileFilter = null; search.value = ""; onlyChanged.checked = false; render(); });
-onlyChanged.parentElement.hidden = !classes.some((c) => c.copies.some((x) => x.changed));
+document.getElementById("search").addEventListener("input", (e) => { state.search = e.target.value; renderList(); });
+document.getElementById("status").addEventListener("change", (e) => { state.status = e.target.value; renderList(); });
+document.getElementById("project").addEventListener("change", (e) => { state.project = e.target.value; state.pair = null; sync(); });
+document.getElementById("sort").addEventListener("change", (e) => { state.sort = e.target.value; renderList(); });
+document.getElementById("changed").addEventListener("change", (e) => { state.changed = e.target.checked; renderList(); });
 
-// Theme: follows the system until chosen.
-const themeButton = document.getElementById("theme");
-let theme = null;
-try { theme = localStorage.getItem("dgf-dup-theme"); } catch (e) {}
-if (theme) document.documentElement.dataset.theme = theme;
-themeButton.addEventListener("click", () => {
-  const dark = document.documentElement.dataset.theme
-    ? document.documentElement.dataset.theme === "dark"
-    : matchMedia("(prefers-color-scheme: dark)").matches;
-  theme = dark ? "light" : "dark";
-  document.documentElement.dataset.theme = theme;
-  try { localStorage.setItem("dgf-dup-theme", theme); } catch (e) {}
+document.addEventListener("keydown", (e) => {
+  if (e.target.matches("input, textarea, select") || e.ctrlKey || e.metaKey || e.altKey) return;
+  const rows = visible();
+  const at = rows.findIndex((c) => c.id === state.selected);
+  const current = rows[at];
+  const keys = {
+    j: () => rows[at + 1] && select(rows[at + 1].id),
+    k: () => rows[at - 1] && select(rows[at - 1].id),
+    f: () => current && mark(current, "to-fix"),
+    i: () => current && mark(current, "intentional"),
+    x: () => current && mark(current, "false-positive"),
+    u: () => current && mark(current, ""),
+  };
+  if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
 });
-render();
+// A decision moves on to the next group when it takes this one out of the queue.
+function mark(c, status) {
+  const rows = visible();
+  const next = rows[rows.findIndex((r) => r.id === c.id) + 1];
+  decide(c, status);
+  if (!visible().some((r) => r.id === c.id) && next) select(next.id);
+  else renderDetail(classes.find((r) => r.id === state.selected));
+}
+
+document.getElementById("export").addEventListener("click", () => {
+  const text = JSON.stringify({ version: 1, decisions: allDecisions() }, null, 2) + "\n";
+  const link = el("a", { href: URL.createObjectURL(new Blob([text], { type: "application/json" })), download: "dup-decisions.json" });
+  document.body.append(link);
+  link.click();
+  link.remove();
+});
+document.getElementById("import").addEventListener("click", () => document.getElementById("importFile").click());
+document.getElementById("importFile").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const read = JSON.parse(await file.text());
+    local = { ...local, ...(read.decisions || {}) };
+    writeLocal(local);
+    renderNumbers();
+    renderList();
+  } catch (err) {
+    alert("That file has no decisions in it: " + err.message);
+  }
+  e.target.value = "";
+});
+document.getElementById("theme").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  root.dataset.theme = dark ? "light" : "dark";
+});
+
+// A link to one group: #group=<id>, also with its status shown when filtered out.
+const linked = decodeURIComponent((location.hash.match(/group=([^&]+)/) || [])[1] || "");
+if (linked && classes.some((c) => c.id === linked)) {
+  state.selected = linked;
+  if (statusOf(classes.find((c) => c.id === linked))) { state.status = "all"; document.getElementById("status").value = "all"; }
+}
+renderNumbers();
+sync();
+if (linked) reveal(linked, true);
 </script>
 </body>
 </html>

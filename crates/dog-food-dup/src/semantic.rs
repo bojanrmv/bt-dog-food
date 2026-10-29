@@ -85,6 +85,7 @@ pub fn classes(
 
 fn class(c: Class) -> CloneClass {
     CloneClass {
+        id: String::new(),
         kind: "copies",
         clone_type: 4,
         evidence: "normalized",
@@ -98,6 +99,7 @@ fn class(c: Class) -> CloneClass {
                 end_line: p.end_line,
                 function: Some(p.function),
                 changed: false,
+                code: String::new(),
             })
             .collect(),
         lines: c.lines,
@@ -130,7 +132,11 @@ pub fn merge(report: &mut Report, classes: Vec<CloneClass>, root: &Path) {
         if known.contains(&functions(&class)) {
             continue;
         }
-        for copy in &class.copies {
+        let mut class = class;
+        for copy in &mut class.copies {
+            if let Ok(text) = std::fs::read_to_string(root.join(&copy.file)) {
+                copy.code = crate::find::excerpt(&text, copy.start_line, copy.end_line);
+            }
             if !report.file_lines.contains_key(&copy.file) {
                 let lines = std::fs::read_to_string(root.join(&copy.file))
                     .map(|t| t.lines().count())
@@ -141,6 +147,7 @@ pub fn merge(report: &mut Report, classes: Vec<CloneClass>, root: &Path) {
         report.classes.push(class);
     }
     report.classes.sort_by_key(|c| std::cmp::Reverse(c.saves));
+    report.index(root);
     report.duplicated_lines = report
         .classes
         .iter()
