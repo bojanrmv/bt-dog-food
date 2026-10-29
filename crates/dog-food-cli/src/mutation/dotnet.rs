@@ -730,7 +730,7 @@ mod tests {
     fn compiler_errors_point_at_a_file_and_line() {
         let line = r"D:\tmp\sandbox\src\Shop\Pricing.cs(22,13): error CS0165: Use of unassigned local variable 'f' [D:\tmp\Shop.csproj]";
         let (path, number) = exec::error_location(line).unwrap();
-        assert!(path.to_string_lossy().ends_with(r"\Pricing.cs"));
+        assert_eq!(path.file_name().unwrap(), "Pricing.cs");
         assert_eq!(number, 22);
         assert!(exec::error_location("Build succeeded.").is_none());
     }
