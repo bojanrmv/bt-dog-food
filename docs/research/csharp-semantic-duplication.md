@@ -8,7 +8,7 @@ Status: phases 0-7 done.
 - **6.** Confirmation by running (`--confirm`, `--compare`).
 - **7.** `dgf duplication`, both engines at once, and ranking by complexity and CRAP.
 
-On the corpus: types 1-3, 14 of 15; type 4, 47 of 47; every group confirmed by running; no near miss called equal. Not done: Z3 for small pure functions, and WL hashing of dependence graphs (pairing by shape and data flow made it unnecessary at this size). See [the engine](../../crates/dog-food-dup/semantic/README.md) and [the user guide](../duplication.md).
+On the corpus: types 1-3, 14 of 15; type 4, 47 of 47; every group confirmed by running; no near miss called equal. Not done: Z3 for small pure functions, and WL hashing of dependence graphs (pairing by shape and data flow made it unnecessary at this size). See [the engine](../../crates/dog-food-dup/semantic/README.md) and [the user guide](../duplication/README.md).
 
 ## 1. Summary
 

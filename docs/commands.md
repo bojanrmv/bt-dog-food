@@ -229,7 +229,7 @@ dgf dup --changes --fail-on-copies        # a PR gate: exit 1 when the branch ad
 dgf dup --format html -o dup.html         # the review dashboard
 ```
 
-All of it is in [duplication.md](duplication.md).
+All of it is in [duplication/](duplication/README.md).
 
 ## `dgf init`
 

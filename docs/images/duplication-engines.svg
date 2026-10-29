@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" width="960" height="420" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <title>How dgf duplication finds copies</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+    <style>
+      .box { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; }
+      .syn { fill: #eff6ff; stroke: #60a5fa; stroke-width: 1.5; }
+      .sem { fill: #fef3c7; stroke: #f59e0b; stroke-width: 1.5; }
+      .out { fill: #ecfdf5; stroke: #34d399; stroke-width: 1.5; }
+      .title { font-size: 15px; font-weight: 600; fill: #0f172a; }
+      .head { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; }
+      .text { font-size: 12.5px; fill: #475569; }
+      .line { stroke: #64748b; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="960" height="420" rx="14" fill="#ffffff"/>
+  <text class="title" x="24" y="36">dgf duplication: two engines, one report</text>
+
+  <rect class="box" x="24" y="150" width="130" height="110" rx="10"/>
+  <text class="title" x="40" y="182">Your code</text>
+  <text class="text" x="40" y="206">C#, TypeScript,</text>
+  <text class="text" x="40" y="224">JavaScript, Rust</text>
+
+  <rect class="syn" x="190" y="56" width="430" height="150" rx="10"/>
+  <text class="head" x="206" y="80" fill="#2563eb">SYNTACTIC ENGINE · EVERY LANGUAGE · SECONDS</text>
+  <text class="text" x="206" y="106">• the same code, renamed copies (types 1 and 2)</text>
+  <text class="text" x="206" y="126">• near misses: a statement added, left out or changed (type 3)</text>
+  <text class="text" x="206" y="146">• the same statements in another order or mixed with others</text>
+  <text class="text" x="206" y="166">• a long expression copied into different statements</text>
+  <text class="text" x="206" y="186">• statements repeated in a row</text>
+
+  <rect class="sem" x="190" y="224" width="430" height="170" rx="10"/>
+  <text class="head" x="206" y="248" fill="#b45309">C# ENGINE (--semantic) · ROSLYN · RUNS ALONGSIDE</text>
+  <text class="text" x="206" y="274">• each method reduced to one canonical expression:</text>
+  <text class="text" x="222" y="292">loops and LINQ, if / ?: / switch, early returns</text>
+  <text class="text" x="206" y="312">• the same behaviour written differently (type 4)</text>
+  <text class="text" x="206" y="332">• repeated queries on a table, with the extension method</text>
+  <text class="text" x="206" y="352">• exact parameters and returns of each C# copy</text>
+  <text class="text" x="206" y="372">• --confirm: groups run on 1,000 generated inputs</text>
+
+  <rect class="out" x="660" y="120" width="276" height="200" rx="10"/>
+  <text class="head" x="676" y="144" fill="#059669">ONE REPORT</text>
+  <text class="text" x="676" y="170">• each group: copies, template, holes,</text>
+  <text class="text" x="692" y="188">how to unite them, cautions</text>
+  <text class="text" x="676" y="210">• risk: complexity and CRAP of the</text>
+  <text class="text" x="692" y="228">riskiest copy (--coverage)</text>
+  <text class="text" x="676" y="250">• review decisions (--decisions)</text>
+  <text class="text" x="676" y="272">• table · agent · json · html dashboard</text>
+  <text class="text" x="676" y="294">• --changes gate for pull requests</text>
+
+  <path class="line" d="M154,190 C170,190 172,131 186,131"/>
+  <path class="line" d="M154,220 C170,220 172,309 186,309"/>
+  <path class="line" d="M620,131 C640,131 640,200 656,200"/>
+  <path class="line" d="M620,309 C640,309 640,240 656,240"/>
+</svg>

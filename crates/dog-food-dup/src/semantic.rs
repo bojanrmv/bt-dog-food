@@ -140,7 +140,7 @@ pub fn start(
         .spawn()
         .map_err(|err| {
             format!(
-                "could not start the C# engine {:?} ({err}); install it (see docs/duplication.md) or point --semantic-engine at it",
+                "could not start the C# engine {:?} ({err}); install it (see docs/duplication/csharp.md) or point --semantic-engine at it",
                 engine.get_program()
             )
         })
