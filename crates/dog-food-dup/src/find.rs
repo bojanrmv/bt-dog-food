@@ -188,6 +188,9 @@ pub struct CloneClass {
     /// Type 4: the rules that made the copies' meaning the same.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<String>,
+    /// A repeated query (`kind` `query`): the entity, the table, it reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity: Option<String>,
 }
 
 /// One place where a near-miss copy differs from the first copy.
@@ -599,6 +602,7 @@ pub(crate) fn describe(
         similarity: None,
         differences: Vec::new(),
         rules: Vec::new(),
+        entity: None,
         unite: unite(&copies, &holes, spans, blocks),
         copies,
         lines,

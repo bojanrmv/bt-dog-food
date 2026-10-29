@@ -11,7 +11,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Report;
+use crate::{duplicated, Report};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Decision {
@@ -53,11 +53,7 @@ impl Report {
         self.classes
             .retain(|c| !decisions.get(&c.id).is_some_and(Decision::settles));
         self.suppressed = before - self.classes.len();
-        self.duplicated_lines = self
-            .classes
-            .iter()
-            .map(|c| c.lines * (c.copies.len() - 1))
-            .sum();
+        self.duplicated_lines = duplicated(&self.classes);
         self.decisions = decisions;
     }
 }

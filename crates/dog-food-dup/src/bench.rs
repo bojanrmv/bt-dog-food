@@ -166,7 +166,8 @@ fn rewrite(a: &str, b: &str) -> String {
 fn matched(report: &Value) -> BTreeMap<(String, String), Found> {
     let mut out: BTreeMap<(String, String), Found> = BTreeMap::new();
     let classes = report["classes"].as_array().cloned().unwrap_or_default();
-    for class in &classes {
+    // Repeated queries are about tables, not about pairs of methods.
+    for class in classes.iter().filter(|c| c["kind"] != "query") {
         let equal = class["equal"].as_bool().unwrap_or(false)
             || matches!(
                 class["evidence"].as_str(),

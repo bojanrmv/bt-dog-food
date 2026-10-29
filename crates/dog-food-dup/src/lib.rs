@@ -54,6 +54,16 @@ pub struct Report {
     pub decisions: std::collections::BTreeMap<String, decisions::Decision>,
 }
 
+/// Lines in copies beyond the first of each class; repeated queries are
+/// conditions written again, not copied lines, and do not count.
+pub(crate) fn duplicated(classes: &[CloneClass]) -> usize {
+    classes
+        .iter()
+        .filter(|c| c.kind != "query")
+        .map(|c| c.lines * (c.copies.len() - 1))
+        .sum()
+}
+
 fn is_zero(n: &usize) -> bool {
     *n == 0
 }
@@ -76,11 +86,7 @@ impl Report {
             .flat_map(|c| c.copies.iter().map(|copy| copy.file.clone()))
             .collect();
         self.file_lines.retain(|file, _| used.contains(file));
-        self.duplicated_lines = self
-            .classes
-            .iter()
-            .map(|c| c.lines * (c.copies.len() - 1))
-            .sum();
+        self.duplicated_lines = duplicated(&self.classes);
         self.scope = Some(format!(
             "findings with a copy in what the branch changed since {} ({}): {} changed files",
             changes.base,
@@ -228,7 +234,7 @@ pub fn scan_files(files: &[PathBuf], root: &Path, tests: bool, settings: Setting
         .map(|s| (display(&s.path), s.text.lines().count()))
         .filter(|(file, _)| used.contains(file.as_str()))
         .collect();
-    let duplicated_lines = classes.iter().map(|c| c.lines * (c.copies.len() - 1)).sum();
+    let duplicated_lines = duplicated(&classes);
     let mut report = Report {
         scope: None,
         files: sources.len(),

@@ -9,7 +9,7 @@ use std::process::Command;
 
 use serde::Deserialize;
 
-use crate::{CloneClass, Copy, Report};
+use crate::{duplicated, CloneClass, Copy, Report};
 
 #[derive(Deserialize)]
 struct Found {
@@ -19,6 +19,11 @@ struct Found {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Class {
+    /// `copies` (methods that do the same thing) or `query` (queries on one table that repeat).
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    entity: Option<String>,
     copies: Vec<Place>,
     lines: usize,
     template: String,
@@ -37,6 +42,9 @@ struct Place {
     start_line: usize,
     end_line: usize,
     function: String,
+    /// A query's own code; for methods, read from the file.
+    #[serde(default)]
+    code: Option<String>,
 }
 
 /// How to start the engine: `engine` when given (an executable, or a
@@ -84,11 +92,13 @@ pub fn classes(
 }
 
 fn class(c: Class) -> CloneClass {
+    let query = c.kind == "query";
     CloneClass {
         id: String::new(),
-        kind: "copies",
-        clone_type: 4,
-        evidence: "normalized",
+        kind: if query { "query" } else { "copies" },
+        clone_type: if query { 0 } else { 4 },
+        evidence: if query { "query" } else { "normalized" },
+        entity: c.entity,
         similarity: None,
         copies: c
             .copies
@@ -99,7 +109,7 @@ fn class(c: Class) -> CloneClass {
                 end_line: p.end_line,
                 function: Some(p.function),
                 changed: false,
-                code: String::new(),
+                code: p.code.unwrap_or_default(),
             })
             .collect(),
         lines: c.lines,
@@ -128,29 +138,30 @@ pub fn merge(report: &mut Report, classes: Vec<CloneClass>, root: &Path) {
         f
     };
     let known: std::collections::BTreeSet<_> = report.classes.iter().map(functions).collect();
-    for class in classes {
-        if known.contains(&functions(&class)) {
+    for mut class in classes {
+        if class.kind != "query" && known.contains(&functions(&class)) {
             continue;
         }
-        let mut class = class;
         for copy in &mut class.copies {
-            if let Ok(text) = std::fs::read_to_string(root.join(&copy.file)) {
-                copy.code = crate::find::excerpt(&text, copy.start_line, copy.end_line);
-            }
-            if !report.file_lines.contains_key(&copy.file) {
-                let lines = std::fs::read_to_string(root.join(&copy.file))
-                    .map(|t| t.lines().count())
-                    .unwrap_or(copy.end_line);
-                report.file_lines.insert(copy.file.clone(), lines);
-            }
+            fill(copy, &mut report.file_lines, root);
         }
         report.classes.push(class);
     }
     report.classes.sort_by_key(|c| std::cmp::Reverse(c.saves));
     report.index(root);
-    report.duplicated_lines = report
-        .classes
-        .iter()
-        .map(|c| c.lines * (c.copies.len() - 1))
-        .sum();
+    report.duplicated_lines = duplicated(&report.classes);
+}
+
+/// A copy's code (a query brings its own: only its lines, not the
+/// method's) and its file's line count.
+fn fill(copy: &mut Copy, file_lines: &mut std::collections::BTreeMap<String, usize>, root: &Path) {
+    let text = std::fs::read_to_string(root.join(&copy.file)).ok();
+    if copy.code.is_empty() {
+        if let Some(text) = &text {
+            copy.code = crate::find::excerpt(text, copy.start_line, copy.end_line);
+        }
+    }
+    file_lines
+        .entry(copy.file.clone())
+        .or_insert_with(|| text.map_or(copy.end_line, |t| t.lines().count()));
 }

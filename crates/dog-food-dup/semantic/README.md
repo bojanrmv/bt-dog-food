@@ -55,4 +55,8 @@ A method is left out, not guessed at, when it uses something the engine does not
 
 Methods that return nothing (`void`) are not compared. `--explain` prints why each method was left out. On a 3,600-method ASP.NET Core backend, about 40% of methods reduce (most of the rest set state or await for effect), in about 30 seconds.
 
+## Repeated queries
+
+[Queries.cs](Queries.cs) reads every LINQ chain on `IQueryable<T>` in every method: the entity `T` (the table), the filter (its `Where`s and the predicate of a last step such as `FirstOrDefaultAsync`, split at `&&` and sorted, as SQL `AND` does not care about order), and its shape (includes, ordering, projection). Values from outside the query's own lambdas become holes, which a shared version takes as parameters. A correlated subquery's `r.MemberId` is such a value too. [QueryGroups.cs](QueryGroups.cs) reports the same filter, the same shaped query, and one condition repeated across different queries of a table, each with an extension method for `{Entity}Queries` built from the first query's source. [../docs/duplication.md](../../../docs/duplication.md#repeated-queries-on-a-table) has the details. `tests/queries/Shop.cs` is the fixture.
+
 Next ([the plan](../../../docs/research/csharp-semantic-duplication.md)): dependence graphs for reordered and interleaved statements, and confirming matches by running both methods on generated inputs, as the corpus check does.

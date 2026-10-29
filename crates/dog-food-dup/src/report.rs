@@ -52,10 +52,23 @@ fn table_head(out: &mut String, n: usize, class: &CloneClass) {
 
 /// A class's template, holes, differences, rules, advice and cautions.
 fn table_body(out: &mut String, class: &CloneClass) {
-    out.push_str("   template:\n");
+    out.push_str(if class.kind == "query" {
+        "   suggested extension:\n"
+    } else {
+        "   template:\n"
+    });
     for line in template_lines(class) {
         let _ = writeln!(out, "     | {line}");
     }
+    table_findings(out, class);
+    let _ = writeln!(out, "   unite: {}", class.unite);
+    for caution in &class.cautions {
+        let _ = writeln!(out, "   caution: {caution}");
+    }
+}
+
+/// A class's holes, differences and rules.
+fn table_findings(out: &mut String, class: &CloneClass) {
     for hole in &class.holes {
         let _ = writeln!(
             out,
@@ -70,10 +83,6 @@ fn table_body(out: &mut String, class: &CloneClass) {
     }
     if !class.rules.is_empty() {
         let _ = writeln!(out, "   same after: {}", class.rules.join("; "));
-    }
-    let _ = writeln!(out, "   unite: {}", class.unite);
-    for caution in &class.cautions {
-        let _ = writeln!(out, "   caution: {caution}");
     }
 }
 
@@ -135,7 +144,11 @@ pub fn agent(report: &Report, top: usize) -> String {
 
 /// A class's template, its holes (locals left out) and how to unite it.
 fn agent_template(out: &mut String, class: &CloneClass) {
-    out.push_str("template:\n");
+    out.push_str(if class.kind == "query" {
+        "suggested extension:\n"
+    } else {
+        "template:\n"
+    });
     for line in template_lines(class) {
         let _ = writeln!(out, "  {line}");
     }
@@ -175,6 +188,10 @@ fn kind_text(class: &CloneClass) -> String {
         (1, _) => "type 1: the same code".to_string(),
         (2, _) => "type 2: renamed".to_string(),
         (4, _) => "type 4: the same behaviour, written differently".to_string(),
+        (0, _) => format!(
+            "repeated query on {}",
+            class.entity.as_deref().unwrap_or("a table")
+        ),
         (_, Some(s)) => format!("type 3: near miss, {:.0}% alike", s * 100.0),
         _ => "type 3: near miss".to_string(),
     }

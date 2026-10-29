@@ -114,6 +114,24 @@ dotnet tool install -g dgf-dup-cs --add-source crates/dog-food-dup/semantic/nupk
 
 The research behind it, and what comes next: [research and plan](research/csharp-semantic-duplication.md).
 
+### Repeated queries on a table
+
+With `--semantic`, every LINQ query on `IQueryable<T>` (an EF Core `DbSet<T>`, or a query built on one) is also read on its own, wherever it is in a method, knowing which entity `T` it queries. Its filter is reduced to one form:
+- lambda parameter names do not matter;
+- `Where(a).Where(b)` is `Where(a && b)`, in any order, since EF Core turns both into SQL `AND`;
+- `FirstOrDefaultAsync(pred)` is `Where(pred).FirstOrDefaultAsync()`;
+- values from outside the lambdas (`request.ShopId`, `shopId`) become parameters.
+
+Three kinds of repetition are reported, with the extension method that would replace them, built from the first query's own code so it compiles where it did:
+
+| Kind | Example | Suggestion |
+| --- | --- | --- |
+| The same filter in several methods (two or more conditions, or three or more queries) | `o.ShopId == shopId && !o.IsDeleted` | `public static IQueryable<Order> ForShopNotDeleted(this IQueryable<Order> query, Guid shopId) => query.Where(...);` in `OrderQueries`, next to `Order` |
+| The same whole query: filter, includes, order, projection | `.Where(...).OrderByDescending(o => o.PlacedAt).Select(o => o.Total)` | an extension returning the shaped `IQueryable<decimal>`; a repository or query method when every copy ends the same way |
+| One condition in three or more different queries of a table | `!u.IsReversed` | a small named extension (`NotReversed()`) to combine; for a condition every query needs (soft delete, the tenant), EF Core's `HasQueryFilter` |
+
+Conditions on the key alone (`x.Id == id`, `ids.Contains(x.Id)`) are left out: that is what `Find` is for. Names come from the conditions: `ForShop` (`ShopId == ...`), `NotDeleted` (`!IsDeleted`), `WithoutEndedAt` (`EndedAt == null`), `Confirmed` (`Status == Status.Confirmed`). They are suggestions to rename. Repeated queries do not count as duplicated lines and do not fail `--fail-on-copies`: they are advice. In the HTML page they are the *query* kind, with a "Tables queried the same way" chart.
+
 ## Measuring it
 
 [crates/dog-food-dup/tests/corpus/csharp](../crates/dog-food-dup/tests/corpus/csharp/README.md) is a labelled C# corpus: copies (types 1-3), groups of methods that do the same thing written differently (type 4), near misses that do different things, and decoys. Running it checks its own labels on generated inputs. `cargo run -p dog-food-dup --bin dgf-dup-bench` scores `dgf-dup` on it, or any tool's JSON with `--report`. Now, `dgf-dup` alone: types 1-3, 14 of 15; type 4, 1 of 47. With `--semantic`: type 4, 47 of 47; recall 98%, no decoy or unrelated match, and no near miss called equal.

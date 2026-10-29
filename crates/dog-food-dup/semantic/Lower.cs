@@ -15,6 +15,10 @@ public static class Lower
 {
     public static Node Expr(IOperation op, Scope s)
     {
+        if (s.Hole?.Invoke(op) is { } hole)
+        {
+            return hole;
+        }
         if (op.ConstantValue.HasValue && op.Type is not null)
         {
             return Constant(op.Type, op.ConstantValue.Value);
@@ -170,9 +174,14 @@ public static class Lower
         return Logical(op, left, right) ?? Arithmetic(op, left, right);
     }
 
-    /// <summary>A comparison of dates, times or durations: ordered like numbers.</summary>
+    /// <summary>A comparison of dates, times or durations (ordered like numbers), or an equality of a framework type.</summary>
     static bool Ordered(IBinaryOperation op) =>
-        Comparisons.ContainsKey(op.OperatorKind) && Numbers.IsTotal(Types.Name(op.LeftOperand.Type));
+        Comparisons.ContainsKey(op.OperatorKind) && Numbers.IsTotal(Types.Name(op.LeftOperand.Type))
+        || op.OperatorKind is BinaryOperatorKind.Equals or BinaryOperatorKind.NotEquals && IsFramework(op.OperatorMethod);
+
+    /// <summary>An operator of a framework type (<c>Guid ==</c>): it means what it says.</summary>
+    static bool IsFramework(IMethodSymbol? method) =>
+        method?.ContainingType.ContainingNamespace?.ToDisplayString() == "System";
 
     static Node? Logical(IBinaryOperation op, Node left, Node right) => op.OperatorKind switch
     {

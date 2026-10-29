@@ -20,6 +20,7 @@ var options = Options.Parse(args);
 var files = Sources.Find(options.Paths, options.Tests);
 var compilation = Sources.Compile(files);
 var methods = new ConcurrentBag<Reduced>();
+var queries = new ConcurrentBag<QueryUse>();
 Parallel.ForEach(compilation.SyntaxTrees.Where(t => t.FilePath.Length > 0), tree =>
 {
     var model = compilation.GetSemanticModel(tree);
@@ -29,9 +30,13 @@ Parallel.ForEach(compilation.SyntaxTrees.Where(t => t.FilePath.Length > 0), tree
         {
             methods.Add(reduced);
         }
+        foreach (var use in Reduce.Queries(method, model, options.Root))
+        {
+            queries.Add(use);
+        }
     }
 });
-var report = Grouping.Report(methods, files.Count);
+var report = Grouping.Report(methods, QueryGroups.Of(queries.OrderBy(q => q.File, StringComparer.Ordinal).ThenBy(q => q.StartLine).ToList(), options.Root), files.Count);
 var json = JsonSerializer.Serialize(report, Grouping.Json);
 if (options.Output is { } output)
 {
@@ -235,6 +240,17 @@ static class Reduce
         }
     }
 
+    /// <summary>The queries on tables in a method, wherever they are in it.</summary>
+    public static IEnumerable<QueryUse> Queries(MethodDeclarationSyntax syntax, SemanticModel model, string root)
+    {
+        if (model.GetDeclaredSymbol(syntax) is not { } symbol || model.GetOperation(syntax) is not { } body)
+        {
+            return [];
+        }
+        var file = Path.GetRelativePath(root, syntax.SyntaxTree.FilePath).Replace('\\', '/');
+        return DgfDup.Queries.In(body, file, $"{symbol.ContainingType.Name}.{symbol.Name}").ToList();
+    }
+
     /// <summary>A method's body when it returns a value.</summary>
     static IBlockOperation? Body(MethodDeclarationSyntax syntax, IMethodSymbol symbol, SemanticModel model) =>
         !symbol.ReturnsVoid && model.GetOperation(syntax) is IMethodBodyOperation body ? body.BlockBody ?? body.ExpressionBody : null;
@@ -268,12 +284,13 @@ static class Grouping
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
-    public static object Report(IEnumerable<Reduced> methods, int files)
+    public static object Report(IEnumerable<Reduced> methods, IEnumerable<Class> queries, int files)
     {
         var classes = methods
             .GroupBy(m => m.Expression.Key)
             .Where(g => g.Count() > 1)
             .Select(g => Class(g.OrderBy(m => m.File, StringComparer.Ordinal).ThenBy(m => m.StartLine).ToList()))
+            .Concat(queries)
             .OrderByDescending(c => c.Saves)
             .ToList();
         var fileLines = classes.SelectMany(c => c.Copies).Select(c => c.File).Distinct()
@@ -309,9 +326,9 @@ static class Grouping
     }
 }
 
-sealed record Copy(string File, int StartLine, int EndLine, string Function);
+public sealed record Copy(string File, int StartLine, int EndLine, string Function, string? Code = null);
 
-sealed class Class
+public sealed class Class
 {
     public string Kind { get; init; } = "copies";
     [JsonPropertyName("type")] public int CloneType { get; init; } = 4;
@@ -327,4 +344,6 @@ sealed class Class
     public required List<string> Cautions { get; init; }
     /// <summary>The rules that made the methods' expressions equal.</summary>
     public required List<string> Rules { get; init; }
+    /// <summary>For a repeated query: the entity (table) it reads.</summary>
+    public string? Entity { get; init; }
 }

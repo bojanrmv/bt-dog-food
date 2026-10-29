@@ -25,6 +25,13 @@ public sealed record Scope
     /// <summary>What <c>a?.</c> reads: the value of <c>a</c>.</summary>
     public Node? Accessed { get; init; }
 
+    /// <summary>
+    /// Reading queries: a value from outside the query's lambdas (a local,
+    /// a parameter, a field) stands for a parameter of a shared version; this
+    /// gives its hole, or null for anything else.
+    /// </summary>
+    public Func<IOperation, Node?>? Hole { get; init; }
+
     /// <summary>Inside a loop body: locals from outside that it changes, by their placeholders.</summary>
     public ImmutableArray<ILocalSymbol> Accumulators { get; init; } = ImmutableArray<ILocalSymbol>.Empty;
 

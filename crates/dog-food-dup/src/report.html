@@ -10,7 +10,7 @@
   --line: #e0e5ed; --accent: #3b5bdb; --accent-soft: #e8edfd; --ok: #2b9a66; --ok-soft: #e3f4ec;
   --warn: #b26f00; --warn-soft: #fcf1d9; --bad: #c4362f; --bad-soft: #fbe6e4; --code: #f6f8fb;
   --hole-l: 42%; --hole-bg-l: 92%; --add: #fff3cd; --add-ink: #6b4b00;
-  --t1: #2a78d6; --t2: #eb6834; --t3: #1baf7a; --t4: #eda100; --t5: #e87ba4; --bar: #2a78d6;
+  --t1: #2a78d6; --t2: #eb6834; --t3: #1baf7a; --t4: #eda100; --t5: #e87ba4; --t6: #008300; --bar: #2a78d6;
   --shadow: 0 1px 2px rgba(17, 24, 39, 0.05), 0 4px 16px rgba(17, 24, 39, 0.04);
   --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   --mono: "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, ui-monospace, monospace;
@@ -22,7 +22,7 @@
     --line: #232c3c; --accent: #7c9cff; --accent-soft: #1c2645; --ok: #4cc38a; --ok-soft: #12291f;
     --warn: #f2b544; --warn-soft: #2e2410; --bad: #f07a72; --bad-soft: #33171a; --code: #0f141d;
     --hole-l: 70%; --hole-bg-l: 20%; --add: #3a2f10; --add-ink: #f6d88a;
-    --t1: #3987e5; --t2: #d95926; --t3: #199e70; --t4: #c98500; --t5: #d55181; --bar: #3987e5;
+    --t1: #3987e5; --t2: #d95926; --t3: #199e70; --t4: #c98500; --t5: #d55181; --t6: #008300; --bar: #3987e5;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4); color-scheme: dark;
   }
 }
@@ -31,7 +31,7 @@
   --line: #232c3c; --accent: #7c9cff; --accent-soft: #1c2645; --ok: #4cc38a; --ok-soft: #12291f;
   --warn: #f2b544; --warn-soft: #2e2410; --bad: #f07a72; --bad-soft: #33171a; --code: #0f141d;
   --hole-l: 70%; --hole-bg-l: 20%; --add: #3a2f10; --add-ink: #f6d88a;
-  --t1: #3987e5; --t2: #d95926; --t3: #199e70; --t4: #c98500; --t5: #d55181; --bar: #3987e5;
+  --t1: #3987e5; --t2: #d95926; --t3: #199e70; --t4: #c98500; --t5: #d55181; --t6: #008300; --bar: #3987e5;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4); color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -54,7 +54,7 @@ button { font: inherit; color: var(--ink); }
 .number span { color: var(--muted); font-size: 12px; }
 .progress { height: 6px; border-radius: 3px; background: var(--surface-2); border: 1px solid var(--line); margin-top: 8px; overflow: hidden; }
 .progress i { display: block; height: 100%; background: var(--ok); border-radius: 3px; }
-.overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 12px; }
 .overview > .card { padding: 14px 16px; min-width: 0; }
 .stack { display: flex; height: 14px; gap: 2px; margin: 4px 0 12px; }
 .stack i { display: block; height: 100%; border-radius: 4px; min-width: 4px; cursor: pointer; }
@@ -164,6 +164,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
     <div class="card"><h2>By kind of copy</h2><div class="stack" id="stack" role="img"></div><ul class="legend" id="legend"></ul></div>
     <div class="card"><h2>Projects with the most duplicated lines</h2><ul class="bars" id="projects"></ul></div>
     <div class="card"><h2>Projects that share copies</h2><ul class="bars" id="pairs"></ul></div>
+    <div class="card" id="tablesCard" hidden><h2>Tables queried the same way</h2><ul class="bars" id="tables"></ul></div>
   </section>
 
   <section class="review">
@@ -217,8 +218,11 @@ const KINDS = [
   { key: "3", name: "Near miss", word: "type 3", color: "var(--t3)" },
   { key: "4", name: "Same behaviour, written differently", word: "type 4", color: "var(--t4)" },
   { key: "r", name: "Repeated statements", word: "repeated", color: "var(--t5)" },
+  { key: "q", name: "Repeated query on a table", word: "query", color: "var(--t6)" },
 ];
-const kindOf = (c) => KINDS.find((k) => k.key === (c.kind === "repeated" ? "r" : String(c.type))) || KINDS[1];
+const kindKey = (c) => c.kind === "repeated" ? "r" : c.kind === "query" ? "q" : String(c.type);
+const kindOf = (c) => KINDS.find((k) => k.key === kindKey(c)) || KINDS[1];
+const entityName = (c) => (c.entity || "").split(".").pop();
 const STATUS = { "to-fix": "To fix", intentional: "Intentional", "false-positive": "False positive" };
 const holeColor = (n) => `color: hsl(${(n * 83 + 200) % 360} 70% var(--hole-l)); background: hsl(${(n * 83 + 200) % 360} 70% var(--hole-bg-l));`;
 const kindWord = { value: "value", name: "variable", member: "member", call: "call", type: "type", local: "local (renamed only)" };
@@ -294,8 +298,10 @@ function renderOverview() {
     class: state.kinds.has(k.key) ? "on" : null, onclick: () => toggleKind(k.key), title: "Filter the queue",
   }, el("span", { class: "key", style: `background:${k.color}` }), el("span", { text: `${k.name} (${k.word})` }), el("span", { class: "n", text: fmt(k.n) }))));
 
+  // Copies of code: repeated queries have their own card.
+  const copied = classes.filter((c) => c.kind !== "query");
   const byProject = new Map();
-  for (const c of classes) for (const x of c.copies) {
+  for (const c of copied) for (const x of c.copies) {
     const p = projectOf(x.file);
     byProject.set(p, (byProject.get(p) || 0) + (x.endLine - x.startLine + 1));
   }
@@ -304,7 +310,7 @@ function renderOverview() {
     (p) => { state.project = state.project === p[0] ? "" : p[0]; state.pair = null; sync(); }, (p) => state.project === p[0] && !state.pair);
 
   const pairs = new Map();
-  for (const c of classes) {
+  for (const c of copied) {
     const ps = c.projects.slice().sort();
     for (let i = 0; i < ps.length; i++) for (let j = i + 1; j < ps.length; j++) {
       const key = ps[i] + "\u0000" + ps[j];
@@ -318,6 +324,11 @@ function renderOverview() {
     bars("pairs", shared, (p) => p[0].replace("\u0000", " ↔ "), (p) => p[1], "groups",
       (p) => { state.pair = state.pair === p[0] ? null : p[0]; state.project = ""; sync(); }, (p) => state.pair === p[0]);
   }
+  const tables = new Map();
+  for (const c of classes.filter((c) => c.kind === "query")) tables.set(entityName(c), (tables.get(entityName(c)) || 0) + c.copies.length);
+  document.getElementById("tablesCard").hidden = !tables.size;
+  bars("tables", [...tables].sort((a, b) => b[1] - a[1]).slice(0, 8), (t) => t[0], (t) => t[1], "queries in repeated groups",
+    (t) => { state.search = state.search === t[0] ? "" : t[0]; document.getElementById("search").value = state.search; state.kinds = new Set(["q"]); sync(); }, (t) => state.search === t[0]);
   const select = document.getElementById("project");
   const names = [...byProject.keys()].sort();
   select.replaceChildren(el("option", { value: "", text: "All projects" }), ...names.map((n) => el("option", { value: n, text: n })));
@@ -350,7 +361,7 @@ function visible() {
     if (state.project && !c.projects.includes(state.project)) return false;
     if (state.pair) { const [a, b] = state.pair.split("\u0000"); if (!c.projects.includes(a) || !c.projects.includes(b)) return false; }
     if (state.changed && !c.copies.some((x) => x.changed)) return false;
-    if (q && !(c.template.toLowerCase().includes(q) || c.copies.some((x) => x.file.toLowerCase().includes(q) || (x.function || "").toLowerCase().includes(q)))) return false;
+    if (q && !(c.template.toLowerCase().includes(q) || (c.entity || "").toLowerCase().includes(q) || c.copies.some((x) => x.file.toLowerCase().includes(q) || (x.function || "").toLowerCase().includes(q)))) return false;
     return true;
   });
   const by = {
@@ -381,7 +392,7 @@ function renderList() {
         el("div", { class: "fn", text: fns.slice(0, 2).join(" · ") + (fns.length > 2 ? ` +${fns.length - 2}` : "") }),
         el("div", { class: "meta" },
           el("span", { class: "tag" }, el("span", { class: "key", style: `background:${k.color}` }), k.word), " ",
-          `${c.copies.length} copies · ${c.lines} lines · ${c.projects.join(", ")}`,
+          c.kind === "query" ? `${entityName(c)} · ${c.copies.length} queries · ${c.projects.join(", ")}` : `${c.copies.length} copies · ${c.lines} lines · ${c.projects.join(", ")}`,
           c.copies.some((x) => x.changed) ? el("span", { class: "tag changed", text: "changed", style: "margin-left:6px" }) : null)),
       el("span", { class: "saves", text: c.saves > 0 ? `−${fmt(c.saves)}` : "" , title: "lines a refactor would save" }));
     return row;
@@ -424,7 +435,7 @@ function renderDetail(c) {
   note.addEventListener("change", () => decide(c, null, note.value));
   box.replaceChildren(...[
     el("div", { class: "head" },
-      el("div", { class: "title", text: `Group ${c.n}: ${c.copies.length} copies of ${c.lines} lines` }),
+      el("div", { class: "title", text: c.kind === "query" ? `Group ${c.n}: ${c.copies.length} queries on ${entityName(c)} that repeat` : `Group ${c.n}: ${c.copies.length} copies of ${c.lines} lines` }),
       el("div", { class: "badges" },
         el("span", { class: "tag" }, el("span", { class: "key", style: `background:${k.color}` }), `${k.name}`),
         c.similarity ? el("span", { class: "tag", text: `${Math.round(c.similarity * 100)}% alike` }) : null,
@@ -497,7 +508,7 @@ function templateSection(c) {
     else if (part.startsWith("⟪")) pre.append(el("span", { class: "gap", title: "not in every copy", text: part.slice(1, -1) }));
     else pre.append(part);
   }
-  const title = c.type === 4 ? "What every copy computes" : "Shared template (⟨n⟩ where the copies differ)";
+  const title = c.kind === "query" ? `Suggested extension, for ${entityName(c)}Queries in the domain` : c.type === 4 ? "What every copy computes" : "Shared template (⟨n⟩ where the copies differ)";
   return el("div", { class: "section" }, el("div", { class: "label", text: title }), pre);
 }
 

@@ -101,7 +101,8 @@ fn run(args: &Args) -> Result<ExitCode, (u8, String)> {
         found.keep_changed(changes);
     }
     write(&render(&found, args), args.output.as_deref())?;
-    let copied = args.fail_on_copies && !found.classes.is_empty();
+    // Repeated queries are advice: a gate fails on copied code only.
+    let copied = args.fail_on_copies && found.classes.iter().any(|c| c.kind != "query");
     let too_much = args.fail_above.is_some_and(|limit| found.percent() > limit);
     Ok(if copied || too_much {
         ExitCode::from(1)
