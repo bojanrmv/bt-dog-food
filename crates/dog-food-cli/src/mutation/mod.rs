@@ -176,6 +176,8 @@ pub enum Untested {
     NoRunner,
     /// `--cached`: no cached result, and nothing was tested.
     NotCached,
+    /// The run of its language failed (the error is in `RunResult::failed`).
+    Failed,
 }
 
 #[derive(Default)]
@@ -203,6 +205,8 @@ pub struct RunResult {
     pub crash_kills: BTreeSet<usize>,
     /// Runtime errors: what the run's output said as it ended.
     pub crash_reasons: HashMap<usize, String>,
+    /// Languages whose run failed, and why; the others' results still count.
+    pub failed: Vec<String>,
     /// Things the reader should know, such as a fallback to a full sandbox.
     pub notes: Vec<String>,
     /// Per tested mutant, up to three tests that reach it ("name (file)").
@@ -218,9 +222,12 @@ pub struct RunResult {
 impl RunResult {
     /// Whether `--max-minutes` stopped the run.
     pub fn budget_hit(&self) -> bool {
-        self.untested
-            .values()
-            .any(|step| !matches!(step, Untested::NoRunner | Untested::NotCached))
+        self.untested.values().any(|step| {
+            !matches!(
+                step,
+                Untested::NoRunner | Untested::NotCached | Untested::Failed
+            )
+        })
     }
 }
 
@@ -403,7 +410,9 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
     result.outcomes.extend(ignored(targets));
     let mut cache = cache::Cache::load(&options.cache_dir);
     cache.rerun = options.rerun_survivors;
+    let mut finished = 0;
     for language in [sandbox::Kind::CSharp, sandbox::Kind::Node] {
+        let failures = result.failed.len();
         let mut pending: Vec<&Target> = targets
             .iter()
             .filter(|t| sandbox::Kind::of(&t.path) == Some(language))
@@ -414,7 +423,13 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
         if pending.is_empty() {
             continue;
         }
-        let scope = Scope::new(language, &pending, options)?;
+        let scope = match Scope::new(language, &pending, options) {
+            Ok(scope) => scope,
+            Err(err) => {
+                failed(language, err, &pending, &mut result);
+                continue;
+            }
+        };
         if options.use_cache {
             let mut found = cache.lookup(&pending, &scope);
             // A survivor already tested again against these tests is not
@@ -464,7 +479,13 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
                 total - open.len(),
                 open.len()
             ));
-            killed_by = run_language(&scope, &pending, options, &mut result)?;
+            match run_language(&scope, &pending, options, &mut result) {
+                Ok(killers) => killed_by = killers,
+                Err(err) => failed(language, err, &pending, &mut result),
+            }
+        }
+        if result.failed.len() == failures {
+            finished += 1;
         }
         // Only what this run tested: cached outcomes keep the evidence they have.
         let fresh: HashMap<usize, Outcome> = result
@@ -486,7 +507,32 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
     note_filtered(targets, options, &mut result);
     timings(targets, options, &mut cache, &mut result);
     cache.save()?;
+    // With nothing else to show, a failure is the whole answer.
+    if finished == 0 {
+        if let Some(first) = result.failed.first() {
+            return Err(first.clone());
+        }
+    }
     Ok(result)
+}
+
+/// Records that `language`'s run failed: its mutants without a result stay
+/// untested, and the other language's results are still reported.
+fn failed(language: sandbox::Kind, err: String, pending: &[&Target], result: &mut RunResult) {
+    for m in pending.iter().flat_map(|t| &t.mutants) {
+        if !result.outcomes.contains_key(&m.id) {
+            result.untested.insert(m.id, Untested::Failed);
+        }
+    }
+    let name = match language {
+        sandbox::Kind::CSharp => "C#",
+        sandbox::Kind::Node => "TypeScript/JavaScript",
+    };
+    let failure = format!("the {name} run failed: {err}");
+    result.notes.push(format!(
+        "{failure}; its mutants are listed as not tested, and the results above are the other language's"
+    ));
+    result.failed.push(failure);
 }
 
 /// Mutants no test reaches may be reached by a test project the run left out.
@@ -1557,6 +1603,60 @@ mod tests {
         let files = killer_files(killers, &reach);
         assert_eq!(files[&1], ["tests/A.cs"]);
         assert!(files[&2].is_empty());
+    }
+
+    #[test]
+    fn a_failed_language_leaves_its_mutants_untested_and_a_run_of_only_it_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("web/src")).unwrap();
+        // Vitest is wanted but not installed: the TypeScript run fails.
+        std::fs::write(
+            root.join("web/package.json"),
+            r#"{"devDependencies":{"vitest":"3"}}"#,
+        )
+        .unwrap();
+        let source = "export function f(a: number) {
+  return a > 1;
+}
+";
+        std::fs::write(root.join("web/src/a.ts"), source).unwrap();
+        let wanted = crate::mutate::Wanted {
+            file: "web/src/a.ts".into(),
+            path: root.join("web/src/a.ts"),
+            name: "f".into(),
+            start_line: 1,
+            end_line: 3,
+            complexity: 2,
+            reason: "selected",
+            lines: None,
+        };
+        let (mut targets, _) =
+            crate::mutate::targets(vec![wanted], &dog_food_core::mutate::Settings::default())
+                .unwrap();
+        number(&mut targets);
+        let mut result = RunResult::default();
+        let pending: Vec<&Target> = targets.iter().collect();
+        failed(
+            sandbox::Kind::Node,
+            "no runner".into(),
+            &pending,
+            &mut result,
+        );
+        assert_eq!(result.untested.len(), targets[0].mutants.len());
+        assert!(result.untested.values().all(|s| *s == Untested::Failed));
+        assert!(!result.budget_hit());
+        assert_eq!(
+            result.failed,
+            ["the TypeScript/JavaScript run failed: no runner"]
+        );
+        assert!(result.notes[0].starts_with("the TypeScript/JavaScript run failed"));
+        // With no other language to report, the run is an error.
+        let err = run(&mut targets, &options(root)).err().unwrap();
+        assert!(
+            err.starts_with("the TypeScript/JavaScript run failed"),
+            "{err}"
+        );
     }
 
     #[test]

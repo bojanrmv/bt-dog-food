@@ -1123,7 +1123,12 @@ fn untested_text(targets: &[Target], result: &RunResult) -> String {
     if !result.budget_hit() {
         return String::new();
     }
-    let stopped = |step: &Untested| !matches!(step, Untested::NoRunner | Untested::NotCached);
+    let stopped = |step: &Untested| {
+        !matches!(
+            step,
+            Untested::NoRunner | Untested::NotCached | Untested::Failed
+        )
+    };
     let mut out = format!(
         "\nThe time budget ran out; {} mutants were not tested (the results so far are saved):\n",
         result.untested.values().filter(|s| stopped(s)).count()
@@ -1157,6 +1162,7 @@ fn untested_why(step: Untested) -> &'static str {
         Untested::TestRuns => "its test runs did not finish",
         Untested::NoRunner => "no vitest or jest package above this file",
         Untested::NotCached => "not in the cache (--cached tests nothing)",
+        Untested::Failed => "the run of its language failed (the error is at the end)",
     }
 }
 

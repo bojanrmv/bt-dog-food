@@ -892,7 +892,9 @@ fn run_mutants(
     let text = with_scope(text, &scope, args.out.format);
     // Below `break` fails; no score at all never does.
     let score = mutate::overall(&targets, &result);
-    let code = if result.budget_hit() {
+    let code = if !result.failed.is_empty() {
+        EXIT_USAGE
+    } else if result.budget_hit() {
         EXIT_BUDGET
     } else {
         fail_code(
@@ -902,6 +904,9 @@ fn run_mutants(
         )
     };
     finish(text, &args.out, code)?;
+    for failure in &result.failed {
+        eprintln!("error: {failure} (the report has the other results)");
+    }
     Ok(ExitCode::from(code))
 }
 
@@ -932,7 +937,11 @@ fn add_tested_by_changed_tests(
             .iter()
             .any(|w| w.file == file && changes::stable_name(&w.name) == name);
         if !known {
-            let found = mutate::function_named(root, &file, &name);
+            // --exclude and [analyze] exclude hold here as in the diff.
+            let found: Vec<mutate::Wanted> = mutate::function_named(root, &file, &name)
+                .into_iter()
+                .filter(|w| !settings.excludes.is_excluded(&w.path, false))
+                .collect();
             added += found.len();
             if !found.is_empty() {
                 through.extend(tests);
