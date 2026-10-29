@@ -1,0 +1,39 @@
+{
+  "about": "Labels for the C# duplication corpus. Methods are named Type.Method. A group's members all do the same thing (every pair is Type 4 and equal); each member names how it is written. A pair has a clone type (1-3 for copies; 0 for unrelated code that only looks alike) and whether it is equal (same result for every input).",
+  "groups": [
+    { "id": "total", "members": { "Total.For": "for", "Total.Foreach": "foreach", "Total.While": "while", "Total.Linq": "linq" } },
+    { "id": "count-paid", "members": { "CountPaid.Foreach": "foreach", "CountPaid.For": "for with continue", "CountPaid.Linq": "linq", "CountPaid.WhereCount": "linq where" } },
+    { "id": "has-bulk-line", "members": { "HasBulkLine.Foreach": "early return", "HasBulkLine.Flag": "flag and break", "HasBulkLine.Linq": "linq" } },
+    { "id": "all-done", "members": { "AllDone.Foreach": "early return", "AllDone.Linq": "linq", "AllDone.NotAny": "de morgan linq" } },
+    { "id": "first-big-order", "members": { "FirstBigOrder.Foreach": "early return", "FirstBigOrder.For": "result and break", "FirstBigOrder.Linq": "linq" } },
+    { "id": "restock", "members": { "Restock.Foreach": "foreach", "Restock.For": "for with negated condition", "Restock.Linq": "linq" } },
+    { "id": "shipping-fee", "members": { "ShippingFee.Guards": "guard clauses", "ShippingFee.Nested": "nested if", "ShippingFee.Conditional": "conditional", "ShippingFee.Switch": "switch" } },
+    { "id": "validate", "members": { "Validate.EarlyReturn": "early return", "Validate.Nested": "nested if" } },
+    { "id": "stock-label", "members": { "StockLabel.Plain": "if/else", "StockLabel.Inverted": "inverted condition" } },
+    { "id": "gross", "members": { "Gross.Locals": "locals", "Gross.Inline": "inlined" } },
+    { "id": "summary", "members": { "Summary.CountFirst": "order a", "Summary.NameFirst": "reordered" } },
+    { "id": "describe", "members": { "Describe.Concat": "concatenation", "Describe.Interpolated": "interpolation", "Describe.Builder": "string builder" } },
+    { "id": "guest-name", "members": { "GuestName.EqualsNull": "== null", "GuestName.IsNull": "is null", "GuestName.Conditional": "?. and IsNullOrEmpty" } },
+    { "id": "can-ship", "members": { "CanShip.Negated": "negated and", "CanShip.DeMorgan": "de morgan" } },
+    { "id": "largest", "members": { "Largest.Loop": "loop", "Largest.Max": "linq max", "Largest.DefaultIfEmpty": "default if empty" } },
+    { "id": "totals-by-customer", "members": { "TotalsByCustomer.TryGet": "try get", "TotalsByCustomer.GetValueOrDefault": "get value or default", "TotalsByCustomer.GroupBy": "group by" } }
+  ],
+  "pairs": [
+    { "id": "header", "a": "Invoices.Header", "b": "Receipts.Header", "type": 1, "equal": true, "note": "copy-paste" },
+    { "id": "footer", "a": "Invoices.Footer", "b": "Receipts.Footer", "type": 2, "equal": false, "note": "renamed, other texts" },
+    { "id": "lines", "a": "Invoices.Lines", "b": "Receipts.Lines", "type": 3, "equal": false, "note": "one statement added" },
+    { "id": "due", "a": "Invoices.Due", "b": "Receipts.Due", "type": 3, "equal": false, "note": "one statement changed" },
+    { "id": "free-shipping", "a": "FreeShipping.AtLeast", "b": "FreeShipping.Above", "type": 3, "equal": false, "note": ">= vs >" },
+    { "id": "quantity-of", "a": "QuantityOf.First", "b": "QuantityOf.FirstOrDefault", "type": 3, "equal": false, "note": "First throws where FirstOrDefault gives 0" },
+    { "id": "in-stock", "a": "InStock.Any", "b": "InStock.All", "type": 3, "equal": false, "note": "Any vs All" },
+    { "id": "greeting", "a": "Greeting.Checked", "b": "Greeting.Unchecked", "type": 3, "equal": false, "note": "null check dropped" },
+    { "id": "paid-share", "a": "PaidShare.InOrder", "b": "PaidShare.Swapped", "type": 3, "equal": false, "note": "arguments swapped" },
+    { "id": "average-units", "a": "AverageUnits.IntegerDivision", "b": "AverageUnits.DecimalDivision", "type": 3, "equal": false, "note": "integer vs decimal division" },
+    { "id": "units-before", "a": "UnitsBefore.AllLines", "b": "UnitsBefore.SkipsLast", "type": 3, "equal": false, "note": "off by one" },
+    { "id": "same-customer", "a": "SameCustomer.Ordinal", "b": "SameCustomer.IgnoreCase", "type": 2, "equal": false, "note": "other comparison" },
+    { "id": "waiting", "a": "Waiting.Paid", "b": "Waiting.Shipped", "type": 2, "equal": false, "note": "other status" },
+    { "id": "line-sum", "a": "LineSum.Amounts", "b": "LineSum.Prices", "type": 3, "equal": false, "note": "price instead of amount" },
+    { "id": "row-entry", "a": "Csv.Row", "b": "AuditLog.Entry", "type": 0, "equal": false, "note": "same shape, unrelated" },
+    { "id": "check-line-order", "a": "Csv.CheckLine", "b": "AuditLog.CheckOrder", "type": 0, "equal": false, "note": "same shape, unrelated" }
+  ]
+}

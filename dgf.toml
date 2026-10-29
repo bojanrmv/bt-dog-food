@@ -7,6 +7,7 @@ exclude = [
   "crates/*/tests/fixtures/",   # sample inputs for the fixture tests, not real code
   "crates/*/tests/e2e/",        # sample projects for the end-to-end tests
   "crates/*/tests/mutants/",    # mutator fixtures, written to get mutants, not to be simple
+  "crates/*/tests/corpus/",     # labelled duplication corpus, written to hold copies
 ]
 
 [limits]

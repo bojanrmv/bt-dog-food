@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Labelled C# pairs for measuring duplication finders (see README.md).
+    `dotnet run` checks every label: pairs marked equal agree on generated
+    inputs, and pairs marked not equal have a counterexample.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>Corpus</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="cases.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

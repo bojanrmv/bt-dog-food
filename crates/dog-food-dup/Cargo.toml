@@ -9,6 +9,10 @@ license.workspace = true
 name = "dgf-dup"
 path = "src/main.rs"
 
+[[bin]]
+name = "dgf-dup-bench"
+path = "src/bin/dgf-dup-bench.rs"
+
 [dependencies]
 dog-food-core.workspace = true
 tree-sitter.workspace = true

@@ -12,6 +12,7 @@
 //! copies gives the template: a hole wherever their names or values differ,
 //! one hole for each distinct set of differences.
 
+pub mod bench;
 pub mod changes;
 mod find;
 pub mod report;
