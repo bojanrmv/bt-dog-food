@@ -309,30 +309,42 @@ fn worst(a: TestRun, b: TestRun) -> TestRun {
     }
 }
 
+/// Whether a build got past its restore: it worked, or only the compiler failed.
+fn restored(built: &Result<(), BuildError>) -> bool {
+    built.is_ok() || matches!(built, Err(BuildError::Errors(e)) if compiler_errors(e))
+}
+
+impl Dotnet {
+    /// The projects with mutants, built without their references.
+    fn build_mutated(&self, budget: Budget) -> Result<(), BuildError> {
+        let restore = !self.mutated_restored.load(Ordering::Relaxed);
+        let mut built = self.build_target(&self.mutated, restore, true, budget);
+        // Built without their references, the mutated projects compile
+        // side by side: one whose mutants broke the last round has no
+        // reference assembly yet when a project using it reads it. Built
+        // with references, it comes first.
+        if matches!(&built, Err(BuildError::Errors(e)) if missing_reference(e)) {
+            built = self.build_target(&self.mutated, false, false, budget);
+        }
+        if restored(&built) {
+            self.mutated_restored.store(true, Ordering::Relaxed);
+        }
+        built
+    }
+}
+
 impl Engine for Dotnet {
     /// `All` builds every test project (and what they use); `Mutated` only
     /// the projects with mutants, which is where a mutant can break the build.
     fn build(&self, round: Round, budget: Budget) -> Result<(), BuildError> {
         if round == Round::Mutated {
-            let restore = !self.mutated_restored.load(Ordering::Relaxed);
-            let mut built = self.build_target(&self.mutated, restore, true, budget);
-            // Built without their references, the mutated projects compile
-            // side by side: one whose mutants broke the last round has no
-            // reference assembly yet when a project using it reads it. Built
-            // with references, it comes first.
-            if matches!(&built, Err(BuildError::Errors(e)) if missing_reference(e)) {
-                built = self.build_target(&self.mutated, false, false, budget);
-            }
-            if built.is_ok() || matches!(&built, Err(BuildError::Errors(e)) if compiler_errors(e)) {
-                self.mutated_restored.store(true, Ordering::Relaxed);
-            }
-            return built;
+            return self.build_mutated(budget);
         }
         let restore = !self.restored.load(Ordering::Relaxed);
         let built = self.build_target(&self.tests, restore, false, budget);
         // Compiler errors come after a restore that worked: the builds after
         // a mutant broke this one need not restore again.
-        if built.is_ok() || matches!(&built, Err(BuildError::Errors(e)) if compiler_errors(e)) {
+        if restored(&built) {
             self.restored.store(true, Ordering::Relaxed);
             let _ = std::fs::write(
                 self.sandbox.join(RESTORED),
@@ -648,23 +660,32 @@ fn collector() -> Result<PathBuf, String> {
     std::fs::write(dir.join("DgfCollector.csproj"), COLLECTOR_PROJECT)
         .map_err(|err| err.to_string())?;
     let out = dir.join("out");
-    let output = dotnet(&[
-        "build",
-        &dir.join("DgfCollector.csproj").to_string_lossy(),
-        "-c",
-        "Release",
-        "-o",
-        &out.to_string_lossy(),
-        "-nologo",
-        "-v",
-        "q",
-    ])
-    .output()
-    .map_err(|err| format!("could not run dotnet: {err}"))?;
+    let build = || {
+        dotnet(&[
+            "build",
+            &dir.join("DgfCollector.csproj").to_string_lossy(),
+            "-c",
+            "Release",
+            "-o",
+            &out.to_string_lossy(),
+            "-nologo",
+            "-v",
+            "q",
+        ])
+        .output()
+        .map_err(|err| format!("could not run dotnet: {err}"))
+    };
+    // A build that fails at once is mostly the machine (a restore that
+    // timed out, a build server shutting down): it is tried once more.
+    let mut output = build()?;
+    if !output.status.success() {
+        output = build()?;
+    }
     if !output.status.success() {
         return Err(format!(
-            "could not build dog-food's test collector:\n{}",
-            String::from_utf8_lossy(&output.stdout)
+            "could not build dog-food's test collector:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         ));
     }
     Ok(dll)

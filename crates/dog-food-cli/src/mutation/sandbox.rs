@@ -477,13 +477,11 @@ fn copy_if_changed(from: &Path, to: &Path) -> Result<(), String> {
         remove_entry(to)?;
     }
     let existed = std::fs::metadata(to).ok();
-    if let Some(target) = &existed {
-        // A fresh checkout (another worktree) gives unchanged files a new
-        // time: the copy keeps its old time, so the build stays incremental.
-        let same_time = target.modified().ok() == source.modified().ok();
-        if target.len() == source.len() && (same_time || same_content(from, to)) {
-            return Ok(());
-        }
+    if existed
+        .as_ref()
+        .is_some_and(|target| unchanged(&source, target, from, to))
+    {
+        return Ok(());
     }
     std::fs::create_dir_all(to.parent().expect("a file has a folder"))
         .map_err(|err| err.to_string())?;
@@ -497,6 +495,19 @@ fn copy_if_changed(from: &Path, to: &Path) -> Result<(), String> {
         source.modified().unwrap_or_else(|_| SystemTime::now())
     };
     keep_time(to, Some(time))
+}
+
+/// The copy already has the source's size, and its time or its content. A
+/// fresh checkout (another worktree) gives unchanged files a new time: the
+/// copy keeps its old time, so the build stays incremental.
+fn unchanged(
+    source: &std::fs::Metadata,
+    target: &std::fs::Metadata,
+    from: &Path,
+    to: &Path,
+) -> bool {
+    let same_time = target.modified().ok() == source.modified().ok();
+    target.len() == source.len() && (same_time || same_content(from, to))
 }
 
 fn same_content(a: &Path, b: &Path) -> bool {

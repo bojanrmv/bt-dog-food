@@ -86,31 +86,40 @@ impl Keys {
             .iter()
             .filter(|t| t.reason != NEIGHBOUR && !is_test_code(&t.path))
         {
-            if let Some(language) = Language::from_path(&t.path) {
-                if !keys.languages.contains(&language) {
-                    keys.languages.push(language);
-                }
-            }
+            keys.add_language(&t.path);
             let file = constants
                 .entry(&t.path)
                 .or_insert_with(|| file_constants(&t.path));
-            let text = std::fs::read_to_string(&t.path).unwrap_or_default();
-            let body: Vec<&str> = text
-                .lines()
-                .skip(t.start_line.saturating_sub(1))
-                .take(t.end_line + 1 - t.start_line)
-                .collect();
-            for line in &body {
-                keys.literals.extend(literals(line));
-            }
-            for (name, held) in file.iter() {
-                if body.iter().any(|line| has_word(line, name)) {
-                    keys.names.insert(name.clone());
-                    keys.literals.extend(held.iter().cloned());
-                }
-            }
+            keys.add_function(t, file);
         }
         keys
+    }
+
+    fn add_language(&mut self, path: &std::path::Path) {
+        if let Some(language) = Language::from_path(path) {
+            if !self.languages.contains(&language) {
+                self.languages.push(language);
+            }
+        }
+    }
+
+    /// A function's literals, and the constants of its file it uses with what they hold.
+    fn add_function(&mut self, t: &Target, file: &[(String, Vec<String>)]) {
+        let text = std::fs::read_to_string(&t.path).unwrap_or_default();
+        let body: Vec<&str> = text
+            .lines()
+            .skip(t.start_line.saturating_sub(1))
+            .take(t.end_line + 1 - t.start_line)
+            .collect();
+        for line in &body {
+            self.literals.extend(literals(line));
+        }
+        for (name, held) in file {
+            if body.iter().any(|line| has_word(line, name)) {
+                self.names.insert(name.clone());
+                self.literals.extend(held.iter().cloned());
+            }
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1398,27 +1407,7 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
     out.push_str(
         "        then: tests that reach it (where a new assertion goes), and what to assert\n",
     );
-    let (neighbours, gate): (Vec<_>, Vec<_>) =
-        survivors(targets, result).partition(|(t, _)| t.reason == NEIGHBOUR);
-    let (by_tests, own): (Vec<_>, Vec<_>) =
-        gate.into_iter().partition(|(t, _)| t.reason == "tests");
-    for (t, m) in own {
-        agent_survivor(&mut out, t, m, result);
-    }
-    if !by_tests.is_empty() {
-        out.push_str("\n## in code a test file this branch changed reaches (not in the branch's own diff; counted in the score)\n");
-        for (t, m) in by_tests {
-            agent_survivor(&mut out, t, m, result);
-        }
-    }
-    if !neighbours.is_empty() {
-        out.push_str("
-## next to your change (--neighbours: code that holds a string key of a changed function; not in the score, yours to decide)
-");
-        for (t, m) in neighbours {
-            agent_survivor(&mut out, t, m, result);
-        }
-    }
+    agent_survivors(&mut out, targets, result);
     out.push_str(&crash_kills_text(targets, result));
     out.push_str(&crashes_text(targets, result));
     let suppressed = suppressions_text(targets, "");
@@ -1431,6 +1420,32 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
     for note in &result.notes {
         let _ = writeln!(out, "note: {note}");
     }
+    agent_functions(&mut out, targets, result);
+    out
+}
+
+/// The survivors: the branch's own first, then those in code a changed test
+/// reaches, then the neighbours.
+fn agent_survivors(out: &mut String, targets: &[Target], result: &RunResult) {
+    let (neighbours, gate): (Vec<_>, Vec<_>) =
+        survivors(targets, result).partition(|(t, _)| t.reason == NEIGHBOUR);
+    let (by_tests, own): (Vec<_>, Vec<_>) =
+        gate.into_iter().partition(|(t, _)| t.reason == "tests");
+    let sections = [
+        ("", own),
+        ("\n## in code a test file this branch changed reaches (not in the branch's own diff; counted in the score)\n", by_tests),
+        ("\n## next to your change (--neighbours: code that holds a string key of a changed function; not in the score, yours to decide)\n", neighbours),
+    ];
+    for (heading, list) in sections.into_iter().filter(|(_, list)| !list.is_empty()) {
+        out.push_str(heading);
+        for (t, m) in list {
+            agent_survivor(out, t, m, result);
+        }
+    }
+}
+
+/// Each function's score and counts, one line each.
+fn agent_functions(out: &mut String, targets: &[Target], result: &RunResult) {
     out.push_str("\n## per function (score killed survived no_tests location name)\n");
     for t in targets.iter().filter(|t| !t.mutants.is_empty()) {
         let f = tally(t.mutants.iter(), result);
@@ -1447,7 +1462,6 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
             t.name
         );
     }
-    out
 }
 
 #[cfg(test)]

@@ -37,11 +37,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install --path crates/dog-food-cli --locked
 
+      # Every report is written before the step fails, so code scanning always
+      # gets this commit's results: an alert closes once its function is fixed.
+      # Code scanning holds only functions above the fail limit; warnings are in
+      # the summary and the HTML report.
       - name: Whole repository (fails above the limits in dgf.toml)
         run: |
-          dgf analyze --format markdown >> "$GITHUB_STEP_SUMMARY"
-          dgf analyze --format html -o dgf-report.html
-          dgf analyze --format sarif -o dgf.sarif
+          status=0
+          dgf analyze --format sarif -o dgf-all.sarif || status=$?
+          jq '.runs[].results |= map(select(.level == "error"))' dgf-all.sarif > dgf.sarif
+          dgf analyze --format html -o dgf-report.html || true
+          dgf analyze --format markdown >> "$GITHUB_STEP_SUMMARY" || true
+          exit $status
 
       - name: Only what this pull request changed
         if: github.event_name == 'pull_request'

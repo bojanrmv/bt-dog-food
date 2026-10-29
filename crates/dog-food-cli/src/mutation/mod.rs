@@ -413,107 +413,163 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
     let mut finished = 0;
     for language in [sandbox::Kind::CSharp, sandbox::Kind::Node] {
         let failures = result.failed.len();
-        let mut pending: Vec<&Target> = targets
-            .iter()
-            .filter(|t| sandbox::Kind::of(&t.path) == Some(language))
-            .collect();
-        if language == sandbox::Kind::Node {
-            pending = with_runner(pending, options, &mut result);
-        }
-        if pending.is_empty() {
-            continue;
-        }
-        let scope = match Scope::new(language, &pending, options) {
-            Ok(scope) => scope,
-            Err(err) => {
-                failed(language, err, &pending, &mut result);
-                continue;
-            }
-        };
-        if options.use_cache {
-            let mut found = cache.lookup(&pending, &scope);
-            // A survivor already tested again against these tests is not
-            // tested a third time: renders of other formats stay cheap.
-            let rechecked = if options.rerun_survivors {
-                cache.rechecked(&pending, &scope)
-            } else {
-                HashSet::new()
-            };
-            found.retain(|id, outcome| {
-                !result.outcomes.contains_key(id)
-                    && !(options.rerun_survivors
-                        && outcome.retested_on_rerun()
-                        && !rechecked.contains(id))
-            });
-            let kept = found.keys().filter(|id| rechecked.contains(id)).count();
-            if kept > 0 {
-                result.notes.push(format!("--rerun-survivors: {kept} survivors (marked `cached`) were already tested again, and neither the test files of the chosen test projects nor the test filter changed since, so they come from the cache; tests added in another project or outside the filter count only once the filter or test projects include them (or with --no-cache)"));
-            }
-            result.cached.extend(found.keys().copied());
-            let mut tests = cache.reached_tests(&pending, &scope);
-            tests.retain(|id, _| found.contains_key(id));
-            result.reached.extend(tests);
-            result.outcomes.extend(found);
-        }
-        let open: Vec<usize> = pending
-            .iter()
-            .flat_map(|t| &t.mutants)
-            .map(|m| m.id)
-            .filter(|id| !result.outcomes.contains_key(id))
-            .collect();
-        let mut killed_by = cache::KilledBy::new();
-        if options.cached_only {
-            if !open.is_empty() {
-                result.notes.push(format!(
-                    "--cached: {} mutants have no cached result and were not tested; run without --cached to test them",
-                    open.len()
-                ));
-            }
-            result
-                .untested
-                .extend(open.iter().map(|id| (*id, Untested::NotCached)));
-        } else if !open.is_empty() {
-            let total = pending.iter().map(|t| t.mutants.len()).sum::<usize>();
-            progress(&format!(
-                "{} of {total} mutants come from the cache; testing the other {} (new or changed code, changed tests, or never tested; --cached tests nothing)",
-                total - open.len(),
-                open.len()
-            ));
-            match run_language(&scope, &pending, options, &mut result) {
-                Ok(killers) => killed_by = killers,
-                Err(err) => failed(language, err, &pending, &mut result),
-            }
-        }
-        if result.failed.len() == failures {
+        if run_one(language, targets, options, &mut cache, &mut result)
+            && result.failed.len() == failures
+        {
             finished += 1;
         }
-        // Only what this run tested: cached outcomes keep the evidence they have.
-        let fresh: HashMap<usize, Outcome> = result
-            .outcomes
-            .iter()
-            .filter(|(id, _)| !result.cached.contains(id))
-            .map(|(id, outcome)| (*id, *outcome))
-            .collect();
-        cache.store(
-            &pending,
-            &scope,
-            &fresh,
-            &killed_by,
-            &result.reached_files,
-            &result.reached,
-        );
-        note_left_out(&scope, &pending, &mut result);
     }
     note_filtered(targets, options, &mut result);
     timings(targets, options, &mut cache, &mut result);
     cache.save()?;
     // With nothing else to show, a failure is the whole answer.
-    if finished == 0 {
-        if let Some(first) = result.failed.first() {
-            return Err(first.clone());
-        }
+    match result.failed.first() {
+        Some(first) if finished == 0 => Err(first.clone()),
+        _ => Ok(result),
     }
-    Ok(result)
+}
+
+/// One language's mutants: from the cache where it has them, the rest
+/// tested, and what this run learned stored. False when the language has
+/// no mutants or its tests could not be set up.
+fn run_one(
+    language: sandbox::Kind,
+    targets: &[Target],
+    options: &Options,
+    cache: &mut cache::Cache,
+    result: &mut RunResult,
+) -> bool {
+    let pending = pending(language, targets, options, result);
+    if pending.is_empty() {
+        return false;
+    }
+    let scope = match Scope::new(language, &pending, options) {
+        Ok(scope) => scope,
+        Err(err) => {
+            failed(language, err, &pending, result);
+            return false;
+        }
+    };
+    if options.use_cache {
+        from_cache(cache, &pending, &scope, options, result);
+    }
+    let killed_by = test_open(language, &scope, &pending, options, result);
+    store(cache, &pending, &scope, &killed_by, result);
+    note_left_out(&scope, &pending, result);
+    true
+}
+
+/// The targets in `language`; for TypeScript and JavaScript, only those with a test runner.
+fn pending<'a>(
+    language: sandbox::Kind,
+    targets: &'a [Target],
+    options: &Options,
+    result: &mut RunResult,
+) -> Vec<&'a Target> {
+    let pending: Vec<&Target> = targets
+        .iter()
+        .filter(|t| sandbox::Kind::of(&t.path) == Some(language))
+        .collect();
+    if language == sandbox::Kind::Node {
+        return with_runner(pending, options, result);
+    }
+    pending
+}
+
+/// The outcomes the cache has for these mutants and tests.
+fn from_cache(
+    cache: &mut cache::Cache,
+    pending: &[&Target],
+    scope: &Scope,
+    options: &Options,
+    result: &mut RunResult,
+) {
+    let mut found = cache.lookup(pending, scope);
+    // A survivor already tested again against these tests is not
+    // tested a third time: renders of other formats stay cheap.
+    let rechecked = if options.rerun_survivors {
+        cache.rechecked(pending, scope)
+    } else {
+        HashSet::new()
+    };
+    found.retain(|id, outcome| {
+        let retest =
+            options.rerun_survivors && outcome.retested_on_rerun() && !rechecked.contains(id);
+        !result.outcomes.contains_key(id) && !retest
+    });
+    let kept = found.keys().filter(|id| rechecked.contains(id)).count();
+    if kept > 0 {
+        result.notes.push(format!("--rerun-survivors: {kept} survivors (marked `cached`) were already tested again, and neither the test files of the chosen test projects nor the test filter changed since, so they come from the cache; tests added in another project or outside the filter count only once the filter or test projects include them (or with --no-cache)"));
+    }
+    result.cached.extend(found.keys().copied());
+    let mut tests = cache.reached_tests(pending, scope);
+    tests.retain(|id, _| found.contains_key(id));
+    result.reached.extend(tests);
+    result.outcomes.extend(found);
+}
+
+/// Tests the mutants without an outcome yet (none with `--cached`), and
+/// says which test killed which.
+fn test_open(
+    language: sandbox::Kind,
+    scope: &Scope,
+    pending: &[&Target],
+    options: &Options,
+    result: &mut RunResult,
+) -> cache::KilledBy {
+    let open: Vec<usize> = pending
+        .iter()
+        .flat_map(|t| &t.mutants)
+        .map(|m| m.id)
+        .filter(|id| !result.outcomes.contains_key(id))
+        .collect();
+    if open.is_empty() {
+        return cache::KilledBy::new();
+    }
+    if options.cached_only {
+        result.notes.push(format!(
+            "--cached: {} mutants have no cached result and were not tested; run without --cached to test them",
+            open.len()
+        ));
+        result
+            .untested
+            .extend(open.iter().map(|id| (*id, Untested::NotCached)));
+        return cache::KilledBy::new();
+    }
+    let total = pending.iter().map(|t| t.mutants.len()).sum::<usize>();
+    progress(&format!(
+        "{} of {total} mutants come from the cache; testing the other {} (new or changed code, changed tests, or never tested; --cached tests nothing)",
+        total - open.len(),
+        open.len()
+    ));
+    run_language(scope, pending, options, result).unwrap_or_else(|err| {
+        failed(language, err, pending, result);
+        cache::KilledBy::new()
+    })
+}
+
+/// Stores what this run tested: cached outcomes keep the evidence they have.
+fn store(
+    cache: &mut cache::Cache,
+    pending: &[&Target],
+    scope: &Scope,
+    killed_by: &cache::KilledBy,
+    result: &RunResult,
+) {
+    let fresh: HashMap<usize, Outcome> = result
+        .outcomes
+        .iter()
+        .filter(|(id, _)| !result.cached.contains(id))
+        .map(|(id, outcome)| (*id, *outcome))
+        .collect();
+    cache.store(
+        pending,
+        scope,
+        &fresh,
+        killed_by,
+        &result.reached_files,
+        &result.reached,
+    );
 }
 
 /// Records that `language`'s run failed: its mutants without a result stay
@@ -995,59 +1051,15 @@ fn test_mutants(
     }
     record_reach(&reached, reach, result);
     let mut killers = HashMap::new();
-    let mut solo = Vec::new();
-    if options.no_mix {
-        solo = reached.clone();
+    let solo = if options.no_mix {
+        reached
     } else {
-        // Most mutants fail their first test: each runs with one test first,
-        // and only the survivors with the rest.
-        let first = first_tests(&reached, reach);
-        progress(&format!(
-            "{} mutants are reached by tests: first one test each, {} at a time",
-            reached.len(),
-            options.jobs
-        ));
-        let survivors = run_packs(
-            engine,
-            &reached,
-            &first,
-            options,
-            result,
-            &mut killers,
-            &mut solo,
-        )?;
-        let rest = other_tests(&survivors, reach, &first);
-        let more: Vec<usize> = survivors
-            .into_iter()
-            .filter(|id| rest.by_mutant.contains_key(id))
-            .collect();
-        if !more.is_empty() {
-            progress(&format!("{} survivors: their other tests", more.len()));
-            run_packs(
-                engine,
-                &more,
-                &rest,
-                options,
-                result,
-                &mut killers,
-                &mut solo,
-            )?;
-        }
-    }
+        packed(engine, &reached, reach, options, result, &mut killers)?
+    };
     let runner = Runner::new(engine, reach, options)?;
     for (id, run, tag) in runner.solos(&solo) {
         if let Ran::Done(run) = run? {
-            let expected = reach.by_mutant.get(&id);
-            let (outcome, killed_by) = solo_outcome(&run, &reach.failing, expected);
-            if outcome == Outcome::Killed && crashed(run.0, &run.1, expected) {
-                result.crash_kills.insert(id);
-            }
-            if outcome == Outcome::RuntimeError {
-                if let Some(reason) = engine.crash_reason(&tag) {
-                    result.crash_reasons.insert(id, reason);
-                }
-            }
-            result.outcomes.insert(id, outcome);
+            let killed_by = solo_result(engine, id, &run, &tag, reach, result);
             killers.insert(id, killed_by);
         }
     }
@@ -1055,6 +1067,62 @@ fn test_mutants(
     result.test_runs += started;
     result.retries += again;
     Ok(killers)
+}
+
+/// Runs the reached mutants in packs: most fail their first test, so each
+/// runs with one test first, and only the survivors with the rest. Returns
+/// the mutants the packs could not decide, for solo runs.
+fn packed(
+    engine: &dyn Engine,
+    reached: &[usize],
+    reach: &Reach,
+    options: &Options,
+    result: &mut RunResult,
+    killers: &mut HashMap<usize, Vec<String>>,
+) -> Result<Vec<usize>, String> {
+    let mut solo = Vec::new();
+    let first = first_tests(reached, reach);
+    progress(&format!(
+        "{} mutants are reached by tests: first one test each, {} at a time",
+        reached.len(),
+        options.jobs
+    ));
+    let survivors = run_packs(engine, reached, &first, options, result, killers, &mut solo)?;
+    let rest = other_tests(&survivors, reach, &first);
+    let more: Vec<usize> = survivors
+        .into_iter()
+        .filter(|id| rest.by_mutant.contains_key(id))
+        .collect();
+    if !more.is_empty() {
+        progress(&format!("{} survivors: their other tests", more.len()));
+        run_packs(engine, &more, &rest, options, result, killers, &mut solo)?;
+    }
+    Ok(solo)
+}
+
+/// Records a solo run's outcome, a crash that killed it, and why a run
+/// crashed; returns the tests that killed it.
+fn solo_result(
+    engine: &dyn Engine,
+    id: usize,
+    run: &SoloRun,
+    tag: &str,
+    reach: &Reach,
+    result: &mut RunResult,
+) -> Vec<String> {
+    let expected = reach.by_mutant.get(&id);
+    let (outcome, killed_by) = solo_outcome(run, &reach.failing, expected);
+    if outcome == Outcome::Killed && crashed(run.0, &run.1, expected) {
+        result.crash_kills.insert(id);
+    }
+    if let Some(reason) = (outcome == Outcome::RuntimeError)
+        .then(|| engine.crash_reason(tag))
+        .flatten()
+    {
+        result.crash_reasons.insert(id, reason);
+    }
+    result.outcomes.insert(id, outcome);
+    killed_by
 }
 
 /// Records which tests reach each mutant, then packs them (or, with

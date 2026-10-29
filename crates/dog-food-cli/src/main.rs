@@ -878,19 +878,7 @@ fn run_mutants(
     settings: &Settings,
     mut scope: Vec<String>,
 ) -> Result<ExitCode, Failure> {
-    let others = targets
-        .iter()
-        .filter(|t| !mutation::runnable(&t.path))
-        .count();
-    if others > 0 {
-        tellln!("note: {others} Rust functions are skipped; use cargo-mutants for Rust");
-    }
-    targets.retain(|t| mutation::runnable(&t.path) && !t.mutants.is_empty());
-    if targets.is_empty() {
-        return Err(usage(
-            "no C# or TypeScript functions with mutants to run".to_string(),
-        ));
-    }
+    runnable_only(&mut targets)?;
     let options = mutation_options(args, settings);
     if options.low_priority {
         mutation::priority::lower().map_err(usage)?;
@@ -909,24 +897,43 @@ fn run_mutants(
         ));
     }
     let text = with_scope(text, &scope, args.out.format);
-    // Below `break` fails; no score at all never does.
-    let score = mutate::overall(&targets, &result);
-    let code = if !result.failed.is_empty() {
-        EXIT_USAGE
-    } else if result.budget_hit() {
-        EXIT_BUDGET
-    } else {
-        fail_code(
-            thresholds
-                .fail
-                .is_some_and(|limit| score.is_some_and(|s| s < limit)),
-        )
-    };
+    let code = run_code(&targets, &result, thresholds.fail);
     finish(text, &args.out, code)?;
     for failure in &result.failed {
         eprintln!("error: {failure} (the report has the other results)");
     }
     Ok(ExitCode::from(code))
+}
+
+/// Keeps the functions a mutation run can test (C#, TypeScript, JavaScript) that have mutants.
+fn runnable_only(targets: &mut Vec<mutate::Target>) -> Result<(), Failure> {
+    let others = targets
+        .iter()
+        .filter(|t| !mutation::runnable(&t.path))
+        .count();
+    if others > 0 {
+        tellln!("note: {others} Rust functions are skipped; use cargo-mutants for Rust");
+    }
+    targets.retain(|t| mutation::runnable(&t.path) && !t.mutants.is_empty());
+    if targets.is_empty() {
+        return Err(usage(
+            "no C# or TypeScript functions with mutants to run".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// A run's exit code: a language that failed, the budget, or a score below
+/// `break` (no score at all never fails).
+fn run_code(targets: &[mutate::Target], result: &mutation::RunResult, fail: Option<f64>) -> u8 {
+    if !result.failed.is_empty() {
+        return EXIT_USAGE;
+    }
+    if result.budget_hit() {
+        return EXIT_BUDGET;
+    }
+    let score = mutate::overall(targets, result);
+    fail_code(fail.is_some_and(|limit| score.is_some_and(|s| s < limit)))
 }
 
 /// A branch that only changes tests changes what the mutants of the code
@@ -955,32 +962,36 @@ fn add_tested_by_changed_tests(
         let known = wanted
             .iter()
             .any(|w| w.file == file && changes::stable_name(&w.name) == name);
-        if !known {
-            // --exclude and [analyze] exclude hold here as in the diff.
-            let found: Vec<mutate::Wanted> = mutate::function_named(root, &file, &name)
-                .into_iter()
-                .filter(|w| !settings.excludes.is_excluded(&w.path, false))
-                .collect();
-            added += found.len();
-            if !found.is_empty() {
-                through.extend(tests);
-            }
-            wanted.extend(found);
+        if known {
+            continue;
         }
+        // --exclude and [analyze] exclude hold here as in the diff.
+        let found: Vec<mutate::Wanted> = mutate::function_named(root, &file, &name)
+            .into_iter()
+            .filter(|w| !settings.excludes.is_excluded(&w.path, false))
+            .collect();
+        added += found.len();
+        through.extend(tests.into_iter().filter(|_| !found.is_empty()));
+        wanted.extend(found);
     }
     if added > 0 {
-        let shown: Vec<&str> = through.iter().take(5).map(String::as_str).collect();
-        let more = if through.len() > shown.len() {
-            ", ..."
-        } else {
-            ""
-        };
-        scope.push(format!(
-            "tests: {added} functions outside the branch's diff come in because a test file it changed reaches them ({}{more}); their survivors are listed apart, and they count in the score",
-            shown.join(", ")
-        ));
+        scope.push(tested_through(added, &through));
     }
     Ok(())
+}
+
+/// The scope line for functions a changed test file brought in.
+fn tested_through(added: usize, through: &BTreeSet<String>) -> String {
+    let shown: Vec<&str> = through.iter().take(5).map(String::as_str).collect();
+    let more = if through.len() > shown.len() {
+        ", ..."
+    } else {
+        ""
+    };
+    format!(
+        "tests: {added} functions outside the branch's diff come in because a test file it changed reaches them ({}{more}); their survivors are listed apart, and they count in the score",
+        shown.join(", ")
+    )
 }
 
 /// The functions `dgf changes` reports for this branch.

@@ -70,18 +70,23 @@ namespace DogFood.Mutation
             }
             foreach (var frame in frames)
             {
-                var method = frame.GetMethod();
-                if (method == null || method.DeclaringType == typeof(DgfMutants))
-                {
-                    continue;
-                }
-                // IsConstructor is false for a static constructor: match its name.
-                if (method.Name == System.Reflection.ConstructorInfo.TypeConstructorName || FillsLazily(method))
+                if (RunsOnce(frame.GetMethod()))
                 {
                     return true;
                 }
             }
             return false;
+        }
+
+        /// A static constructor or a lazy cache, other than dog-food's own.
+        private static bool RunsOnce(System.Reflection.MethodBase method)
+        {
+            if (method == null || method.DeclaringType == typeof(DgfMutants))
+            {
+                return false;
+            }
+            // IsConstructor is false for a static constructor: match its name.
+            return method.Name == System.Reflection.ConstructorInfo.TypeConstructorName || FillsLazily(method);
         }
 
         /// Code that runs once per key or value and is cached for every caller
@@ -100,21 +105,25 @@ namespace DogFood.Mutation
                 return false;
             }
             var name = type.Namespace + "." + type.Name;
-            switch (name)
-            {
-                case "System.Runtime.CompilerServices.ConditionalWeakTable`2":
-                case "System.Lazy`1":
-                case "System.Threading.LazyInitializer":
-                case "Microsoft.EntityFrameworkCore.Infrastructure.ModelSource":
-                    return true;
-                case "System.Collections.Concurrent.ConcurrentDictionary`2":
-                    return method.Name == "GetOrAdd";
-                case "Microsoft.Extensions.Caching.Memory.CacheExtensions":
-                    return method.Name.StartsWith("GetOrCreate");
-                default:
-                    return false;
-            }
+            string prefix;
+            return LazyTypes.Contains(name) || (LazyMethods.TryGetValue(name, out prefix) && method.Name.StartsWith(prefix));
         }
+
+        /// Types whose every method fills a value once.
+        private static readonly System.Collections.Generic.HashSet<string> LazyTypes = new System.Collections.Generic.HashSet<string>
+        {
+            "System.Runtime.CompilerServices.ConditionalWeakTable`2",
+            "System.Lazy`1",
+            "System.Threading.LazyInitializer",
+            "Microsoft.EntityFrameworkCore.Infrastructure.ModelSource",
+        };
+
+        /// Types where only the methods starting with a name do.
+        private static readonly System.Collections.Generic.Dictionary<string, string> LazyMethods = new System.Collections.Generic.Dictionary<string, string>
+        {
+            { "System.Collections.Concurrent.ConcurrentDictionary`2", "GetOrAdd" },
+            { "Microsoft.Extensions.Caching.Memory.CacheExtensions", "GetOrCreate" },
+        };
 
         private static int ReadActive()
         {
