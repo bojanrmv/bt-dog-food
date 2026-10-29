@@ -970,17 +970,7 @@ fn secs(since: Instant) -> f64 {
     since.elapsed().as_secs_f64()
 }
 
-/// FNV-1a, 64 bit: stable across Rust versions and machines, unlike std's hasher.
-pub fn fnv(parts: &[&[u8]]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for part in parts {
-        for byte in part.iter().chain(&[0xff]) {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    hash
-}
+pub use dog_food_core::fnv;
 
 /// A run that the budget stopped or never started.
 enum Ran<T> {

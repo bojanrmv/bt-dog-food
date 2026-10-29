@@ -260,6 +260,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dog-food-dup"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dog-food-core",
+ "ignore",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tree-sitter",
+]
+
+[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

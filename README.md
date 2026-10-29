@@ -88,6 +88,7 @@ dgf changes                                    # only what your branch changed, 
 | Adopt it in old code without fixing everything first | `dgf baseline`, `// dgf-ignore: reason` | [Workflows](docs/workflows.md#adopting-in-existing-code) |
 | Track complexity over time | `dgf analyze --save-history`, `dgf history` | [Workflows](docs/workflows.md#history) |
 | Check that tests would catch bugs (mutation testing, C# and TypeScript/JavaScript) | `dgf mutate --changes --run` | [Mutation testing](docs/mutation-testing.md) |
+| Find copied code and how to unite it | `dgf-dup` | [Duplication](docs/duplication.md) |
 | Gate CI, annotate PRs | `--format markdown`, `--format sarif`, exit codes | [Workflows](docs/workflows.md#ci) |
 | See scores in the editor | VS Code extension in `editors/vscode` | [Integrations](docs/integrations.md#vs-code) |
 | Let Claude Code (or another agent) use it | `--format agent`, `dgf skill install` | [Integrations](docs/integrations.md#ai-assistants) |

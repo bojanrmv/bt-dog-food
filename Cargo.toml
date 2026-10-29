@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dog-food-core", "crates/dog-food-cli"]
+members = ["crates/dog-food-core", "crates/dog-food-cli", "crates/dog-food-dup"]
 
 [workspace.package]
 version = "0.1.0"

@@ -80,6 +80,27 @@ fn analyze(
     Ok((functions, tree.root_node().has_error()))
 }
 
+/// FNV-1a, 64 bit, over parts kept apart: stable across Rust versions and
+/// machines, unlike std's hasher, so it can key caches on disk.
+pub fn fnv(parts: &[&[u8]]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        for byte in part.iter().chain(&[0xff]) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+/// The syntax tree of `source`, and the text it was parsed from (`source`,
+/// or a same-length form the grammar knows when it predates newer syntax),
+/// for tools that work on the tree themselves.
+pub fn parse_tree(source: &str, language: Language) -> Result<(tree_sitter::Tree, String), Error> {
+    let (tree, text) = parse_prepared(source, language, "<memory>")?;
+    Ok((tree, text.into_owned()))
+}
+
 /// Parses `source`. When it has syntax errors and the language knows newer
 /// syntax its grammar does not (see `lang::prepare`), the source is parsed
 /// again in those forms, which keep every byte in place, and the tree with
