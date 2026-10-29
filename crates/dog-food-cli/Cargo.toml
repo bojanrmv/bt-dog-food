@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 dog-food-core.workspace = true
+dog-food-dup.workspace = true
 clap.workspace = true
 ignore.workspace = true
 globset.workspace = true

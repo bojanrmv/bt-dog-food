@@ -321,3 +321,188 @@ fn decisions_leave_out_reviewed_groups_by_their_stable_id() {
     assert_eq!(report.duplicated_lines, 0);
     assert_eq!(report.decisions[&id].note, "kept apart on purpose");
 }
+
+/// One computation in TypeScript, its steps in the given order, with `extra`
+/// statements between them.
+fn quote(order: [usize; 5], name: &str, extra: &[&str]) -> String {
+    let steps = [
+        "const subtotal = order.lines.reduce((sum, l) => sum + l.price * l.quantity, 0);",
+        "const tax = subtotal * order.region.taxRate;",
+        "const shipping = order.lines.length > 3 ? 0 : order.region.shipping;",
+        "const discount = order.customer.isMember ? subtotal * 0.05 : 0;",
+        "const total = subtotal + tax + shipping - discount;",
+    ];
+    let mut body = Vec::new();
+    for (n, &k) in order.iter().enumerate() {
+        body.push(format!("  {}", steps[k]));
+        if let Some(line) = extra.get(n) {
+            body.push(format!("  {line}"));
+        }
+    }
+    format!(
+        "export function {name}(order: Order): string {{\n{}\n  return `${{order.id}}: ${{total}}`;\n}}\n",
+        body.join("\n")
+    )
+}
+
+#[test]
+fn the_same_statements_in_another_order_or_mixed_with_others_are_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Independent steps swapped, and a log and metrics calls in between.
+    let a = quote([0, 1, 2, 3, 4], "summary", &["", "log.write(order.id);"]);
+    let b = quote([0, 3, 2, 1, 4], "invoice", &["metrics.count('invoice');"]);
+    write(root, "a.ts", &a);
+    write(root, "b.ts", &b);
+    let found = run(root, false);
+    let class = found
+        .classes
+        .iter()
+        .find(|c| c.evidence == "dependence")
+        .unwrap_or_else(|| panic!("{:#?}", found.classes));
+    assert_eq!(class.copies.len(), 2);
+    assert!(class.statements >= 5, "{}", class.statements);
+    // The calls between are not part of it, and the report says where they are.
+    assert!(
+        class.copies.iter().all(|c| c.parts.len() > 1),
+        "{:?}",
+        class.copies
+    );
+    assert!(
+        class.cautions.iter().any(|c| c.contains("sit between")),
+        "{:?}",
+        class.cautions
+    );
+    assert!(class.unite.contains("another order"), "{}", class.unite);
+}
+
+#[test]
+fn statements_that_only_look_alike_are_not_a_reordered_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Independent statements of one shape, on other members: configuration, not a copy.
+    let config = |name: &str, fields: [&str; 5]| {
+        let lines: Vec<String> = fields
+            .iter()
+            .map(|f| format!("  builder.property(\"{f}\").isRequired().hasMaxLength(255);"))
+            .collect();
+        format!(
+            "export function {name}(builder: Builder) {{\n{}\n}}\n",
+            lines.join("\n")
+        )
+    };
+    write(
+        root,
+        "a.ts",
+        &config("orders", ["id", "customer", "status", "total", "notes"]),
+    );
+    write(
+        root,
+        "b.ts",
+        &config("members", ["email", "name", "phone", "notes", "id"]),
+    );
+    let found = run(root, false);
+    assert!(
+        !found.classes.iter().any(|c| c.evidence == "dependence"),
+        "{:#?}",
+        found.classes
+    );
+}
+
+#[test]
+fn with_coverage_the_riskiest_copy_ranks_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Plain copies that save more lines, in simple functions with tests.
+    let plain = |name: &str| {
+        let lines: Vec<String> = (0..8)
+            .map(|n| format!("  const v{n} = order.items[{n}].price * order.items[{n}].quantity + order.fee;"))
+            .collect();
+        format!(
+            "export function {name}(order: Order): number {{\n{}\n  return v0 + v7;\n}}\n",
+            lines.join("\n")
+        )
+    };
+    // A shorter copy in branchy functions nobody tests.
+    let branchy = |name: &str| {
+        format!(
+            "export function {name}(order: Order): string {{
+  if (order.paid && order.items.length > 3) {{ return 'bulk ' + order.id; }}
+  if (order.cancelled || order.refunded) {{ return 'void ' + order.id; }}
+  if (order.region === 'eu' && order.vat > 0) {{ return 'eu ' + order.id + order.vat; }}
+  while (order.retries > 0) {{ order.retries = order.retries - 1; }}
+  return order.id;
+}}
+"
+        )
+    };
+    write(root, "plain.ts", &format!("{}{}", plain("a"), plain("b")));
+    let risky = write(
+        root,
+        "risky.ts",
+        &format!("{}{}", branchy("c"), branchy("d")),
+    );
+    let plain_file = root.join("plain.ts");
+    let lcov = format!(
+        "SF:{}\n{}end_of_record\nSF:{}\n{}end_of_record\n",
+        plain_file.display(),
+        (1..=22).map(|n| format!("DA:{n},1\n")).collect::<String>(),
+        risky.display(),
+        (1..=16).map(|n| format!("DA:{n},0\n")).collect::<String>(),
+    );
+    let report_file = write(root, "coverage/lcov.info", &lcov);
+    let mut found = run(root, false);
+    assert!(found.classes.len() >= 2, "{:#?}", found.classes);
+    assert!(
+        found.classes[0].copies[0].file.starts_with("plain"),
+        "by lines saved first"
+    );
+    let coverage = dog_food_core::coverage::Coverage::load(&[report_file]).unwrap();
+    dog_food_dup::risk::assess(&mut found, root, Some(&coverage));
+    dog_food_dup::risk::rank(&mut found);
+    let first = &found.classes[0];
+    assert!(
+        first.copies[0].file.starts_with("risky"),
+        "{:#?}",
+        found.classes
+    );
+    let risk = first.risk.as_ref().unwrap();
+    assert_eq!(risk.coverage, Some(0.0));
+    assert!(risk.complexity >= 5, "{risk:?}");
+    assert!(risk.crap.unwrap() > 30.0, "{risk:?}");
+    let plain_risk = found
+        .classes
+        .iter()
+        .find(|c| c.copies[0].file.starts_with("plain"))
+        .unwrap();
+    assert_eq!(plain_risk.risk.as_ref().unwrap().coverage, Some(1.0));
+}
+
+#[test]
+fn a_long_expression_copied_into_different_statements_is_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let chain = "orders
+    .filter((o) => o.shopId === shopId && o.createdAt >= since && !o.deleted)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .map((o) => ({ id: o.id, total: o.lines.reduce((s, l) => s + l.price * l.quantity, 0), customer: o.customer.name }))
+    .slice(0, limit)";
+    let a = format!(
+        "export function recent(orders: Order[], shopId: string, since: number, limit: number) {{\n  log('recent');\n  const rows = {chain};\n  return rows;\n}}\n"
+    );
+    let b = format!(
+        "export function exportRows(orders: Order[], shopId: string, since: number, limit: number, out: Sink) {{\n  let count = 0;\n  for (const row of {chain}) {{\n    out.write(row);\n    count++;\n  }}\n  return count;\n}}\n"
+    );
+    write(root, "a.ts", &a);
+    write(root, "b.ts", &b);
+    let found = run(root, false);
+    let class = found
+        .classes
+        .iter()
+        .find(|c| c.statements == 1 && c.template.starts_with("orders"))
+        .unwrap_or_else(|| panic!("{:#?}", found.classes));
+    assert_eq!(class.clone_type, 1);
+    assert_eq!(class.copies.len(), 2);
+    // Not also found as statements: the statements around it differ.
+    assert_eq!(found.classes.len(), 1, "{:#?}", found.classes);
+}

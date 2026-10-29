@@ -182,6 +182,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
         <select id="project" aria-label="Project"><option value="">All projects</option></select>
         <select id="sort" aria-label="Sort">
           <option value="saves">Most lines saved</option>
+          <option value="risk">Riskiest (CRAP, complexity)</option>
           <option value="copies">Most copies</option>
           <option value="lines">Longest</option>
           <option value="type">By kind</option>
@@ -222,6 +223,10 @@ const KINDS = [
 ];
 const kindKey = (c) => c.kind === "repeated" ? "r" : c.kind === "query" ? "q" : String(c.type);
 const kindOf = (c) => KINDS.find((k) => k.key === kindKey(c)) || KINDS[1];
+const riskScore = (c) => c.risk ? (c.risk.crap ?? c.risk.complexity) : 0;
+const riskText = (r) => r.crap != null
+  ? `CRAP ${Math.round(r.crap)} (complexity ${r.complexity}, ${Math.round(r.coverage * 100)}% covered)`
+  : `complexity ${r.complexity}`;
 const entityName = (c) => (c.entity || "").split(".").pop();
 const STATUS = { "to-fix": "To fix", intentional: "Intentional", "false-positive": "False positive" };
 const holeColor = (n) => `color: hsl(${(n * 83 + 200) % 360} 70% var(--hole-l)); background: hsl(${(n * 83 + 200) % 360} 70% var(--hole-bg-l));`;
@@ -366,6 +371,7 @@ function visible() {
   });
   const by = {
     saves: (a, b) => b.saves - a.saves,
+    risk: (a, b) => riskScore(b) - riskScore(a) || b.saves - a.saves,
     copies: (a, b) => b.copies.length - a.copies.length || b.saves - a.saves,
     lines: (a, b) => b.lines - a.lines,
     type: (a, b) => KINDS.indexOf(kindOf(a)) - KINDS.indexOf(kindOf(b)) || b.saves - a.saves,
@@ -439,6 +445,9 @@ function renderDetail(c) {
       el("div", { class: "badges" },
         el("span", { class: "tag" }, el("span", { class: "key", style: `background:${k.color}` }), `${k.name}`),
         c.similarity ? el("span", { class: "tag", text: `${Math.round(c.similarity * 100)}% alike` }) : null,
+        c.evidence === "dependence" ? el("span", { class: "tag", text: "same data flow, other order or mixed in" }) : null,
+        c.risk ? el("span", { class: "tag", title: `the riskiest copy, in ${c.risk.function}`, text: riskText(c.risk) }) : null,
+        c.confirmation ? el("span", { class: "tag", title: c.confirmation.reason || "", text: c.confirmation.status === "confirmed" ? `confirmed on ${fmt(c.confirmation.tries)} inputs` : "not run" }) : null,
         el("span", { class: "tag", text: c.saves > 0 ? `saves ~${fmt(c.saves)} lines` : "saves little" }),
         el("span", { class: "tag", text: `id ${c.id}` })),
       status, note),
@@ -447,6 +456,13 @@ function renderDetail(c) {
     holesSection(c),
     listSection("Where the copies part ways", (c.differences || []).map(difference(c))),
     listSection("Same behaviour after", (c.rules || []).map((r) => el("li", { text: r }))),
+    c.confirmation && c.confirmation.status !== "confirmed" ? listSection("Not confirmed by running", [el("li", { text: c.confirmation.reason || "" })]) : null,
+    c.signature ? listSection("As a method (from the compiler's data flow)", [
+      el("li", { text: `takes (${c.signature.parameters.join(", ")})` }),
+      el("li", { text: `returns ${c.signature.returns.length ? c.signature.returns.join(", ") : c.signature.exits.includes("return") ? "what its return statements return" : "nothing"}` }),
+      c.signature.exits.length ? el("li", { text: `jumps out with ${c.signature.exits.join(", ")}` }) : null,
+      c.signature.usesThis ? el("li", { text: "needs this: an instance method" }) : null,
+    ].filter(Boolean)) : null,
     el("div", { class: "section" }, el("div", { class: "label", text: "How to unite" }), el("div", { class: "unite", text: c.unite }),
       ...c.cautions.map((x) => el("div", { class: "caution", text: x }))),
     listSection("All copies", c.copies.map((x) => el("li", {}, el("code", { text: `${x.file}:${x.startLine}-${x.endLine}` }), " ",
@@ -474,15 +490,17 @@ function compareSection(c) {
   return section;
 }
 
-// Two copies, the lines only one of them has marked.
+// Two copies, the lines only one of them has marked: for a copy mixed with
+// other statements, the lines that are not part of it.
 function sides(a, b) {
   const la = (a.code || "").split("\n"), lb = (b.code || "").split("\n");
-  const [ka, kb] = common(la.map(squash), lb.map(squash));
+  const [ka, kb] = a.parts && a.parts.length ? [inParts(a, la), inParts(b, lb)] : common(la.map(squash), lb.map(squash));
   const side = (copy, lines, kept) => el("div", { class: "side" },
     el("div", { class: "where", text: `${copy.file}:${copy.startLine}-${copy.endLine}${copy.function ? "  " + copy.function : ""}` }),
     el("pre", {}, ...lines.map((line, i) => el("span", { class: "ln" + (kept.has(i) ? "" : " diff"), "data-n": String(copy.startLine + i), text: line || " " }))));
   return a === b ? [side(a, la, new Set(la.keys()))] : [side(a, la, ka), side(b, lb, kb)];
 }
+const inParts = (copy, lines) => new Set([...lines.keys()].filter((i) => (copy.parts || []).some(([s, e]) => copy.startLine + i >= s && copy.startLine + i <= e)));
 const squash = (line) => line.trim().replace(/\s+/g, " ");
 // Lines on a longest common subsequence: the ones both copies share.
 function common(a, b) {
@@ -508,7 +526,10 @@ function templateSection(c) {
     else if (part.startsWith("⟪")) pre.append(el("span", { class: "gap", title: "not in every copy", text: part.slice(1, -1) }));
     else pre.append(part);
   }
-  const title = c.kind === "query" ? `Suggested extension, for ${entityName(c)}Queries in the domain` : c.type === 4 ? "What every copy computes" : "Shared template (⟨n⟩ where the copies differ)";
+  const title = c.kind === "query" ? `Suggested extension, for ${entityName(c)}Queries in the domain`
+    : c.type === 4 ? "What every copy computes"
+    : c.evidence === "dependence" ? "The statements every copy has (… where others sit between)"
+    : "Shared template (⟨n⟩ where the copies differ)";
   return el("div", { class: "section" }, el("div", { class: "label", text: title }), pre);
 }
 

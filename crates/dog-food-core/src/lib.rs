@@ -13,6 +13,7 @@
 //! # Ok::<(), dog_food_core::Error>(())
 //! ```
 
+pub mod coverage;
 mod lang;
 mod model;
 pub mod mutate;

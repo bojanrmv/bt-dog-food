@@ -235,6 +235,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "dog-food-core",
+ "dog-food-dup",
  "globset",
  "ignore",
  "jsonschema",
@@ -250,8 +251,11 @@ dependencies = [
 name = "dog-food-core"
 version = "0.1.0"
 dependencies = [
+ "ignore",
+ "quick-xml",
  "regex",
  "serde",
+ "tempfile",
  "thiserror",
  "tree-sitter",
  "tree-sitter-c-sharp",

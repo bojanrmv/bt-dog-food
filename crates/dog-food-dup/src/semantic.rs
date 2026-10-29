@@ -5,15 +5,24 @@
 //! the syntactic ones in one report.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::{duplicated, CloneClass, Copy, Report};
+use crate::{duplicated, CloneClass, Confirmation, Copy, Report};
 
 #[derive(Deserialize)]
 struct Found {
     classes: Vec<Class>,
+    /// With `--confirm`: classes an input proved wrong, left out.
+    #[serde(default)]
+    disproved: Vec<Disproved>,
+}
+
+#[derive(Deserialize)]
+struct Disproved {
+    copies: Vec<Place>,
+    example: String,
 }
 
 #[derive(Deserialize)]
@@ -33,6 +42,8 @@ struct Class {
     cautions: Vec<String>,
     #[serde(default)]
     rules: Vec<String>,
+    #[serde(default)]
+    confirmation: Option<Confirmation>,
 }
 
 #[derive(Deserialize)]
@@ -63,32 +74,164 @@ pub fn command(engine: Option<&Path>) -> Command {
     }
 }
 
+/// What the engine is asked: scan test code too; run each type-4 class's
+/// methods on generated inputs (`--confirm`); and, once the syntactic scan
+/// is done, what its C# copies take and give as methods (see [`finish_with`]).
+#[derive(Clone, Copy, Default)]
+pub struct Ask {
+    pub tests: bool,
+    pub confirm: bool,
+    pub regions: bool,
+}
+
+/// What a C# copy takes and gives if it is extracted into a method, from
+/// the compiler's data flow: its parameters (locals and parameters it reads
+/// that are set before it), what it returns (those it sets that are read
+/// after it), the jumps out of it, and whether it needs `this`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Signature {
+    pub parameters: Vec<String>,
+    pub returns: Vec<String>,
+    pub exits: Vec<String>,
+    pub uses_this: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Region<'a> {
+    file: &'a str,
+    start_line: usize,
+    end_line: usize,
+}
+
 /// Runs the engine on `paths` and returns its classes, paths relative to `root`.
 pub fn classes(
+    engine: Command,
+    paths: &[PathBuf],
+    root: &Path,
+    ask: Ask,
+) -> Result<Vec<CloneClass>, String> {
+    finish(start(engine, paths, root, ask)?)
+}
+
+/// Starts the engine on `paths`, so it runs while the syntactic scan does.
+pub fn start(
     mut engine: Command,
     paths: &[PathBuf],
     root: &Path,
-    tests: bool,
-) -> Result<Vec<CloneClass>, String> {
+    ask: Ask,
+) -> Result<Child, String> {
     engine.args(paths).arg("--root").arg(root);
-    if tests {
+    if ask.tests {
         engine.arg("--tests");
     }
-    let output = engine.output().map_err(|err| {
-        format!(
-            "could not start the C# engine {:?} ({err}); install it (see docs/duplication.md) or point --semantic-engine at it",
-            engine.get_program()
-        )
-    })?;
+    if ask.confirm {
+        engine.arg("--confirm");
+    }
+    if ask.regions {
+        engine.arg("--regions").stdin(Stdio::piped());
+    } else {
+        engine.stdin(Stdio::null());
+    }
+    engine
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            format!(
+                "could not start the C# engine {:?} ({err}); install it (see docs/duplication.md) or point --semantic-engine at it",
+                engine.get_program()
+            )
+        })
+}
+
+/// Waits for an engine started with [`start`] and reads its classes.
+pub fn finish(engine: Child) -> Result<Vec<CloneClass>, String> {
+    Ok(read(wait(engine)?)?.0)
+}
+
+/// Like [`finish`], for an engine started with `regions`: sends it the
+/// first copy of each syntactic C# class in `report`, and sets each class's
+/// signature from the answer.
+pub fn finish_with(mut engine: Child, report: &mut Report) -> Result<Vec<CloneClass>, String> {
+    let asked: Vec<usize> = (0..report.classes.len())
+        .filter(|&n| {
+            let c = &report.classes[n];
+            c.clone_type <= 3 && c.kind == "copies" && c.copies[0].file.ends_with(".cs")
+        })
+        .collect();
+    let regions: Vec<Region> = asked
+        .iter()
+        .map(|&n| {
+            let copy = &report.classes[n].copies[0];
+            Region {
+                file: &copy.file,
+                start_line: copy.start_line,
+                end_line: copy.end_line,
+            }
+        })
+        .collect();
+    let text = serde_json::to_string(&regions).expect("regions serialize");
+    // Written from its own thread: the engine may be writing its report meanwhile.
+    let writer = engine.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            let _ = stdin.write_all(text.as_bytes());
+        })
+    });
+    let output = wait(engine)?;
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
+    let (classes, signatures) = read(output)?;
+    for (n, signature) in asked.into_iter().zip(signatures) {
+        report.classes[n].signature = signature;
+    }
+    Ok(classes)
+}
+
+fn wait(engine: Child) -> Result<std::process::Output, String> {
+    let output = engine
+        .wait_with_output()
+        .map_err(|err| format!("the C# engine: {err}"))?;
     if !output.status.success() {
         return Err(format!(
             "the C# engine failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let found: Found = serde_json::from_slice(&output.stdout)
+    Ok(output)
+}
+
+/// The report, and the answer about regions when one follows it.
+type Read = (Vec<CloneClass>, Vec<Option<Signature>>);
+
+fn read(output: std::process::Output) -> Result<Read, String> {
+    let mut documents =
+        serde_json::Deserializer::from_slice(&output.stdout).into_iter::<serde_json::Value>();
+    let report = documents
+        .next()
+        .ok_or("the C# engine wrote no report")?
         .map_err(|err| format!("the C# engine's report: {err}"))?;
-    Ok(found.classes.into_iter().map(class).collect())
+    let found: Found =
+        serde_json::from_value(report).map_err(|err| format!("the C# engine's report: {err}"))?;
+    let signatures = match documents.next() {
+        Some(answer) => {
+            serde_json::from_value(answer.map_err(|err| format!("the C# engine's regions: {err}"))?)
+                .map_err(|err| format!("the C# engine's regions: {err}"))?
+        }
+        None => Vec::new(),
+    };
+    for wrong in &found.disproved {
+        let functions: Vec<&str> = wrong.copies.iter().map(|c| c.function.as_str()).collect();
+        eprintln!(
+            "dgf-dup: left out, running them disproved it: {} ({})",
+            functions.join(" vs "),
+            wrong.example
+        );
+    }
+    Ok((found.classes.into_iter().map(class).collect(), signatures))
 }
 
 fn class(c: Class) -> CloneClass {
@@ -110,6 +253,7 @@ fn class(c: Class) -> CloneClass {
                 function: Some(p.function),
                 changed: false,
                 code: p.code.unwrap_or_default(),
+                parts: Vec::new(),
             })
             .collect(),
         lines: c.lines,
@@ -122,6 +266,9 @@ fn class(c: Class) -> CloneClass {
         cautions: c.cautions,
         differences: Vec::new(),
         rules: c.rules,
+        confirmation: c.confirmation,
+        risk: None,
+        signature: None,
     }
 }
 

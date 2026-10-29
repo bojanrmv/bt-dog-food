@@ -287,7 +287,11 @@ public static class Lower
         return Canon.Lambda($"lambda:{s.Depth}", body);
     }
 
-    /// <summary><c>new T(a) { X = x, Y = y }</c>: the constructor's arguments, then each member set, in order.</summary>
+    /// <summary>
+    /// <c>new T(a) { X = x, Y = y }</c>: the constructor's arguments, then
+    /// each member set, in order; a condition in any of them is lifted out,
+    /// so <c>new T(c ? a : b)</c> is <c>c ? new T(a) : new T(b)</c>.
+    /// </summary>
     static Node Creation(IObjectCreationOperation op, Scope s)
     {
         var args = op.Arguments.Select(a => Expr(a.Value, s)).ToImmutableArray();
@@ -295,16 +299,16 @@ public static class Lower
         {
             args = args.AddRange(Initialized(initializer.Initializers, s));
         }
-        return new Node("new:" + Types.Symbol(op.Constructor ?? (ISymbol?)op.Type), args);
+        return Canon.Make("new:" + Types.Symbol(op.Constructor ?? (ISymbol?)op.Type), args);
     }
 
     /// <summary>Member sets of an initializer as <c>init:Member(value)</c>; <c>Add</c> calls as <c>add(value)</c>.</summary>
     static ImmutableArray<Node> Initialized(ImmutableArray<IOperation> initializers, Scope s) =>
         initializers.Select(i => i switch
         {
-            ISimpleAssignmentOperation { Target: IPropertyReferenceOperation { Arguments.Length: 0 } p } set => new Node("init:" + Types.Symbol(p.Property), Expr(set.Value, s)),
-            ISimpleAssignmentOperation { Target: IFieldReferenceOperation f } set => new Node("init:" + Types.Symbol(f.Field), Expr(set.Value, s)),
-            IInvocationOperation { TargetMethod.Name: "Add" } add => new Node("add", add.Arguments.Select(a => Expr(a.Value, s)).ToImmutableArray()),
+            ISimpleAssignmentOperation { Target: IPropertyReferenceOperation { Arguments.Length: 0 } p } set => Canon.Make("init:" + Types.Symbol(p.Property), Expr(set.Value, s)),
+            ISimpleAssignmentOperation { Target: IFieldReferenceOperation f } set => Canon.Make("init:" + Types.Symbol(f.Field), Expr(set.Value, s)),
+            IInvocationOperation { TargetMethod.Name: "Add" } add => Canon.Make("add", add.Arguments.Select(a => Expr(a.Value, s)).ToImmutableArray()),
             _ => throw new UnsupportedException("a nested initializer"),
         }).ToImmutableArray();
 

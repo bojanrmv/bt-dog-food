@@ -18,7 +18,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>dgf-dup-cs</ToolCommandName>
     <PackageId>dgf-dup-cs</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Description>Finds C# methods that do the same thing written differently, for dgf-dup.</Description>
     <PackageOutputPath>nupkg</PackageOutputPath>
   </PropertyGroup>

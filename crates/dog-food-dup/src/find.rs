@@ -40,6 +40,10 @@ pub struct Copy {
     /// side by side (cut after `CODE_LINES` lines).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub code: String,
+    /// A copy whose statements are mixed with others (evidence
+    /// `dependence`): the line ranges that are part of it, `[start, end]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<[usize; 2]>,
 }
 
 /// Lines of a copy's code kept in the report.
@@ -162,7 +166,9 @@ pub struct CloneClass {
     /// also added, removed or changed (see `differences`).
     #[serde(rename = "type")]
     pub clone_type: u8,
-    /// How the match was found: `syntax`, the same shape of tokens.
+    /// How the match was found: `syntax`, the same shape of tokens;
+    /// `dependence`, the same statements with the same data flow, in another
+    /// order or mixed with others; `normalized` and `query` (the C# engine).
     pub evidence: &'static str,
     /// Type 3: matched tokens over all tokens, 2·common / (a + b), for the
     /// copy least like the first.
@@ -191,6 +197,30 @@ pub struct CloneClass {
     /// A repeated query (`kind` `query`): the entity, the table, it reads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entity: Option<String>,
+    /// Type 4 with `--confirm`: what running the copies on the same inputs showed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<Confirmation>,
+    /// The riskiest copy: the complexity, coverage and CRAP score of the
+    /// function it is in (see `risk`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<crate::risk::Risk>,
+    /// A C# copy with `--semantic`: what its first copy takes and gives as
+    /// a method, from the compiler's data flow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<crate::semantic::Signature>,
+}
+
+/// What running a type-4 class's methods on the same generated inputs showed.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Confirmation {
+    /// `confirmed`, or `not-run` (with the reason); a class an input
+    /// disproved is not reported.
+    pub status: String,
+    #[serde(default)]
+    pub tries: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// One place where a near-miss copy differs from the first copy.
@@ -238,7 +268,9 @@ pub fn clone_classes(
     // A group whose copies all match one statement earlier is the tail of
     // an earlier group, which finds them.
     work.retain(|group| !all_match_before(group, &shape));
-    let classes = grow(work, blocks);
+    let mut classes = grow(work, blocks);
+    let lines = classes_lines(&classes, blocks);
+    classes.retain(|spans| !within_other_copies(spans, &lines, blocks));
     let mut found = outermost(classes, blocks, sources, display);
     found.extend(
         runs.iter()
@@ -247,7 +279,9 @@ pub fn clone_classes(
     );
     found.retain(|c| !mostly_parameters(c));
     crate::near::add(&mut found, blocks, sources, display, settings);
+    crate::reorder::add(&mut found, blocks, sources, display, settings);
     drop_wrappers(&mut found);
+    drop_nested(&mut found);
     found.sort_by(|a, b| {
         b.saves
             .cmp(&a.saves)
@@ -386,6 +420,47 @@ fn outermost(
         .collect()
 }
 
+/// Every class's copies as (file, first line, last line, from an expression block).
+fn classes_lines(classes: &[Vec<Span>], blocks: &[Block]) -> Vec<Vec<(usize, usize, usize, bool)>> {
+    classes
+        .iter()
+        .map(|spans| {
+            spans
+                .iter()
+                .map(|s| {
+                    let block = &blocks[s.block];
+                    (
+                        block.file,
+                        block.statements[s.first].start_line,
+                        block.statements[s.last].end_line,
+                        block.is_expression,
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A class of expression copies each inside a copy of statements: that
+/// class says it already, with the statements around them.
+fn within_other_copies(
+    spans: &[Span],
+    all: &[Vec<(usize, usize, usize, bool)>],
+    blocks: &[Block],
+) -> bool {
+    spans.iter().all(|s| {
+        let block = &blocks[s.block];
+        let (start, end) = (
+            block.statements[s.first].start_line,
+            block.statements[s.last].end_line,
+        );
+        block.is_expression
+            && all.iter().flatten().any(|&(file, a, b, expression)| {
+                !expression && file == block.file && a <= start && end <= b
+            })
+    })
+}
+
 /// Copies that share a shape but little else: more than two parameters per
 /// statement (mapping code, guard clauses on other fields) would make a
 /// shared version that is mostly its arguments. Repeated runs are kept, as
@@ -519,6 +594,36 @@ fn drop_wrappers(classes: &mut Vec<CloneClass>) {
     });
 }
 
+/// A class whose every copy lies inside a copy of another class, with as
+/// many copies: the same functions found again for a block nested in the
+/// bigger copy, which says it already.
+fn drop_nested(classes: &mut Vec<CloneClass>) {
+    let inside = |inner: &Copy, outer: &Copy| {
+        inner.file == outer.file
+            && outer.start_line <= inner.start_line
+            && inner.end_line <= outer.end_line
+            && (outer.start_line, outer.end_line) != (inner.start_line, inner.end_line)
+    };
+    let nested: BTreeSet<usize> = (0..classes.len())
+        .filter(|&n| {
+            classes.iter().enumerate().any(|(m, other)| {
+                m != n
+                    && other.kind == classes[n].kind
+                    && other.copies.len() >= classes[n].copies.len()
+                    && classes[n]
+                        .copies
+                        .iter()
+                        .all(|inner| other.copies.iter().any(|outer| inside(inner, outer)))
+            })
+        })
+        .collect();
+    let mut n = 0;
+    classes.retain(|_| {
+        n += 1;
+        !nested.contains(&(n - 1))
+    });
+}
+
 /// The file extension of a span: copies in different languages cannot
 /// share code.
 fn extension(blocks: &[Block], sources: &[Source], span: &Span) -> Option<String> {
@@ -603,6 +708,9 @@ pub(crate) fn describe(
         differences: Vec::new(),
         rules: Vec::new(),
         entity: None,
+        confirmation: None,
+        risk: None,
+        signature: None,
         unite: unite(&copies, &holes, spans, blocks),
         copies,
         lines,
@@ -633,6 +741,7 @@ fn copy_of(
             block.statements[span.first].start_line,
             block.statements[span.last].end_line,
         ),
+        parts: Vec::new(),
     }
 }
 
@@ -821,7 +930,7 @@ fn unite(copies: &[Copy], holes: &[Hole], spans: &[Span], blocks: &[Block]) -> S
     let place = place(copies, whole_bodies(spans, blocks));
     if parameters.is_empty() {
         format!(
-            "{place}; the copies are identical apart from local names, so it takes no parameters"
+            "{place}; the copies are identical apart from local names, so it needs no parameters for what differs, only the values it reads from around it"
         )
     } else {
         format!(

@@ -78,12 +78,94 @@ fn table_findings(out: &mut String, class: &CloneClass) {
             hole.values.join(" | ")
         );
     }
-    for line in difference_lines(class) {
+    for line in finding_lines(class) {
         let _ = writeln!(out, "   {line}");
     }
+}
+
+/// How the copies differ, the rules that made them equal, and the evidence lines.
+fn finding_lines(class: &CloneClass) -> Vec<String> {
+    let mut lines = difference_lines(class);
     if !class.rules.is_empty() {
-        let _ = writeln!(out, "   same after: {}", class.rules.join("; "));
+        lines.push(format!("same after: {}", class.rules.join("; ")));
     }
+    lines.extend(evidence_lines(class));
+    lines
+}
+
+/// What running, the complexity and the compiler add about a class.
+fn evidence_lines(class: &CloneClass) -> impl Iterator<Item = String> {
+    [
+        confirmation_line(class),
+        risk_line(class),
+        signature_line(class),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+/// What an extracted copy returns: its outputs, else what its returns return.
+fn returns_text(s: &crate::semantic::Signature) -> String {
+    match s.returns.as_slice() {
+        [] if s.exits.iter().any(|e| e == "return") => {
+            "what its return statements return".to_string()
+        }
+        [] => "nothing".to_string(),
+        [one] => one.clone(),
+        many => format!("({})", many.join(", ")),
+    }
+}
+
+/// A C# copy's signature as a method, from the compiler.
+fn signature_line(class: &CloneClass) -> Option<String> {
+    let s = class.signature.as_ref()?;
+    let returns = returns_text(s);
+    let mut line = format!(
+        "as a method (from the compiler): takes ({}), returns {returns}",
+        s.parameters.join(", ")
+    );
+    let jumps: Vec<&str> = s
+        .exits
+        .iter()
+        .map(String::as_str)
+        .filter(|e| *e != "return" || !s.returns.is_empty())
+        .collect();
+    if !jumps.is_empty() {
+        line += &format!(", jumps out with {}", jumps.join(", "));
+    }
+    if s.uses_this {
+        line += ", needs this (an instance method)";
+    }
+    Some(line)
+}
+
+/// The riskiest copy's function: its complexity, and with coverage its CRAP score.
+fn risk_line(class: &CloneClass) -> Option<String> {
+    let r = class.risk.as_ref()?;
+    Some(match (r.crap, r.coverage) {
+        (Some(crap), Some(covered)) => format!(
+            "risk: CRAP {crap:.0} in {} (complexity {}, {:.0}% covered)",
+            r.function,
+            r.complexity,
+            covered * 100.0
+        ),
+        _ => format!("risk: complexity {} in {}", r.complexity, r.function),
+    })
+}
+
+/// With --confirm: what running the methods showed.
+fn confirmation_line(class: &CloneClass) -> Option<String> {
+    let c = class.confirmation.as_ref()?;
+    Some(match c.status.as_str() {
+        "confirmed" => format!(
+            "confirmed: the same results on {} generated inputs",
+            c.tries
+        ),
+        _ => format!(
+            "not run: {}",
+            c.reason.as_deref().unwrap_or("no reason given")
+        ),
+    })
 }
 
 /// Compact text for AI assistants: every class, one block each.
@@ -126,11 +208,12 @@ pub fn agent(report: &Report, top: usize) -> String {
         for copy in &class.copies {
             let _ = writeln!(
                 out,
-                "copy {}:{}-{} {}{}",
+                "copy {}:{}-{} {}{}{}",
                 copy.file,
                 copy.start_line,
                 copy.end_line,
                 copy.function.as_deref().unwrap_or("-"),
+                parts_text(copy),
                 if copy.changed { " (changed)" } else { "" }
             );
         }
@@ -161,11 +244,8 @@ fn agent_template(out: &mut String, class: &CloneClass) {
             hole.values.join(" | ")
         );
     }
-    for line in difference_lines(class) {
+    for line in finding_lines(class) {
         let _ = writeln!(out, "{line}");
-    }
-    if !class.rules.is_empty() {
-        let _ = writeln!(out, "same after: {}", class.rules.join("; "));
     }
     let _ = writeln!(out, "unite: {}", class.unite);
 }
@@ -192,9 +272,19 @@ fn kind_text(class: &CloneClass) -> String {
             "repeated query on {}",
             class.entity.as_deref().unwrap_or("a table")
         ),
-        (_, Some(s)) => format!("type 3: near miss, {:.0}% alike", s * 100.0),
-        _ => "type 3: near miss".to_string(),
+        (_, similarity) => near_text(class, similarity),
     }
+}
+
+/// A type 3 class in words: in another order, or how alike.
+fn near_text(class: &CloneClass, similarity: Option<f64>) -> String {
+    if class.evidence == "dependence" {
+        return "type 3: the same statements and data flow, in another order or mixed with others"
+            .to_string();
+    }
+    similarity.map_or("type 3: near miss".to_string(), |s| {
+        format!("type 3: near miss, {:.0}% alike", s * 100.0)
+    })
 }
 
 /// What each near-miss copy adds, leaves out or has instead, against the
@@ -283,10 +373,11 @@ fn summary(report: &Report) -> String {
         )
 }
 
-/// `file:start-end  in Function`.
+/// `file:start-end  in Function`, with the lines that are part of a copy
+/// mixed with other statements.
 fn place(copy: &crate::Copy) -> String {
     format!(
-        "{}:{}-{}{}{}",
+        "{}:{}-{}{}{}{}",
         copy.file,
         copy.start_line,
         copy.end_line,
@@ -294,8 +385,28 @@ fn place(copy: &crate::Copy) -> String {
             .as_deref()
             .map(|f| format!("  in {f}"))
             .unwrap_or_default(),
+        parts_text(copy),
         if copy.changed { "  (changed)" } else { "" }
     )
+}
+
+/// `  (lines 3-5, 9)` for a copy with parts.
+fn parts_text(copy: &crate::Copy) -> String {
+    if copy.parts.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = copy
+        .parts
+        .iter()
+        .map(|&[s, e]| {
+            if s == e {
+                s.to_string()
+            } else {
+                format!("{s}-{e}")
+            }
+        })
+        .collect();
+    format!("  (lines {})", parts.join(", "))
 }
 
 /// For a repeated run, where the whole run is.
@@ -308,6 +419,7 @@ fn run(class: &CloneClass) -> Option<String> {
     Some(place(&crate::Copy {
         end_line: last.end_line,
         code: String::new(),
+        parts: Vec::new(),
         ..first.clone()
     }))
 }

@@ -61,7 +61,7 @@ fn with_the_csharp_engine_every_rewrite_is_found_and_no_near_miss_is_called_equa
     let paths = [corpus.join("Cases"), corpus.join("Model.cs")];
     let mut found = scan(&paths, corpus, true, Settings::default());
     let command = dog_food_dup::semantic::command(Some(&engine()));
-    let classes = dog_food_dup::semantic::classes(command, &paths, corpus, true).unwrap();
+    let classes = dog_food_dup::semantic::classes(command, &paths, corpus, ask()).unwrap();
     dog_food_dup::semantic::merge(&mut found, classes, corpus);
     let labels =
         Labels::parse(&std::fs::read_to_string(corpus.join("cases.json")).unwrap()).unwrap();
@@ -120,7 +120,7 @@ fn repeated_queries_on_a_table_get_one_extension_method_each() {
     let root = Path::new(QUERIES);
     let command = dog_food_dup::semantic::command(Some(&engine()));
     let classes =
-        dog_food_dup::semantic::classes(command, &[root.to_path_buf()], root, true).unwrap();
+        dog_food_dup::semantic::classes(command, &[root.to_path_buf()], root, ask()).unwrap();
     let queries: Vec<_> = classes.iter().filter(|c| c.kind == "query").collect();
     let functions = |c: &dog_food_dup::CloneClass| {
         let mut f: Vec<String> = c.copies.iter().filter_map(|x| x.function.clone()).collect();
@@ -165,4 +165,166 @@ fn repeated_queries_on_a_table_get_one_extension_method_each() {
         .starts_with("public static IQueryable<decimal>"));
     // The deleted orders are another filter.
     assert!(!functions(filter).contains(&"DeletedOrders.List".to_string()));
+}
+
+/// What the engine is asked in these tests: the corpus is under `tests/`.
+fn ask() -> dog_food_dup::semantic::Ask {
+    dog_food_dup::semantic::Ask {
+        tests: true,
+        confirm: false,
+        regions: false,
+    }
+}
+
+#[test]
+fn running_them_confirms_every_rewrite_group_in_the_corpus() {
+    if !has_dotnet10() {
+        eprintln!("skipped: needs a .NET 10 SDK");
+        return;
+    }
+    let corpus = Path::new(CORPUS);
+    let paths = [corpus.join("Cases"), corpus.join("Model.cs")];
+    let command = dog_food_dup::semantic::command(Some(&engine()));
+    let ask = dog_food_dup::semantic::Ask {
+        confirm: true,
+        ..ask()
+    };
+    let classes = dog_food_dup::semantic::classes(command, &paths, corpus, ask).unwrap();
+    let groups: Vec<_> = classes.iter().filter(|c| c.clone_type == 4).collect();
+    assert!(groups.len() >= 16, "{}", groups.len());
+    for group in groups {
+        let confirmation = group.confirmation.as_ref().expect("a confirmation");
+        assert_eq!(confirmation.status, "confirmed", "{:?}", group.copies);
+        assert_eq!(confirmation.tries, 1000);
+    }
+}
+
+#[test]
+fn running_them_tells_apart_every_near_miss_it_can_run() {
+    if !has_dotnet10() {
+        eprintln!("skipped: needs a .NET 10 SDK");
+        return;
+    }
+    let corpus = Path::new(CORPUS);
+    let labels: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(corpus.join("cases.json")).unwrap()).unwrap();
+    let mut disproved = 0;
+    for pair in labels["pairs"].as_array().unwrap() {
+        let (a, b) = (pair["a"].as_str().unwrap(), pair["b"].as_str().unwrap());
+        let mut command = dog_food_dup::semantic::command(Some(&engine()));
+        let output = command
+            .arg(corpus)
+            .args(["--tests", "--compare", a, b])
+            .output()
+            .unwrap();
+        let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let status = verdict["status"].as_str().unwrap();
+        if pair["equal"].as_bool().unwrap() {
+            assert_eq!(status, "confirmed", "{a} vs {b}: {verdict}");
+            assert_eq!(output.status.code(), Some(0));
+            continue;
+        }
+        // A near miss is never confirmed; it is told apart, or not run (with effects, say).
+        assert_ne!(status, "confirmed", "{a} vs {b}: {verdict}");
+        if status == "disproved" {
+            disproved += 1;
+            assert_eq!(output.status.code(), Some(1));
+            assert!(verdict["example"].as_str().unwrap().contains(" vs "));
+        }
+    }
+    assert!(disproved >= 12, "{disproved}");
+}
+
+const CONFIRM: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/confirm");
+
+#[test]
+fn methods_are_only_run_when_they_have_no_effects() {
+    if !has_dotnet10() {
+        eprintln!("skipped: needs a .NET 10 SDK");
+        return;
+    }
+    let root = Path::new(CONFIRM);
+    let command = dog_food_dup::semantic::command(Some(&engine()));
+    let ask = dog_food_dup::semantic::Ask {
+        tests: true,
+        confirm: true,
+        regions: false,
+    };
+    let classes =
+        dog_food_dup::semantic::classes(command, &[root.to_path_buf()], root, ask).unwrap();
+    let status = |function: &str| {
+        let class = classes
+            .iter()
+            .find(|c| {
+                c.copies
+                    .iter()
+                    .any(|x| x.function.as_deref() == Some(function))
+            })
+            .unwrap_or_else(|| panic!("no group with {function}"));
+        class.confirmation.clone().unwrap()
+    };
+    // A switch and ifs building one record; a condition in a constructor's argument.
+    assert_eq!(status("Badges.FromSwitch").status, "confirmed");
+    assert_eq!(status("Prices.Discounted").status, "confirmed");
+    // These read the clock and write a file.
+    let stamps = status("Stamps.Today");
+    assert_eq!(stamps.status, "not-run");
+    assert!(
+        stamps.reason.as_deref().unwrap().contains("DateTime.Now"),
+        "{stamps:?}"
+    );
+}
+
+const REGIONS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/regions");
+
+#[test]
+fn a_csharp_copy_gets_its_parameters_and_results_from_the_compiler() {
+    if !has_dotnet10() {
+        eprintln!("skipped: needs a .NET 10 SDK");
+        return;
+    }
+    let root = Path::new(REGIONS);
+    let paths = [root.to_path_buf()];
+    let settings = Settings {
+        min_tokens: 30,
+        min_lines: 4,
+    };
+    let command = dog_food_dup::semantic::command(Some(&engine()));
+    let ask = dog_food_dup::semantic::Ask {
+        regions: true,
+        ..ask()
+    };
+    let engine = dog_food_dup::semantic::start(command, &paths, root, ask).unwrap();
+    let mut found = scan(&paths, root, true, settings);
+    dog_food_dup::semantic::finish_with(engine, &mut found).unwrap();
+    let class = found
+        .classes
+        .iter()
+        .find(|c| c.signature.is_some())
+        .unwrap_or_else(|| panic!("{:#?}", found.classes));
+    let signature = class.signature.as_ref().unwrap();
+    // The copy runs from the heading to the rounding (the strings and calls
+    // that differ are holes): it reads the parameters, and the return after
+    // it reads the heading and the rounded total.
+    assert_eq!(
+        signature.parameters,
+        ["IReadOnlyList<Line> lines", "string customer"],
+        "{signature:?}"
+    );
+    assert!(
+        signature.returns.iter().any(|r| r == "decimal rounded"),
+        "{signature:?}"
+    );
+    assert!(
+        signature.returns.iter().any(|r| r.ends_with(" heading")),
+        "{signature:?}"
+    );
+    assert!(signature.exits.is_empty(), "{signature:?}");
+    // It reads the field `fee`.
+    assert!(signature.uses_this, "{signature:?}");
+    let text = report::table(&found, 0);
+    assert!(
+        text.contains("as a method (from the compiler): takes ("),
+        "{text}"
+    );
 }

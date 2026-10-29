@@ -338,3 +338,95 @@ mod tests {
         assert!(pairs.values().any(|l| l.kind == 4));
     }
 }
+
+/// Findings on real code, labelled by hand by their class id: `real`
+/// (copies that do one thing and could share code) or `noise` (with why).
+/// Precision on real code is the real share of the labelled findings a
+/// report has; findings with no label are listed to be labelled.
+#[derive(Debug, Deserialize)]
+pub struct RealLabels {
+    pub repository: String,
+    pub commit: String,
+    pub findings: BTreeMap<String, RealLabel>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RealLabel {
+    pub label: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// How a report does on a labelled real repository.
+#[derive(Debug, Default)]
+pub struct RealScore {
+    pub real: usize,
+    pub noise: Vec<String>,
+    pub unlabelled: Vec<String>,
+}
+
+impl RealScore {
+    pub fn precision(&self) -> f64 {
+        ratio(self.real, self.real + self.noise.len())
+    }
+}
+
+/// Scores a report's findings (repeated queries aside) against hand labels.
+pub fn score_real(report: &Value, labels: &RealLabels) -> RealScore {
+    let mut score = RealScore::default();
+    let classes = report["classes"].as_array().cloned().unwrap_or_default();
+    for class in classes.iter().filter(|c| c["kind"] != "query") {
+        let id = class["id"].as_str().unwrap_or_default().to_string();
+        match labels.findings.get(&id) {
+            Some(l) if l.label == "real" => score.real += 1,
+            Some(l) => score.noise.push(format!("{id}: {}", l.note)),
+            None => score
+                .unlabelled
+                .push(format!("{id}: {}", functions_of(class))),
+        }
+    }
+    score
+}
+
+fn functions_of(class: &Value) -> String {
+    class["copies"]
+        .as_array()
+        .map(|copies| {
+            copies
+                .iter()
+                .map(|c| {
+                    c["function"]
+                        .as_str()
+                        .or(c["file"].as_str())
+                        .unwrap_or("?")
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
+}
+
+pub fn render_real(score: &RealScore, labels: &RealLabels) -> String {
+    let mut out = format!(
+        "{} at {}: precision {:.0}% ({} real, {} noise, {} not labelled)\n",
+        labels.repository,
+        &labels.commit[..labels.commit.len().min(12)],
+        score.precision() * 100.0,
+        score.real,
+        score.noise.len(),
+        score.unlabelled.len()
+    );
+    for (title, list) in [
+        ("noise", &score.noise),
+        ("not labelled (review)", &score.unlabelled),
+    ] {
+        if !list.is_empty() {
+            out += &format!("{title} ({}):\n", list.len());
+            for item in list {
+                out += &format!("  {item}\n");
+            }
+        }
+    }
+    out
+}

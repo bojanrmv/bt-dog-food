@@ -91,6 +91,11 @@ enum Command {
     },
     /// Create a commented dgf.toml in the current folder
     Init,
+    /// Duplicated code that can be united: copies, near misses, reordered
+    /// statements and, with --semantic, C# that does the same thing written
+    /// differently and repeated queries (the same as `dgf-dup`)
+    #[command(visible_alias = "dup")]
+    Duplication(dog_food_dup::cli::Args),
 }
 
 #[derive(Subcommand)]
@@ -318,11 +323,25 @@ fn main() -> ExitCode {
         Command::Hook { action } => hook(action),
         Command::Skill { action } => skill(action),
         Command::Init => init(),
+        Command::Duplication(args) => return duplication(args),
     };
     result.unwrap_or_else(|(code, message)| {
         tellln!("error: {message}");
         ExitCode::from(code)
     })
+}
+
+/// `dgf duplication`: `dgf-dup`, with the coverage reports dgf.toml names
+/// when none are given.
+fn duplication(mut args: dog_food_dup::cli::Args) -> ExitCode {
+    let here = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Some(file) = config::find(&here).filter(|_| !args.has_coverage()) {
+        if let Ok(found) = config::load(&file) {
+            let dir = file.parent().unwrap_or(&here);
+            args.set_coverage(found.coverage.paths.iter().map(|p| dir.join(p)).collect());
+        }
+    }
+    dog_food_dup::cli::run_args(&args)
 }
 
 type Failure = (u8, String);

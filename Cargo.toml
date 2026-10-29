@@ -9,6 +9,7 @@ license = "MIT"
 
 [workspace.dependencies]
 dog-food-core = { path = "crates/dog-food-core" }
+dog-food-dup = { path = "crates/dog-food-dup" }
 tree-sitter = "0.25"
 tree-sitter-rust = "0.23"
 tree-sitter-typescript = "0.23"

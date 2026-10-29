@@ -217,6 +217,20 @@ dgf mutate --run --format mutation-report -o mutation.json   # mutation-testing-
 
 Turning single mutants off is done in code: `// dgf-disable-once <mutator>: <reason>`, `// dgf-disable-next-line`, `// dgf-disable` ... `// dgf-restore` (see [mutation-testing.md](mutation-testing.md#turning-mutants-off)).
 
+## `dgf duplication`
+
+Code that can be united: copies, near misses, reordered or interleaved statements, long expressions copied into different statements, and with `--semantic` C# that does the same thing written differently and repeated queries. `dgf dup` is short for it, and `dgf-dup` is the same tool on its own. It reads the coverage reports `dgf.toml` names, to give each group a CRAP score.
+
+```powershell
+dgf dup                                   # the current folder: the groups that save most first
+dgf dup --coverage TestResults            # with CRAP scores, the riskiest first (--rank saves|risk)
+dgf dup --semantic --confirm              # C# rewrites, each confirmed by running it on generated inputs
+dgf dup --changes --fail-on-copies        # a PR gate: exit 1 when the branch adds a copy
+dgf dup --format html -o dup.html         # the review dashboard
+```
+
+All of it is in [duplication.md](duplication.md).
+
 ## `dgf init`
 
 Writes a commented `dgf.toml` in the current folder with every setting explained. It refuses to overwrite an existing one.

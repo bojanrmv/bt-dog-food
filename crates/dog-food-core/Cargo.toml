@@ -13,3 +13,8 @@ tree-sitter-c-sharp.workspace = true
 serde.workspace = true
 regex.workspace = true
 thiserror.workspace = true
+quick-xml.workspace = true
+ignore.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

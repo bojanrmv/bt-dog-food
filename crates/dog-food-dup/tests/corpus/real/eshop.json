@@ -1,0 +1,362 @@
+{
+  "repository": "https://github.com/dotnet/eShop",
+  "commit": "913acea66708a59595351174cee9b29f37179d29",
+  "scanned": "src",
+  "command": "dgf-dup src --semantic --format json (no package restore: the C# engine binds without packages)",
+  "labelled": "each finding of the scan at that commit, by reading the copies: real (copies that do one thing and could share code) or noise (with why)",
+  "findings": {
+    "1e96ec6a9c12": {
+      "label": "real",
+      "note": "animation helpers that differ in the property animated",
+      "where": [
+        "VisualElementExtensions.ColorTo",
+        "VisualElementExtensions.TransitionTo"
+      ]
+    },
+    "a7cedd62f7cd": {
+      "label": "noise",
+      "note": "generated: protobuf code",
+      "where": [
+        "BasketItem.InternalMergeFrom",
+        "CustomerBasketResponse.InternalMergeFrom",
+        "DeleteBasketRequest.InternalMergeFrom",
+        "DeleteBasketResponse.InternalMergeFrom"
+      ]
+    },
+    "2608196a92bc": {
+      "label": "real",
+      "note": "consent processing copied between two controllers",
+      "where": [
+        "ConsentController.ProcessConsent",
+        "DeviceController.ProcessConsent"
+      ]
+    },
+    "c2274aadbb32": {
+      "label": "real",
+      "note": "",
+      "where": [
+        "VisualElementExtensions.TransitionTo"
+      ]
+    },
+    "4084456174c1": {
+      "label": "real",
+      "note": "endpoint registrations with the same chain: a table of routes would do",
+      "where": [
+        "CatalogApi.MapCatalogApi"
+      ]
+    },
+    "68876f12ed05": {
+      "label": "real",
+      "note": "integration event handlers that send a command the same way",
+      "where": [
+        "GracePeriodConfirmedIntegrationEventHandler.Handle",
+        "OrderPaymentFailedIntegrationEventHandler.Handle",
+        "OrderPaymentSucceededIntegrationEventHandler.Handle",
+        "OrderStockConfirmedIntegrationEventHandler.Handle"
+      ]
+    },
+    "0de3ddbc9090": {
+      "label": "real",
+      "note": "command handlers that load an order, change its status and save",
+      "where": [
+        "CancelOrderCommandHandler.Handle",
+        "SetAwaitingValidationOrderStatusCommandHandler.Handle",
+        "SetPaidOrderStatusCommandHandler.Handle",
+        "SetStockConfirmedOrderStatusCommandHandler.Handle"
+      ]
+    },
+    "c3703ae5569d": {
+      "label": "real",
+      "note": "authentication setup copied between two apps",
+      "where": [
+        "Extensions.AddAuthenticationServices"
+      ]
+    },
+    "24187bbdfb6b": {
+      "label": "real",
+      "note": "seed users built field by field",
+      "where": [
+        "UsersSeed.SeedAsync"
+      ]
+    },
+    "584a7559bd8b": {
+      "label": "noise",
+      "note": "generated: protobuf code",
+      "where": [
+        "BasketItem.Equals",
+        "CustomerBasketResponse.Equals",
+        "DeleteBasketRequest.Equals",
+        "DeleteBasketResponse.Equals"
+      ]
+    },
+    "43283f0e5753": {
+      "label": "real",
+      "note": "picture URI fixing for two item kinds",
+      "where": [
+        "FixUriService.FixBasketItemPictureUri",
+        "FixUriService.FixCampaignItemPictureUri"
+      ]
+    },
+    "533a4c4863ca": {
+      "label": "real",
+      "note": "consent view model built in two controllers",
+      "where": [
+        "ConsentController.CreateConsentViewModel",
+        "DeviceController.CreateConsentViewModel"
+      ]
+    },
+    "13fae9cc8eb7": {
+      "label": "real",
+      "note": "HTTP POST/PUT bodies",
+      "where": [
+        "RequestProvider.PostAsync",
+        "RequestProvider.PutAsync"
+      ]
+    },
+    "a8f6c4e84c83": {
+      "label": "real",
+      "note": "order commands sent the same way",
+      "where": [
+        "OrdersApi.CancelOrderAsync",
+        "OrdersApi.ShipOrderAsync"
+      ]
+    },
+    "410ed4316dd2": {
+      "label": "real",
+      "note": "claims added one field at a time",
+      "where": [
+        "ProfileService.GetClaimsFromUser"
+      ]
+    },
+    "0a6c3d110b68": {
+      "label": "real",
+      "note": "selection of a brand and a type",
+      "where": [
+        "CatalogViewModel.SelectCatalogBrand",
+        "CatalogViewModel.SelectCatalogType"
+      ]
+    },
+    "0a6c3d110b68-2": {
+      "label": "noise",
+      "note": "nested: a block inside group 15's copies",
+      "where": [
+        "CatalogViewModel.SelectCatalogBrand",
+        "CatalogViewModel.SelectCatalogType"
+      ]
+    },
+    "de77125b4382": {
+      "label": "real",
+      "note": "fade animations",
+      "where": [
+        "FadeInAnimation.BeginAnimation",
+        "FadeInAnimation.ResetAnimation",
+        "FadeOutAnimation.BeginAnimation",
+        "FadeOutAnimation.ResetAnimation"
+      ]
+    },
+    "43283f0e5753-2": {
+      "label": "noise",
+      "note": "nested: a block inside group 10's copies",
+      "where": [
+        "FixUriService.FixBasketItemPictureUri",
+        "FixUriService.FixCampaignItemPictureUri"
+      ]
+    },
+    "5fee00019da8": {
+      "label": "real",
+      "note": "domain event handlers publishing an integration event",
+      "where": [
+        "OrderCancelledDomainEventHandler.Handle",
+        "OrderShippedDomainEventHandler.Handle",
+        "OrderStatusChangedToAwaitingValidationDomainEventHandler.Handle",
+        "OrderStatusChangedToPaidDomainEventHandler.Handle"
+      ]
+    },
+    "cb990d49c824": {
+      "label": "real",
+      "note": "settings defaults one field at a time",
+      "where": [
+        "SettingsViewModel.SettingsViewModel"
+      ]
+    },
+    "367f1f680803": {
+      "label": "real",
+      "note": "the same page-load hook in two scripts",
+      "where": [
+        "src/WebApp/wwwroot/js/catalog-sort.js",
+        "src/WebApp/wwwroot/js/chat-dock.js"
+      ]
+    },
+    "53c6dcb7e433": {
+      "label": "real",
+      "note": "basket calls that check the user first",
+      "where": [
+        "BasketService.GetBasket",
+        "BasketService.UpdateBasket"
+      ]
+    },
+    "43283f0e5753-3": {
+      "label": "noise",
+      "note": "nested: a block inside group 10's copies",
+      "where": [
+        "FixUriService.FixBasketItemPictureUri",
+        "FixUriService.FixCampaignItemPictureUri"
+      ]
+    },
+    "d5e3e2a35a0e": {
+      "label": "noise",
+      "note": "boilerplate: dependency-injection registrations",
+      "where": [
+        "MauiProgram.RegisterViewModels",
+        "MauiProgram.RegisterViews"
+      ]
+    },
+    "b3cc8f411c3c": {
+      "label": "real",
+      "note": "basket updates",
+      "where": [
+        "BasketViewModel.AddBasketItemAsync",
+        "BasketViewModel.DeleteAsync"
+      ]
+    },
+    "062216872434": {
+      "label": "real",
+      "note": "catalog URI built the same way in two apps",
+      "where": [
+        "CatalogService.GetAllCatalogItemsUri"
+      ]
+    },
+    "2d2ccd12acfd": {
+      "label": "real",
+      "note": "storyboard begin and reset",
+      "where": [
+        "StoryBoard.BeginAnimation",
+        "StoryBoard.ResetAnimation"
+      ]
+    },
+    "43283f0e5753-4": {
+      "label": "noise",
+      "note": "nested: a block inside group 10's copies",
+      "where": [
+        "FixUriService.FixBasketItemPictureUri",
+        "FixUriService.FixCampaignItemPictureUri"
+      ]
+    },
+    "9289fe6b5df2": {
+      "label": "real",
+      "note": "consent view model lookup",
+      "where": [
+        "ConsentController.BuildViewModelAsync",
+        "DeviceController.BuildViewModelAsync"
+      ]
+    },
+    "b45c9f95722c": {
+      "label": "real",
+      "note": "scope view model built in two controllers",
+      "where": [
+        "ConsentController.CreateScopeViewModel",
+        "DeviceController.CreateScopeViewModel"
+      ]
+    },
+    "d3dddf4ecc51": {
+      "label": "real",
+      "note": "facet filters",
+      "where": [
+        "CatalogApi.GetCatalogFacets"
+      ]
+    },
+    "c6f8d1c67207": {
+      "label": "real",
+      "note": "webhook event handlers",
+      "where": [
+        "OrderStatusChangedToPaidIntegrationEventHandler.Handle",
+        "OrderStatusChangedToShippedIntegrationEventHandler.Handle"
+      ]
+    },
+    "0568deee6dc3": {
+      "label": "real",
+      "note": "route configuration",
+      "where": [
+        "Extensions.ConfigureMobileBffRoutes"
+      ]
+    },
+    "a4535aee9c03": {
+      "label": "real",
+      "note": "route configuration rows",
+      "where": [
+        "Extensions.ConfigureMobileBffRoutes"
+      ]
+    },
+    "a4535aee9c03-2": {
+      "label": "real",
+      "note": "route configuration rows",
+      "where": [
+        "Extensions.ConfigureMobileBffRoutes"
+      ]
+    },
+    "cd95092b1231": {
+      "label": "noise",
+      "note": "generated: protobuf code",
+      "where": [
+        "CustomerBasketResponse.GetHashCode",
+        "UpdateBasketRequest.GetHashCode"
+      ]
+    },
+    "f4edaf1e0e71": {
+      "label": "noise",
+      "note": "generated: protobuf code",
+      "where": [
+        "CustomerBasketResponse.CalculateSize",
+        "UpdateBasketRequest.CalculateSize"
+      ]
+    },
+    "1898ef095444": {
+      "label": "real",
+      "note": "collection reload, sync and async",
+      "where": [
+        "ObservableCollectionEx.ReloadData",
+        "ObservableCollectionEx.ReloadDataAsync"
+      ]
+    },
+    "1969e3fa7e2b": {
+      "label": "real",
+      "note": "API and scope lists",
+      "where": [
+        "Config.GetApiScopes",
+        "Config.GetApis"
+      ]
+    },
+    "6b1382f3f74f": {
+      "label": "real",
+      "note": "buyer lookups by two keys",
+      "where": [
+        "BuyerRepository.FindAsync",
+        "BuyerRepository.FindByIdAsync"
+      ]
+    },
+    "298015207217": {
+      "label": "noise",
+      "note": "generated: protobuf code",
+      "where": [
+        "CustomerBasketResponse.MergeFrom",
+        "UpdateBasketRequest.MergeFrom"
+      ]
+    },
+    "3d688d8960bc": {
+      "label": "real",
+      "note": "brand and type lookups",
+      "where": [
+        "CatalogService.GetCatalogBrandAsync",
+        "CatalogService.GetCatalogTypeAsync"
+      ]
+    },
+    "99f290091dca": {
+      "label": "real",
+      "note": "order status changes",
+      "where": [
+        "Order.SetCancelledStatus",
+        "Order.SetShippedStatus"
+      ]
+    }
+  }
+}
