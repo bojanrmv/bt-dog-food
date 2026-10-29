@@ -444,7 +444,14 @@ pub fn error_location(line: &str) -> Option<(PathBuf, usize)> {
     let head = &line[..line.find("): error ")?];
     let open = head.rfind('(')?;
     let number = head[open + 1..].split(',').next()?.trim().parse().ok()?;
-    Some((PathBuf::from(head[..open].trim()), number))
+    // MSBuild keeps the separators project files were written with: `\` on Linux too.
+    let path = head[..open].trim();
+    let path = if cfg!(windows) {
+        path.to_string()
+    } else {
+        path.replace('\\', "/")
+    };
+    Some((PathBuf::from(path), number))
 }
 
 #[cfg(test)]
