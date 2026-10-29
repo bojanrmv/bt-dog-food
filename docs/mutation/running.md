@@ -44,7 +44,8 @@ The run first runs the tests once without mutants. When half of them or more fai
 - `--format table` (default), `json`, `html` and `agent` as for every command. `--format mutation-report` writes the mutation-testing-elements JSON (schema version 2, checked in the tests against the schema): each file with its source and mutants, the mutator names above, 1-based locations with an exclusive end, and the format's statuses (a mutant `--max-minutes` left untested is `Pending`). Any viewer of that format reads it.
 - `thresholds` (`high` 80 and `low` 60 by default) set the bands the table names and the HTML page colors; `break` (or `--fail-under`) fails the run below it, with exit code 1.
 - In `--format agent` every survivor comes with the tests that reach it and their files (where a sharper assertion goes, or "none reaches this") and what kind of assertion would catch it: the boundary value for `<` → `<=`, the exact text for a string, the effect of a removed statement.
-- After adding tests, `--rerun-survivors` tests the survivors again even when the cache says nothing changed; kills still come from the cache.
+- After adding tests, `--rerun-survivors` tests the survivors again even when the cache says nothing changed; kills still come from the cache. The report lists each survivor it tested again and its outcome now (`tested again (--rerun-survivors): ...`).
+- With `--changes`, functions outside the branch's diff that a changed test file reaches get a score line of their own; the mutation score and `--fail-under` are about the branch's own functions.
 
 The HTML page is described in [the dashboards](../dashboards.md#mutation).
 

@@ -989,7 +989,7 @@ fn tested_through(added: usize, through: &BTreeSet<String>) -> String {
         ""
     };
     format!(
-        "tests: {added} functions outside the branch's diff come in because a test file it changed reaches them ({}{more}); their survivors are listed apart, and they count in the score",
+        "tests: {added} functions outside the branch's diff come in because a test file it changed reaches them ({}{more}); their survivors are listed apart and scored apart (they are the score only when the branch changed nothing but tests)",
         shown.join(", ")
     )
 }

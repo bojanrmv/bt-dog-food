@@ -65,6 +65,16 @@ pub enum Scope {
 /// and left out of the score.
 pub const NEIGHBOUR: &str = "neighbour";
 
+/// Why a function outside the branch's diff is mutated: a test file the
+/// branch changed reaches it.
+pub const TESTS: &str = "tests";
+
+/// A function of the branch's own diff (or of the paths given), not one
+/// brought in by a changed test file or as a neighbour.
+fn is_own(t: &Target) -> bool {
+    t.reason != NEIGHBOUR && t.reason != TESTS
+}
+
 /// The string keys of a change: quoted literals of three characters or more
 /// with a letter and only letters, digits and `_ . - :` (such as
 /// `"MemberPlanId"`), and the names of constants that hold one.
@@ -304,12 +314,102 @@ fn only_stores(lines: &[&str]) -> bool {
     !statements.is_empty() && statements.iter().all(|l| stores(l))
 }
 
-/// The targets a score and exit code are about: not the neighbours.
+/// The targets a score and exit code are about: the branch's own
+/// functions. The functions a changed test file reaches count only when the
+/// branch has none of its own (it only changed tests); neighbours never do.
 fn gated(targets: &[Target]) -> impl Iterator<Item = &Mutant> {
+    let own = targets.iter().any(is_own);
     targets
         .iter()
-        .filter(|t| t.reason != NEIGHBOUR)
+        .filter(move |t| t.reason != NEIGHBOUR && (is_own(t) || !own))
         .flat_map(|t| &t.mutants)
+}
+
+/// The functions a changed test file reaches, scored apart from the
+/// branch's own; `None` when there are none, or when they are the score.
+fn tests_reach(targets: &[Target], result: &RunResult) -> Option<Tally> {
+    let reached: Vec<&Mutant> = targets
+        .iter()
+        .filter(|t| t.reason == TESTS)
+        .flat_map(|t| &t.mutants)
+        .collect();
+    (targets.iter().any(is_own) && !reached.is_empty()).then(|| tally(reached.into_iter(), result))
+}
+
+/// The line that scores the functions a changed test file reaches.
+fn tests_reach_text(targets: &[Target], result: &RunResult) -> String {
+    tests_reach(targets, result).map_or_else(String::new, |n| {
+        format!(
+            "functions a changed test file reaches (outside the branch's diff, scored apart): score {} · {} killed, {} survived, {} no tests\n",
+            percent(n.score()),
+            n.killed,
+            n.survived,
+            n.no_coverage
+        )
+    })
+}
+
+/// With `--rerun-survivors`: each survivor tested again, and what it is now.
+fn retested_text(targets: &[Target], result: &RunResult) -> String {
+    if result.retested.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "tested again (--rerun-survivors): {} survivors from the cache\n",
+        result.retested.len()
+    );
+    for (t, m) in targets
+        .iter()
+        .flat_map(|t| t.mutants.iter().map(move |m| (t, m)))
+        .filter(|(_, m)| result.retested.contains(&m.id))
+    {
+        let now = result
+            .outcomes
+            .get(&m.id)
+            .map_or("not tested", |o| outcome_word(*o));
+        let _ = writeln!(
+            out,
+            "  {}:{}:{} {} -> {} ({}): now {now}",
+            t.file,
+            m.line,
+            m.column,
+            short(&m.original),
+            m.replacement,
+            m.mutator
+        );
+    }
+    out
+}
+
+/// The survivors tested again and the score of what changed tests reach,
+/// each after a blank line.
+fn rerun_and_reach_text(targets: &[Target], result: &RunResult) -> String {
+    [
+        retested_text(targets, result),
+        tests_reach_text(targets, result),
+    ]
+    .iter()
+    .filter(|text| !text.is_empty())
+    .map(|text| format!("\n{text}"))
+    .collect()
+}
+
+/// Each outcome as the reports name it.
+const OUTCOME_WORDS: [(Outcome, &str); 7] = [
+    (Outcome::Killed, "killed"),
+    (Outcome::Survived, "survived"),
+    (Outcome::Timeout, "timeout"),
+    (Outcome::NoCoverage, "no tests"),
+    (Outcome::CompileError, "did not compile"),
+    (Outcome::RuntimeError, "crashed the test run"),
+    (Outcome::Ignored, "ignored"),
+];
+
+fn outcome_word(outcome: Outcome) -> &'static str {
+    OUTCOME_WORDS
+        .iter()
+        .find(|(o, _)| *o == outcome)
+        .map_or("?", |(_, word)| word)
 }
 
 /// Every function in `reports` with at least `min_complexity`.
@@ -1120,6 +1220,7 @@ fn run_table(targets: &[Target], result: &RunResult, thresholds: &Thresholds) ->
         let _ = write!(out, "\nTurned off by dgf-disable comments:\n{suppressed}");
     }
     out.push_str(&untested_text(targets, result));
+    out.push_str(&rerun_and_reach_text(targets, result));
     for note in &result.notes {
         let _ = writeln!(out, "\nnote: {note}");
     }
@@ -1234,6 +1335,8 @@ fn run_json(targets: &[Target], result: &RunResult, thresholds: &Thresholds) -> 
         "generatedAt": now(),
         "score": overall(targets, result),
         "tally": tally(gated(targets), result),
+        "testsReach": tests_reach(targets, result).map(|n| serde_json::json!({ "score": n.score(), "tally": n })),
+        "retested": result.retested.iter().map(|id| serde_json::json!({ "id": id, "outcome": result.outcomes.get(id) })).collect::<Vec<_>>(),
         "budgetHit": result.budget_hit(),
         "notes": result.notes,
         "timings": {
@@ -1400,6 +1503,8 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
     if result.budget_hit() {
         out.push_str("budget: the time budget ran out; run again to test the rest (results so far are cached)\n");
     }
+    out.push_str(&tests_reach_text(targets, result));
+    out.push_str(&retested_text(targets, result));
     out.push_str("survivors: each is a change no test noticed; add a test that fails for it\n");
     out.push_str(&survivors_by_mutator(targets, result));
     out.push_str("columns: location function original -> replacement (mutator) why\n");
@@ -1429,11 +1534,10 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
 fn agent_survivors(out: &mut String, targets: &[Target], result: &RunResult) {
     let (neighbours, gate): (Vec<_>, Vec<_>) =
         survivors(targets, result).partition(|(t, _)| t.reason == NEIGHBOUR);
-    let (by_tests, own): (Vec<_>, Vec<_>) =
-        gate.into_iter().partition(|(t, _)| t.reason == "tests");
+    let (by_tests, own): (Vec<_>, Vec<_>) = gate.into_iter().partition(|(t, _)| t.reason == TESTS);
     let sections = [
         ("", own),
-        ("\n## in code a test file this branch changed reaches (not in the branch's own diff; counted in the score)\n", by_tests),
+        ("\n## in code a test file this branch changed reaches (not in the branch's own diff; scored apart, unless the branch changed only tests)\n", by_tests),
         ("\n## next to your change (--neighbours: code that holds a string key of a changed function; not in the score, yours to decide)\n", neighbours),
     ];
     for (heading, list) in sections.into_iter().filter(|(_, list)| !list.is_empty()) {
@@ -1467,6 +1571,98 @@ fn agent_functions(out: &mut String, targets: &[Target], result: &RunResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two functions with three mutants each: one of the branch's own diff,
+    /// one a changed test file reaches. Own: 2 killed, 1 survived; the other: 3 survived.
+    fn own_and_reached(dir: &Path) -> (Vec<Target>, RunResult) {
+        let path = dir.join("Shop.cs");
+        std::fs::write(
+            &path,
+            "class C {
+  int Own(int a) {
+    return a > 1 ? a + 2 : 0;
+  }
+  int Reached(int a) {
+    return a > 1 ? a + 2 : 0;
+  }
+}
+",
+        )
+        .unwrap();
+        let wanted = |name: &str, line: usize, reason: &'static str| Wanted {
+            file: "Shop.cs".into(),
+            path: path.clone(),
+            name: name.into(),
+            start_line: line,
+            end_line: line + 2,
+            complexity: 2,
+            reason,
+            lines: None,
+        };
+        let (mut targets, _) = targets(
+            vec![wanted("C.Own", 2, "new"), wanted("C.Reached", 5, TESTS)],
+            &Settings::default(),
+        )
+        .unwrap();
+        let mut result = RunResult::default();
+        let mut id = 0;
+        for (n, t) in targets.iter_mut().enumerate() {
+            t.mutants.truncate(3);
+            for (k, m) in t.mutants.iter_mut().enumerate() {
+                m.id = id;
+                id += 1;
+                let killed = n == 0 && k < 2;
+                result.outcomes.insert(
+                    m.id,
+                    if killed {
+                        Outcome::Killed
+                    } else {
+                        Outcome::Survived
+                    },
+                );
+            }
+        }
+        (targets, result)
+    }
+
+    #[test]
+    fn functions_a_changed_test_reaches_are_scored_apart_from_the_branchs_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let (targets, result) = own_and_reached(dir.path());
+        // The branch's own: 2 of 3.
+        let score = overall(&targets, &result).unwrap();
+        assert!((score - 200.0 / 3.0).abs() < 0.01, "{score}");
+        let reached = tests_reach(&targets, &result).unwrap();
+        assert_eq!((reached.killed, reached.survived), (0, 3));
+        let agent = run_agent(&targets, &result);
+        assert!(agent.contains("functions a changed test file reaches (outside the branch's diff, scored apart): score 0%"), "{agent}");
+        let json = run_json(&targets, &result, &Thresholds::default());
+        assert_eq!(json["testsReach"]["tally"]["survived"], 3);
+        // A branch that only changed tests is scored on what they reach.
+        let only_tests: Vec<Target> = targets.into_iter().filter(|t| t.reason == TESTS).collect();
+        assert_eq!(overall(&only_tests, &result), Some(0.0));
+        assert!(tests_reach(&only_tests, &result).is_none());
+    }
+
+    #[test]
+    fn rerun_survivors_says_which_survivors_it_tested_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (targets, mut result) = own_and_reached(dir.path());
+        result.retested.extend([2, 3]);
+        result.outcomes.insert(3, Outcome::Killed);
+        let agent = run_agent(&targets, &result);
+        assert!(
+            agent.contains("tested again (--rerun-survivors): 2 survivors from the cache"),
+            "{agent}"
+        );
+        assert!(agent.contains(": now survived"), "{agent}");
+        assert!(agent.contains(": now killed"), "{agent}");
+        let table = run_table(&targets, &result, &Thresholds::default());
+        assert!(
+            table.contains("tested again (--rerun-survivors)"),
+            "{table}"
+        );
+    }
 
     #[test]
     fn the_mutation_report_follows_its_schema() {

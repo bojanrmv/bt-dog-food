@@ -213,6 +213,9 @@ pub struct RunResult {
     pub reached: HashMap<usize, Vec<String>>,
     /// Per tested mutant, the files of every test that reaches it.
     pub reached_files: HashMap<usize, BTreeSet<String>>,
+    /// With `--rerun-survivors`: the survivors the cache had that this run
+    /// tested again.
+    pub retested: BTreeSet<usize>,
     pub jobs: usize,
     /// When every result came from the cache: when the run whose timings
     /// are reported ended (seconds since 1970).
@@ -492,11 +495,15 @@ fn from_cache(
     } else {
         HashSet::new()
     };
-    found.retain(|id, outcome| {
-        let retest =
-            options.rerun_survivors && outcome.retested_on_rerun() && !rechecked.contains(id);
-        !result.outcomes.contains_key(id) && !retest
-    });
+    let retest: Vec<usize> = found
+        .iter()
+        .filter(|(id, outcome)| {
+            options.rerun_survivors && outcome.retested_on_rerun() && !rechecked.contains(id)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    found.retain(|id, _| !result.outcomes.contains_key(id) && !retest.contains(id));
+    result.retested.extend(retest);
     let kept = found.keys().filter(|id| rechecked.contains(id)).count();
     if kept > 0 {
         result.notes.push(format!("--rerun-survivors: {kept} survivors (marked `cached`) were already tested again, and neither the test files of the chosen test projects nor the test filter changed since, so they come from the cache; tests added in another project or outside the filter count only once the filter or test projects include them (or with --no-cache)"));

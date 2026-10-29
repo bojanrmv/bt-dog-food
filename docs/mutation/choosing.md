@@ -28,7 +28,7 @@ MUTANTS  COMPLEXITY  WHY       FUNCTION          LOCATION
 
 | Option | Chooses |
 | --- | --- |
-| `--changes` | the functions this branch changed (against `main`, or `--base`), and the functions whose tests it changed |
+| `--changes` | the functions this branch changed (against `main`, or `--base`), and the functions a test file it changed reaches. Those are scored apart from the branch's own, unless the branch changed only tests. |
 | `--changes --scope lines` | only the mutants on lines the branch changed |
 | `PATHS` | the functions in these files or folders |
 | `--min-complexity N` | functions with a cyclomatic complexity of N or more |
