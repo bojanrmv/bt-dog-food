@@ -141,7 +141,36 @@ impl NodeTests {
     /// Runs the given test files (all when empty) and reads every test's
     /// result. In an Angular workspace each project runs its own test files,
     /// one project after the other, within `limit` together.
+    /// A run whose packages went missing (another install in the repository
+    /// that node_modules links to deletes them first) is tried again after a
+    /// wait, twice; then the run fails, instead of every mutant in it
+    /// counting as a crash.
     fn run(
+        &self,
+        files: &[String],
+        env: &[(&str, String)],
+        limit: Duration,
+        folder: &Path,
+    ) -> Result<(TestRun, Report), String> {
+        for _ in 0..2 {
+            let ran = self.run_once(files, env, limit, folder)?;
+            if !ran.1.outcome.is_empty() || !packages_missing(folder) {
+                return Ok(ran);
+            }
+            super::progress("the test runner could not load its packages (Cannot find module ... node_modules): waiting 20 s for the install that removed them, then running again");
+            std::thread::sleep(PACKAGES_WAIT);
+        }
+        let ran = self.run_once(files, env, limit, folder)?;
+        if ran.1.outcome.is_empty() && packages_missing(folder) {
+            return Err(format!(
+                "the test runner could not load its packages from {} three times (\"Cannot find module\"): is an install (npm ci, npm install) running in the repository? Run again when it is done",
+                self.package.join("node_modules").display()
+            ));
+        }
+        Ok(ran)
+    }
+
+    fn run_once(
         &self,
         files: &[String],
         env: &[(&str, String)],
@@ -398,6 +427,16 @@ impl Engine for NodeTests {
     fn crash_reason(&self, tag: &str) -> Option<String> {
         exec::crash_reason(&exec::runs_folder(&self.sandbox).join(tag))
     }
+}
+
+/// How long a run waits for packages an install removed.
+const PACKAGES_WAIT: Duration = Duration::from_secs(20);
+
+/// Whether a run's output in `folder` says a package could not be loaded
+/// from node_modules: the machine, not the mutant.
+fn packages_missing(folder: &Path) -> bool {
+    exec::crash_reason(folder)
+        .is_some_and(|said| said.contains("Cannot find module") && said.contains("node_modules"))
 }
 
 /// The worse of two runs' ends: a timeout, then a failure.
@@ -724,6 +763,25 @@ mod tests {
             angular_project(dir.path(), &file("projects/site/src/a.ts")),
             None
         );
+    }
+
+    #[test]
+    fn a_run_that_cannot_load_its_packages_is_the_machine_not_the_mutant() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(exec::log_name(0)),
+            "node:internal/modules/cjs/loader:1386\nError: Cannot find module 'C:\\\\sandbox\\\\web\\\\node_modules\\\\@angular\\\\cli\\\\bin\\\\ng.js'\n",
+        )
+        .unwrap();
+        assert!(packages_missing(dir.path()));
+        // A crash of the code under test is a crash.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(
+            other.path().join(exec::log_name(0)),
+            "TypeError: Cannot read properties of undefined (reading 'send')\n",
+        )
+        .unwrap();
+        assert!(!packages_missing(other.path()));
     }
 
     #[test]

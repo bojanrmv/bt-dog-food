@@ -1039,7 +1039,7 @@ fn killer_files(killers: HashMap<usize, Vec<String>>, reach: &Reach) -> cache::K
 }
 
 /// One line on stderr, so a long run shows where it is.
-fn progress(step: &str) {
+pub(super) fn progress(step: &str) {
     tellln!("  {step}...");
 }
 
