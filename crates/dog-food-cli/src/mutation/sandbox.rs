@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use dog_food_core::mutate::schemata;
+use dog_food_core::mutate::{schemata, schemata_typed};
 use dog_food_core::Mutant;
 
 use super::Outcome;
@@ -579,6 +579,12 @@ const CSHARP_SWITCH: &str = "global::DogFood.Mutation.DgfMutants.Is";
 const CSHARP_CLASS: &str = include_str!("../../assets/DgfMutants.cs");
 const CSHARP_CLASS_FILE: &str = "DgfMutants.g.cs";
 const NODE_SWITCH: &str = "__dgfIs";
+
+/// A TypeScript file, where a switch can carry a type assertion; JavaScript cannot.
+fn is_typescript(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| matches!(e.to_str(), Some("ts" | "mts" | "cts" | "tsx")))
+}
 const NODE_HELPER_TS: &str = include_str!("../../assets/dgf-mutants.ts.txt");
 const NODE_HELPER_JS: &str = include_str!("../../assets/dgf-mutants.js.txt");
 
@@ -606,9 +612,13 @@ pub fn write(kind: Kind, files: &[FileMutants], sandbox: &Path) -> Result<(), St
                 };
                 format!(
                     "{pragma}{}{}",
-                    schemata(&file.source, language, &chosen, &|id| format!(
-                        "{NODE_SWITCH}({id})"
-                    )),
+                    schemata_typed(
+                        &file.source,
+                        language,
+                        &chosen,
+                        &|id| format!("{NODE_SWITCH}({id})"),
+                        is_typescript(&path)
+                    ),
                     node_helper(&path)
                 )
             }
@@ -883,14 +893,38 @@ mod tests {
             mutants,
             functions: vec![(1, 3)],
         };
-        write(Kind::Node, &[file], dir.path()).unwrap();
+        let js = FileMutants {
+            relative: PathBuf::from("f.js"),
+            source: source.replace(": number", ""),
+            mutants: dog_food_core::mutate::mutants(
+                &source.replace(": number", ""),
+                dog_food_core::Language::TypeScript,
+            )
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.replacement == ">=")
+            .map(|mut m| {
+                m.id = 0;
+                m
+            })
+            .collect(),
+            functions: vec![(1, 3)],
+        };
+        write(Kind::Node, &[file, js], dir.path()).unwrap();
         let text = std::fs::read_to_string(dir.path().join("f.ts")).unwrap();
+        // The mutated branch keeps the original's type: `never | T` is `T`.
         assert!(
             text.starts_with(
-                "// @ts-nocheck\nexport function f(a: number) {\n  return (__dgfIs(0) ? (a >= 1) : (a > 1));\n}\n"
+                "// @ts-nocheck\nexport function f(a: number) {\n  return (__dgfIs(0) ? (a >= 1) as never : (a > 1));\n}\n"
             ),
             "{text}"
         );
         assert!(text.contains("function __dgfIs(id: number): boolean"));
+        // JavaScript has no type assertions.
+        let js = std::fs::read_to_string(dir.path().join("f.js")).unwrap();
+        assert!(
+            js.contains("return (__dgfIs(0) ? (a >= 1) : (a > 1));"),
+            "{js}"
+        );
     }
 }

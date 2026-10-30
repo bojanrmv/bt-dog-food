@@ -531,6 +531,21 @@ pub fn schemata(
     mutants: &[&Mutant],
     switch: &dyn Fn(usize) -> String,
 ) -> String {
+    schemata_typed(source, language, mutants, switch, false)
+}
+
+/// [`schemata`] for a TypeScript file (not JavaScript): the mutated branch
+/// of a `?:` switch is `(mutated) as never`, so the switch has the
+/// original's type (`never | T` is `T`). Without it, a mutant that changes
+/// a type, such as an arrow returning `undefined` in a factory whose return
+/// type callers infer, would change what the unmutated tests type-check against.
+pub fn schemata_typed(
+    source: &str,
+    language: Language,
+    mutants: &[&Mutant],
+    switch: &dyn Fn(usize) -> String,
+    typed: bool,
+) -> String {
     let mut sites: Vec<(usize, usize)> =
         mutants.iter().map(|m| (m.site_start, m.site_end)).collect();
     sites.sort_by_key(|&(start, end)| (start, std::cmp::Reverse(end)));
@@ -542,6 +557,7 @@ pub fn schemata(
         mutants,
         switch,
         csharp: language == Language::CSharp,
+        typed,
     };
     rewrite.render(0, source.len(), &sites)
 }
@@ -676,7 +692,8 @@ impl Rewrite<'_> {
         if m.statement {
             format!("{{if ({switch}) {{{mutated}}} else {{{text}}}}}")
         } else {
-            format!("({switch} ? ({mutated}) : ({text}))")
+            let cast = if self.typed { " as never" } else { "" };
+            format!("({switch} ? ({mutated}){cast} : ({text}))")
         }
     }
 
@@ -702,6 +719,8 @@ struct Rewrite<'a> {
     mutants: &'a [&'a Mutant],
     switch: &'a dyn Fn(usize) -> String,
     csharp: bool,
+    /// TypeScript, where the mutated branch keeps the original's type.
+    typed: bool,
 }
 
 impl Rewrite<'_> {
@@ -756,6 +775,28 @@ impl Rewrite<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_typescript_switch_keeps_the_type_of_the_original() {
+        let src = "const make = (a: number) => a + 1;\n";
+        let found = mutate(src, Language::TypeScript, &Settings::default()).unwrap();
+        let arrow = found
+            .mutants
+            .iter()
+            .find(|m| m.mutator == "arrow")
+            .expect("an arrow mutant");
+        let typed = schemata_typed(src, Language::TypeScript, &[arrow], &|_| "on".into(), true);
+        assert!(
+            typed.contains("(on ? ((a: number) => undefined) as never : ((a: number) => a + 1))"),
+            "{typed}"
+        );
+        // JavaScript has no `as`.
+        let plain = schemata(src, Language::TypeScript, &[arrow], &|_| "on".into());
+        assert!(
+            plain.contains("(on ? ((a: number) => undefined) : ((a: number) => a + 1))"),
+            "{plain}"
+        );
+    }
 
     #[test]
     fn levels_parse() {

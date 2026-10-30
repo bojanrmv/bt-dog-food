@@ -46,8 +46,9 @@ pub struct NodeTests {
     runner: Runner,
     /// The runner's script, found in node_modules above the package.
     script: PathBuf,
-    /// Angular only: the project.
-    angular: Option<AngularProject>,
+    /// Angular only: the projects that hold a mutated file; each runs its
+    /// own `ng test` with its own test files.
+    angular: Vec<AngularProject>,
     sandbox: PathBuf,
     /// The mutated files: compiler errors elsewhere are not the mutants' doing.
     mutated: HashSet<PathBuf>,
@@ -65,11 +66,18 @@ impl NodeTests {
             .take_while(|dir| dir.starts_with(sandbox))
             .find_map(|dir| runner_of(dir).map(|r| (dir.to_path_buf(), r)))
             .ok_or("no package.json with vitest or jest above the mutated files")?;
-        let angular = angular_project(&package, &start);
-        let runner = if angular.is_some() {
-            Runner::Angular
-        } else {
+        let mut angular: Vec<AngularProject> = Vec::new();
+        for file in files {
+            if let Some(project) = angular_project(&package, &sandbox.join(&file.relative)) {
+                if !angular.iter().any(|p| p.name == project.name) {
+                    angular.push(project);
+                }
+            }
+        }
+        let runner = if angular.is_empty() {
             runner
+        } else {
+            Runner::Angular
         };
         let script = script_for(&package, runner)
             .ok_or("the test runner is not installed (run npm install in the repository)")?;
@@ -86,7 +94,12 @@ impl NodeTests {
         })
     }
 
-    fn command(&self, report: &Path, files: &[String]) -> Command {
+    fn command(
+        &self,
+        report: &Path,
+        files: &[String],
+        project: Option<&AngularProject>,
+    ) -> Command {
         let mut command = Command::new("node");
         command.current_dir(&self.package).arg(&self.script);
         let report = report.to_string_lossy().into_owned();
@@ -104,7 +117,7 @@ impl NodeTests {
                 "--ci",
             ]),
             Runner::Angular => {
-                let project = self.angular.as_ref().expect("an Angular project");
+                let project = project.expect("an Angular project");
                 command.args([
                     "test",
                     &project.name,
@@ -125,7 +138,9 @@ impl NodeTests {
         command
     }
 
-    /// Runs the given test files (all when empty) and reads every test's result.
+    /// Runs the given test files (all when empty) and reads every test's
+    /// result. In an Angular workspace each project runs its own test files,
+    /// one project after the other, within `limit` together.
     fn run(
         &self,
         files: &[String],
@@ -133,39 +148,64 @@ impl NodeTests {
         limit: Duration,
         folder: &Path,
     ) -> Result<(TestRun, Report), String> {
-        let report = folder.join("report.json");
-        let mut command = self.command(&report, files);
-        command.envs(env.iter().map(|(k, v)| (*k, v.as_str())));
-        let status = exec::run(command, limit, &folder.join(exec::log_name(0)))?;
-        let parsed = Report::read(&report, &self.package);
-        Ok((status, parsed))
+        let started = Instant::now();
+        let mut status = TestRun::Passed;
+        let mut merged = Report::default();
+        for (n, (project, files)) in self.runs(files).into_iter().enumerate() {
+            let report = folder.join(format!("report-{n}.json"));
+            let mut command = self.command(&report, &files, project);
+            command.envs(env.iter().map(|(k, v)| (*k, v.as_str())));
+            let left = limit.saturating_sub(started.elapsed());
+            let ran = exec::run(command, left, &folder.join(exec::log_name(n)))?;
+            status = worse(status, ran);
+            merged.merge(Report::read(&report, &self.package));
+            if status == TestRun::TimedOut {
+                break;
+            }
+        }
+        Ok((status, merged))
     }
 
-    /// Test files (relative to the package) holding `tests`.
-    fn files_for(&self, tests: &BTreeSet<String>, reach: &Reach) -> Vec<String> {
-        let files: BTreeSet<String> = tests
+    /// The runs a set of test files needs: one, or with Angular one per
+    /// project, each with the files it holds (every project when `files` is
+    /// empty, which runs all their tests).
+    fn runs(&self, files: &[String]) -> Vec<(Option<&AngularProject>, Vec<String>)> {
+        if self.angular.is_empty() {
+            return vec![(None, files.to_vec())];
+        }
+        self.angular
             .iter()
-            .filter_map(|t| reach.home.get(t).cloned())
-            .collect();
-        files
-            .into_iter()
-            .map(|f| pattern(&f, self.runner))
+            .filter_map(|project| {
+                let own: Vec<String> = files
+                    .iter()
+                    .filter(|f| self.owner(f).is_some_and(|o| o.name == project.name))
+                    .cloned()
+                    .collect();
+                (files.is_empty() || !own.is_empty()).then_some((Some(project), own))
+            })
             .collect()
     }
-}
 
-impl Engine for NodeTests {
-    /// Vitest and Jest strip types without checking them, but Angular's
-    /// builder type-checks, and a mutant can break narrowing (`typeof a ===
-    /// "number" && ...` turned into `||`): tsc finds those first.
-    fn build(&self, _: Round, budget: Budget) -> Result<(), BuildError> {
-        let Some(project) = &self.angular else {
-            return Ok(());
-        };
+    /// The chosen Angular project a file (relative to the package) is in.
+    fn owner(&self, file: &str) -> Option<&AngularProject> {
+        let file = file.replace('\\', "/");
+        self.angular
+            .iter()
+            .filter(|p| p.root.is_empty() || file.starts_with(&format!("{}/", p.root)))
+            .max_by_key(|p| p.root.len())
+    }
+
+    /// Type-checks one Angular project's tests (its tsconfig.spec.json): the
+    /// errors in mutated files.
+    fn type_check(
+        &self,
+        project: &AngularProject,
+        budget: Budget,
+    ) -> Result<Vec<String>, BuildError> {
         let config = self.package.join(&project.root).join("tsconfig.spec.json");
         let tsc = script_at(&self.package, "node_modules/typescript/bin/tsc");
         let (true, Some(tsc)) = (config.exists(), tsc) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let mut command = Command::new("node");
         command
@@ -187,6 +227,31 @@ impl Engine for NodeTests {
             })
             .map(str::to_string)
             .collect();
+        Ok(errors)
+    }
+
+    /// Test files (relative to the package) holding `tests`.
+    fn files_for(&self, tests: &BTreeSet<String>, reach: &Reach) -> Vec<String> {
+        let files: BTreeSet<String> = tests
+            .iter()
+            .filter_map(|t| reach.home.get(t).cloned())
+            .collect();
+        files
+            .into_iter()
+            .map(|f| pattern(&f, self.runner))
+            .collect()
+    }
+}
+
+impl Engine for NodeTests {
+    /// Vitest and Jest strip types without checking them, but Angular's
+    /// builder type-checks, and a mutant can break narrowing (`typeof a ===
+    /// "number" && ...` turned into `||`): tsc finds those first.
+    fn build(&self, _: Round, budget: Budget) -> Result<(), BuildError> {
+        let mut errors = Vec::new();
+        for project in &self.angular {
+            errors.extend(self.type_check(project, budget)?);
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -296,16 +361,37 @@ impl Engine for NodeTests {
     }
 
     fn test_projects(&self) -> Vec<String> {
-        let runner = match (self.runner, &self.angular) {
-            (Runner::Angular, Some(project)) => format!("ng test {}", project.name),
-            (Runner::Jest, _) => "jest".into(),
-            _ => "vitest".into(),
+        let runners: Vec<String> = match self.runner {
+            Runner::Angular => self
+                .angular
+                .iter()
+                .map(|p| format!("ng test {}", p.name))
+                .collect(),
+            Runner::Jest => vec!["jest".into()],
+            Runner::Vitest => vec!["vitest".into()],
         };
-        vec![format!("{} ({runner})", self.package.display())]
+        runners
+            .into_iter()
+            .map(|runner| format!("{} ({runner})", self.package.display()))
+            .collect()
     }
 
     fn crash_reason(&self, tag: &str) -> Option<String> {
         exec::crash_reason(&exec::runs_folder(&self.sandbox).join(tag))
+    }
+}
+
+/// The worse of two runs' ends: a timeout, then a failure.
+fn worse(a: TestRun, b: TestRun) -> TestRun {
+    let rank = |r: TestRun| match r {
+        TestRun::Passed => 0,
+        TestRun::Failed => 1,
+        TestRun::TimedOut => 2,
+    };
+    if rank(b) > rank(a) {
+        b
+    } else {
+        a
     }
 }
 
@@ -485,6 +571,16 @@ struct JsonTest {
 }
 
 impl Report {
+    /// Another run's results added to these.
+    fn merge(&mut self, other: Report) {
+        self.outcome.extend(other.outcome);
+        self.home.extend(other.home);
+        self.times.extend(other.times);
+        if self.first_failure.is_none() {
+            self.first_failure = other.first_failure;
+        }
+    }
+
     fn read(path: &Path, package: &Path) -> Report {
         let parsed: Option<JsonReport> = std::fs::read_to_string(path)
             .ok()
@@ -589,6 +685,50 @@ mod tests {
             angular_project(dir.path(), &file("projects/site/src/a.ts")),
             None
         );
+    }
+
+    #[test]
+    fn each_angular_project_runs_its_own_test_files() {
+        let project = |name: &str, root: &str| AngularProject {
+            name: name.into(),
+            root: root.into(),
+            source_root: format!("{root}/src"),
+        };
+        let tests = NodeTests {
+            package: PathBuf::from("web"),
+            runner: Runner::Angular,
+            script: PathBuf::from("ng.js"),
+            angular: vec![
+                project("core", "projects/core"),
+                project("admin", "projects/admin"),
+            ],
+            sandbox: PathBuf::from("sandbox"),
+            mutated: HashSet::new(),
+        };
+        let names = |runs: Vec<(Option<&AngularProject>, Vec<String>)>| {
+            runs.into_iter()
+                .map(|(p, files)| (p.map(|p| p.name.clone()).unwrap_or_default(), files))
+                .collect::<Vec<_>>()
+        };
+        // All tests: every project, each with all of its own.
+        assert_eq!(
+            names(tests.runs(&[])),
+            [("core".to_string(), vec![]), ("admin".to_string(), vec![])]
+        );
+        // Some test files: only the projects that hold them, with their files.
+        let files = vec![
+            "projects/admin/src/a.spec.ts".to_string(),
+            "projects/core/auth/src/b.spec.ts".to_string(),
+        ];
+        assert_eq!(
+            names(tests.runs(&files)),
+            [
+                ("core".to_string(), vec![files[1].clone()]),
+                ("admin".to_string(), vec![files[0].clone()])
+            ]
+        );
+        assert_eq!(worse(TestRun::Failed, TestRun::TimedOut), TestRun::TimedOut);
+        assert_eq!(worse(TestRun::Failed, TestRun::Passed), TestRun::Failed);
     }
 
     #[test]
