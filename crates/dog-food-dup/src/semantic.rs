@@ -59,11 +59,17 @@ struct Place {
 }
 
 /// How to start the engine: `engine` when given (an executable, or a
-/// `.dll` run with `dotnet`), else `DGF_DUP_CS`, else `dgf-dup-cs` on PATH.
+/// `.dll` run with `dotnet`), else `DGF_DUP_CS`, else the one shipped beside
+/// this binary (in `engine/`, as the packages ship it), else `dgf-dup-cs` on
+/// PATH.
 pub fn command(engine: Option<&Path>) -> Command {
     let chosen = engine
         .map(Path::to_path_buf)
         .or_else(|| std::env::var_os("DGF_DUP_CS").map(PathBuf::from))
+        .or_else(|| {
+            let exe = std::env::current_exe().ok()?;
+            shipped(exe.parent()?)
+        })
         .unwrap_or_else(|| PathBuf::from("dgf-dup-cs"));
     if chosen.extension().is_some_and(|e| e == "dll") {
         let mut command = Command::new("dotnet");
@@ -72,6 +78,12 @@ pub fn command(engine: Option<&Path>) -> Command {
     } else {
         Command::new(chosen)
     }
+}
+
+/// The engine shipped in `engine/` under `dir`, the folder of the binary.
+fn shipped(dir: &Path) -> Option<PathBuf> {
+    let dll = dir.join("engine").join("dgf-dup-cs.dll");
+    dll.is_file().then_some(dll)
 }
 
 /// What the engine is asked: scan test code too; run each type-4 class's
@@ -311,4 +323,19 @@ fn fill(copy: &mut Copy, file_lines: &mut std::collections::BTreeMap<String, usi
     file_lines
         .entry(copy.file.clone())
         .or_insert_with(|| text.map_or(copy.end_line, |t| t.lines().count()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_engine_shipped_beside_the_binary_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(shipped(dir.path()), None);
+        std::fs::create_dir(dir.path().join("engine")).unwrap();
+        let dll = dir.path().join("engine").join("dgf-dup-cs.dll");
+        std::fs::write(&dll, "").unwrap();
+        assert_eq!(shipped(dir.path()), Some(dll));
+    }
 }

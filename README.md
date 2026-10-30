@@ -47,11 +47,11 @@ The name comes from *dogfooding*: this repository is checked by its own tool, wi
 ## Install
 
 ```powershell
-cargo install --git https://github.com/bojanrmv/bt-dog-food dog-food-cli --locked
+dotnet tool install -g dgf
 dgf --version
 ```
 
-Building needs Rust and a C compiler, once. Per-system steps, updating, and the optional parts (the C# duplication engine, the test tools mutation runs use) are in **[docs/install.md](docs/install.md)**.
+The native binary for Windows, Linux or macOS, with the C# duplication engine; it needs the .NET 10 SDK. Building from source with cargo, the per-platform downloads, pinning a version per repository, and the test tools mutation runs use are in **[docs/install.md](docs/install.md)**.
 
 ## Quick start
 
@@ -170,7 +170,7 @@ The [VS Code extension](docs/integrations.md#vs-code) shows scores in the editor
 | [`editors/vscode`](editors/vscode) | the VS Code extension |
 | [`docs`](docs) | the guides above |
 
-Building, testing and adding a language: [docs/development.md](docs/development.md). The repository holds itself to its own [dgf.toml](dgf.toml) (warn above 5, fail above 6) in [CI](.github/workflows/ci.yml).
+Building, testing and adding a language: [docs/development.md](docs/development.md). Versions and making a release: [docs/releasing.md](docs/releasing.md). The repository holds itself to its own [dgf.toml](dgf.toml) (warn above 5, fail above 6) in [CI](.github/workflows/ci.yml).
 
 ## License
 

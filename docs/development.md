@@ -34,8 +34,9 @@ The repository checks itself with its own [dgf.toml](../dgf.toml) (warn above 5,
 | `crates/dog-food-cli/tests/e2e/dotnet` | a small xUnit solution that the end-to-end test mutates |
 | `crates/dog-food-dup/tests/corpus` | the labelled duplication corpus, and hand-labelled scans of real code |
 | `editors/vscode` | the VS Code extension |
+| `packaging/nuget` | the `dgf` .NET tool package ([releasing](releasing.md)) |
 
-Design and decisions: [architecture](architecture.md).
+Design and decisions: [architecture](architecture.md). Versions and making a release: [releasing](releasing.md).
 
 ## Adding a language or a rule
 

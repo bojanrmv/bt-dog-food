@@ -1,0 +1,71 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The `dgf` .NET tool. Its command runs the native dgf binary (Rust, built
+    by cargo) directly, so it starts and runs as fast as a cargo install; the
+    C# engine (dgf-dup-cs) ships beside it for the semantic duplication check.
+    One package per platform, and a small `dgf` package that points to them,
+    so an install downloads only its own binary. This project's own code is
+    never run: a .NET tool is packed from a project. See docs/releasing.md.
+
+    Before packing, put the binaries in place (scripts/pack-nuget.ps1 does it
+    for this machine, the release workflow for every platform):
+      native/<rid>/dgf[.exe]   the release build of dog-food-cli, per platform
+      engine/                  dotnet publish of crates/dog-food-dup/semantic, no apphost
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>dgf-launcher</AssemblyName>
+    <RootNamespace>Dgf</RootNamespace>
+    <SelfContained>false</SelfContained>
+    <UseAppHost>false</UseAppHost>
+
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>dgf</ToolCommandName>
+    <ToolCommandRunner>executable</ToolCommandRunner>
+    <ToolEntryPoint Condition="$(RuntimeIdentifier.StartsWith('win'))">dgf.exe</ToolEntryPoint>
+    <ToolEntryPoint Condition="'$(RuntimeIdentifier)' != '' And !$(RuntimeIdentifier.StartsWith('win'))">dgf</ToolEntryPoint>
+    <RuntimeIdentifiers>win-x64;win-arm64;linux-x64;linux-arm64;osx-x64;osx-arm64</RuntimeIdentifiers>
+    <ToolPackageRuntimeIdentifiers Condition="'$(ToolPackageRuntimeIdentifiers)' == ''">$(RuntimeIdentifiers)</ToolPackageRuntimeIdentifiers>
+
+    <PackageId>dgf</PackageId>
+    <Version Condition="'$(Version)' == ''">0.0.1</Version>
+    <Authors>Bojan Pavlovic</Authors>
+    <Description>Measures complexity, duplication and how well tests catch changes, in C#, TypeScript, JavaScript and Rust. One fast native binary; the C# duplication engine included.</Description>
+    <PackageTags>complexity;crap;duplication;mutation-testing;code-quality;roslyn;static-analysis</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/bojanrmv/bt-dog-food</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/bojanrmv/bt-dog-food</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageOutputPath>nupkg</PackageOutputPath>
+
+    <NativeDir>$(MSBuildThisFileDirectory)native/</NativeDir>
+    <EngineDir>$(MSBuildThisFileDirectory)engine/</EngineDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="engine/**;native/**;nupkg/**" />
+    <None Remove="engine/**;native/**;nupkg/**" />
+    <None Include="README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!-- Each platform's package: its binary, the entry point, and the engine,
+       which dgf finds in engine/ beside itself. -->
+  <ItemGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <None Include="$(NativeDir)$(RuntimeIdentifier)/*" Link="%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="$(EngineDir)**/*" Link="engine/%(RecursiveDir)%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="NeedsNativeBinary" BeforeTargets="Publish" Condition="'$(RuntimeIdentifier)' != ''">
+    <Error Condition="!Exists('$(NativeDir)$(RuntimeIdentifier)/dgf') And !Exists('$(NativeDir)$(RuntimeIdentifier)/dgf.exe')"
+           Text="No dgf binary in $(NativeDir)$(RuntimeIdentifier)/: build it first (scripts/pack-nuget.ps1, or the release workflow)." />
+    <Error Condition="!Exists('$(EngineDir)dgf-dup-cs.dll')"
+           Text="No C# engine in $(EngineDir): dotnet publish crates/dog-food-dup/semantic -o $(EngineDir)" />
+  </Target>
+
+</Project>

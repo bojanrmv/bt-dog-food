@@ -12,7 +12,7 @@ dgf dup --semantic                 # both engines, one report
 dgf dup --semantic --confirm       # also run each type-4 group on generated inputs
 ```
 
-The engine is found as `--semantic-engine PATH`, else the `DGF_DUP_CS` variable, else `dgf-dup-cs` on the PATH.
+The engine is found as `--semantic-engine PATH`, else the `DGF_DUP_CS` variable, else `engine/` beside the `dgf` binary (where the NuGet package and the release downloads put it), else `dgf-dup-cs` on the PATH. Installed with `dotnet tool install -g dgf`, it is already there.
 
 ## Type 4: the same behaviour
 

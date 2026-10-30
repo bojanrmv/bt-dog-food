@@ -1,0 +1,195 @@
+# Release: a version tag (v0.2.0, or v0.2.0-rc.1 for a prerelease) builds
+# dgf for every platform, packs the `dgf` .NET tool, installs it on Windows,
+# Linux and macOS and runs it, then, after approval in the `nuget`
+# environment, pushes it to nuget.org and creates the GitHub release.
+# Run by hand (workflow_dispatch), it does everything but publish.
+# See docs/releasing.md.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        name: The version in Cargo.toml, which a tag must match
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF#refs/tags/v}" != "$version" ]]; then
+            echo "::error::tag ${GITHUB_REF#refs/tags/} does not match Cargo.toml's version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - { rid: win-x64,     os: windows-latest,   target: x86_64-pc-windows-msvc }
+          - { rid: win-arm64,   os: windows-11-arm,   target: aarch64-pc-windows-msvc }
+          - { rid: linux-x64,   os: ubuntu-latest,    target: x86_64-unknown-linux-musl }
+          - { rid: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { rid: osx-x64,     os: macos-latest,     target: x86_64-apple-darwin }
+          - { rid: osx-arm64,   os: macos-latest,     target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # Linux binaries are static (musl), so they run on any distribution.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [[ "$TARGET" == *musl ]]; then
+            export "CC_${TARGET//-/_}=musl-gcc"
+          fi
+          cargo build --release --locked -p dog-food-cli --target "$TARGET"
+          mkdir -p out
+          cp target/"$TARGET"/release/dgf target/"$TARGET"/release/dgf.exe out/ 2>/dev/null || true
+          ls out/dgf*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rid }}
+          path: out/*
+
+  pack:
+    needs: [version, binaries]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: packaging/nuget/native
+      - name: Binaries in native/<rid>
+        working-directory: packaging/nuget/native
+        run: for d in native-*; do mv "$d" "${d#native-}"; done; ls -R
+      - name: The C# engine
+        run: >
+          dotnet publish crates/dog-food-dup/semantic -c Release -o packaging/nuget/engine
+          -p:UseAppHost=false -p:SatelliteResourceLanguages=en "-p:Version=$VERSION"
+      - name: Pack the dgf tool and dgf-dup-cs
+        run: |
+          dotnet pack packaging/nuget -c Release "-p:Version=$VERSION"
+          dotnet pack crates/dog-food-dup/semantic -c Release "-p:Version=$VERSION" -o packaging/nuget/nupkg
+          ls -la packaging/nuget/nupkg
+      - name: Downloads for the GitHub release (binary and engine)
+        run: |
+          mkdir -p archives
+          for dir in "packaging/nuget/native/"*/; do
+            rid=$(basename "$dir")
+            stage="dgf-$VERSION-$rid"
+            mkdir -p "$stage"
+            cp "$dir"* "$stage/"
+            cp -r packaging/nuget/engine "$stage/engine"
+            cp README.md LICENSE "$stage/"
+            chmod +x "$stage/dgf" 2>/dev/null || true
+            if [[ $rid == win-* ]]; then
+              zip -qr "archives/$stage.zip" "$stage"
+            else
+              tar -czf "archives/$stage.tar.gz" "$stage"
+            fi
+          done
+          ls -la archives
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: packaging/nuget/nupkg/*.nupkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archives
+          path: archives/*
+
+  # The packages as a user gets them: installed with dotnet tool install and run.
+  test:
+    needs: [version, pack]
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          name: nupkg
+          path: nupkg
+      - name: Install and run
+        shell: bash
+        run: |
+          dotnet tool install -g dgf --add-source nupkg --version "$VERSION"
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          dgf=dgf; [[ "$RUNNER_OS" == Windows ]] && dgf=dgf.cmd   # the shim .NET writes there
+          test "$($dgf --version)" = "dgf $VERSION"
+          $dgf analyze crates --format markdown > /dev/null
+          # The bundled C# engine: type-4 groups need it.
+          $dgf dup crates/dog-food-dup/tests/corpus/csharp --tests --semantic --format agent | grep -q "type 4"
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, test]
+    runs-on: ubuntu-latest
+    environment: nuget          # approval before anything is published
+    permissions:
+      contents: write           # the GitHub release
+      id-token: write           # nuget.org trusted publishing
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          name: nupkg
+          path: nupkg
+      - uses: actions/download-artifact@v4
+        with:
+          name: archives
+          path: archives
+      - uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+      # The platform packages first: the `dgf` package points to them.
+      - name: Push to nuget.org
+        env:
+          KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: |
+          push() { dotnet nuget push "$1" --api-key "$KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate; }
+          for p in nupkg/dgf.*-*."$VERSION".nupkg; do push "$p"; done
+          push "nupkg/dgf-dup-cs.$VERSION.nupkg"
+          push "nupkg/dgf.$VERSION.nupkg"
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=$([[ "$VERSION" == *-* ]] && echo --prerelease)
+          gh release create "v$VERSION" archives/* --repo "$GITHUB_REPOSITORY" \
+            --title "dgf $VERSION" --generate-notes ${prerelease:+"$prerelease"}
