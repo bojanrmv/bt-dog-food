@@ -73,6 +73,25 @@ public static class Queries
         }
     }
 
+    /// <summary>
+    /// A query inside a lambda of another query (a correlated subquery, as
+    /// in a <c>Select</c> projection): EF Core translates it into the outer
+    /// query's SQL, and cannot translate a call to an extension method there.
+    /// </summary>
+    public static bool InsideAnotherQuery(QueryUse use)
+    {
+        var inLambda = false;
+        for (var at = use.Root.Parent; at is not null; at = at.Parent)
+        {
+            inLambda |= at is IAnonymousFunctionOperation;
+            if (inLambda && at is IInvocationOperation outer && IsStep(outer))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     static bool IsStep(IInvocationOperation call) =>
         call.TargetMethod.ContainingType?.ToDisplayString() is { } owner && Owners.Contains(owner)
         && call.Arguments.Length > 0 && ElementOf(Unwrapped(call.Arguments[0].Value).Type) is not null;

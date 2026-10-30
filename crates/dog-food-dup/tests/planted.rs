@@ -555,3 +555,95 @@ fn lists_of_calls_configuring_a_parameter_are_not_copies() {
         found.classes
     );
 }
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Two classes whose methods hold one copy each of `body`.
+fn pair(names: [&str; 2], body: &str) -> String {
+    names
+        .iter()
+        .map(|n| format!("class {n}\n{{\n    decimal Sum(Item item, decimal limit, DateTime now, List<string> log)\n    {{\n{body}    }}\n}}\n"))
+        .collect()
+}
+
+#[test]
+fn with_changes_only_the_groups_the_branch_added_are_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    // On main: an old copy group.
+    write(
+        root,
+        "Old.cs",
+        &pair(["OldA", "OldB"], &body("item", "Price", "total")),
+    );
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "work"]);
+    // The branch edits a line inside both old copies, as uniting other code does...
+    let old = std::fs::read_to_string(root.join("Old.cs")).unwrap();
+    write(root, "Old.cs", &old.replace("counted", "counted once"));
+    // ...and adds a copy group of its own, of other code.
+    let other = "        var names = new List<string>();
+        foreach (var line in item.Lines)
+        {
+            if (line.Quantity > 0 && line.Sku != null)
+            {
+                names.Add(line.Sku.Trim() + \" x\" + line.Quantity);
+            }
+        }
+        names.Sort(StringComparer.Ordinal);
+        log.AddRange(names);
+        return names.Count * limit;
+";
+    write(root, "New.cs", &pair(["NewA", "NewB"], other));
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_dgf-dup"))
+        .current_dir(root)
+        .args([
+            "--changes",
+            "--format",
+            "json",
+            "--min-tokens",
+            "30",
+            "--min-lines",
+            "4",
+        ])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
+    let files: Vec<&str> = report["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| c["copies"].as_array().unwrap())
+        .map(|c| c["file"].as_str().unwrap())
+        .collect();
+    assert!(files.iter().all(|f| *f == "New.cs"), "{report:#}");
+    assert!(!files.is_empty(), "{report:#}");
+    let scope = report["scope"].as_str().unwrap();
+    assert!(
+        scope.contains("1 groups with a changed copy were at the base already"),
+        "{scope}"
+    );
+}

@@ -37,4 +37,4 @@ A group's id comes from its kind and the functions its copies are in. It stays t
 dgf dup --changes --base origin/main --fail-on-copies
 ```
 
-The whole repository is scanned, because a new copy is usually a copy of code the branch did not touch. Only groups with a copy in the branch's changed lines are reported, uncommitted edits and new files included. `--fail-on-copies` exits 1 when there is one. Repeated queries are advice and never fail it.
+The whole repository is scanned, because a new copy is usually a copy of code the branch did not touch. Only groups with a copy in the branch's changed lines are reported, uncommitted edits and new files included, and only those the branch added: the merge base is scanned the same way (from a copy of its files), and a group it already had is left out even when the branch changed lines in it, as uniting other copies does. The report says how many were left out. Scanning the base makes `--changes` take about twice as long. `--fail-on-copies` exits 1 when there is one. Repeated queries are advice and never fail it.

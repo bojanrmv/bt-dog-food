@@ -138,7 +138,8 @@ fn run(args: &Args) -> Result<ExitCode, (u8, String)> {
         found.apply(crate::decisions::load(path).map_err(|e| (2, e))?);
     }
     if let Some(changes) = &changes {
-        found.keep_changed(changes);
+        let at_base = at_base(changes, args, &paths, settings)?;
+        found.keep_changed(changes, Some(&at_base));
     }
     assess(&mut found, args, &root)?;
     write(&render(&found, args), args.output.as_deref())?;
@@ -150,6 +151,35 @@ fn run(args: &Args) -> Result<ExitCode, (u8, String)> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// The ids of the groups the merge base had, scanned the same way in a copy
+/// of its files: a group the branch did not add is not its finding.
+fn at_base(
+    changes: &Changes,
+    args: &Args,
+    paths: &[PathBuf],
+    settings: Settings,
+) -> Result<std::collections::BTreeSet<String>, (u8, String)> {
+    let dir = std::env::temp_dir().join(format!("dgf-dup-base-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| (3, format!("{}: {e}", dir.display())))?;
+    let scanned = (|| {
+        changes.export_base(&dir).map_err(|e| (2, e))?;
+        let base_paths: Vec<PathBuf> = paths
+            .iter()
+            .filter_map(|p| {
+                let p = std::path::absolute(p).ok()?;
+                Some(dir.join(p.strip_prefix(&changes.root).ok()?))
+            })
+            .collect();
+        let engine = start_semantic(args, &base_paths, &dir)?;
+        let mut found = scan(&base_paths, &dir, args.tests, settings);
+        add_semantic(&mut found, engine, &dir)?;
+        Ok(found.classes.into_iter().map(|c| c.id).collect())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    scanned
 }
 
 /// The C# engine's classes in the report, once it has the syntactic C#

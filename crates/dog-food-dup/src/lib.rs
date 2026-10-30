@@ -75,7 +75,15 @@ impl Report {
     /// Only the findings with a copy in lines the branch changed, those
     /// copies marked: a new copy of old code, or code copied within the
     /// branch. The scan still covers everything, so the other copies show.
-    pub fn keep_changed(&mut self, changes: &changes::Changes) {
+    ///
+    /// With `at_base`, the ids of the groups the merge base already had, a
+    /// group the branch only edited (uniting other copies changes lines in
+    /// it) is left out too: only what the branch added is reported.
+    pub fn keep_changed(
+        &mut self,
+        changes: &changes::Changes,
+        at_base: Option<&std::collections::BTreeSet<String>>,
+    ) {
         for class in &mut self.classes {
             for copy in &mut class.copies {
                 copy.changed = changes.touches(&copy.file, copy.start_line, copy.end_line);
@@ -83,6 +91,11 @@ impl Report {
         }
         self.classes
             .retain(|c| c.copies.iter().any(|copy| copy.changed));
+        let touched = self.classes.len();
+        if let Some(at_base) = at_base {
+            self.classes.retain(|c| !at_base.contains(&c.id));
+        }
+        let old = touched - self.classes.len();
         let used: std::collections::BTreeSet<String> = self
             .classes
             .iter()
@@ -90,8 +103,13 @@ impl Report {
             .collect();
         self.file_lines.retain(|file, _| used.contains(file));
         self.duplicated_lines = duplicated(&self.classes);
+        let old = if old > 0 {
+            format!("; {old} groups with a changed copy were at the base already and are left out")
+        } else {
+            String::new()
+        };
         self.scope = Some(format!(
-            "findings with a copy in what the branch changed since {} ({}): {} changed files",
+            "findings with a copy in what the branch changed since {} ({}): {} changed files{old}",
             changes.base,
             changes.commit,
             changes.lines.len()

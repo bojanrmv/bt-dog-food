@@ -12,10 +12,20 @@ public class Order
 
 public record Request(Guid ShopId);
 
+public class Store
+{
+    public Guid Id { get; set; }
+    public string Name { get; set; } = "";
+}
+
+public record StoreRow(Guid Id, int Open);
+
 public class Context
 {
     readonly List<Order> orders = [];
     public IQueryable<Order> Orders => orders.AsQueryable();
+    readonly List<Store> stores = [];
+    public IQueryable<Store> Stores => stores.AsQueryable();
 }
 
 public class OpenOrders(Context db)
@@ -62,4 +72,11 @@ public class TotalsReport(Context db)
 {
     public decimal[] Latest(Guid id) =>
         db.Orders.Where(order => order.ShopId == id).OrderByDescending(order => order.PlacedAt).Select(order => order.Total).ToArray();
+}
+
+// The same filter inside another query's lambda: a correlated subquery.
+public class StoreSummaries(Context db)
+{
+    public List<StoreRow> List() =>
+        db.Stores.Select(s => new StoreRow(s.Id, db.Orders.Where(o => o.ShopId == s.Id && !o.IsDeleted).Count())).ToList();
 }

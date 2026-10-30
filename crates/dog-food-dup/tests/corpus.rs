@@ -137,7 +137,21 @@ fn repeated_queries_on_a_table_get_one_extension_method_each() {
     let filter = find("ForShopNotDeleted");
     assert_eq!(
         functions(filter),
-        ["OpenOrders.List", "OrderCounts.Count", "OrderLookup.First"]
+        [
+            "OpenOrders.List",
+            "OrderCounts.Count",
+            "OrderLookup.First",
+            "StoreSummaries.List"
+        ]
+    );
+    // One of them is a correlated subquery, where EF Core cannot call the extension.
+    assert!(
+        filter
+            .cautions
+            .iter()
+            .any(|c| c.contains("1 of these sits inside another query's lambda")),
+        "{:?}",
+        filter.cautions
     );
     assert_eq!(filter.entity.as_deref(), Some("Shop.Order"));
     assert!(
@@ -153,7 +167,7 @@ fn repeated_queries_on_a_table_get_one_extension_method_each() {
         filter.template
     );
     // The soft-delete condition, in four different queries.
-    assert_eq!(find("NotDeleted").copies.len(), 4);
+    assert_eq!(find("NotDeleted").copies.len(), 5);
     // The same filter, order and projection.
     let shaped = find("ForShopSelected");
     assert_eq!(

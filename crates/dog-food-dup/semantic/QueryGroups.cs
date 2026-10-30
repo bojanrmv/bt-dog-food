@@ -135,6 +135,7 @@ public static class QueryGroups
         var cautions = terminals.Count > 1
             ? [$"the queries end differently ({string.Join(", ", terminals)}): the extension stops before that, and each keeps its own"]
             : new List<string>();
+        cautions.AddRange(Correlated(group));
         return new Class
         {
             Kind = "query",
@@ -149,6 +150,16 @@ public static class QueryGroups
             Cautions = cautions,
             Rules = group.SelectMany(u => u.Trace.Rules).Append($"{what} on {Short(group[0].Entity)}, by meaning").Distinct().Order(StringComparer.Ordinal).ToList(),
         };
+    }
+
+    /// <summary>The copies inside another query's lambda, where EF Core cannot call the extension.</summary>
+    static IEnumerable<string> Correlated(List<QueryUse> group)
+    {
+        var inside = group.Where(Queries.InsideAnotherQuery).Select(u => $"{u.File}:{u.StartLine}").ToList();
+        if (inside.Count > 0)
+        {
+            yield return $"{inside.Count} of these {(inside.Count == 1 ? "sits" : "sit")} inside another query's lambda, a correlated subquery ({string.Join(", ", inside.Take(3))}): EF Core turns that into the outer query's SQL and cannot translate a call to the extension there, so keep the condition written out in those";
+        }
     }
 
     // ---- code ------------------------------------------------------------------------------

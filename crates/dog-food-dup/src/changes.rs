@@ -12,6 +12,8 @@ pub struct Changes {
     pub base: String,
     /// The merge base, short.
     pub commit: String,
+    /// The merge base, in full.
+    pub fork: String,
     pub lines: HashMap<String, Vec<(usize, usize)>>,
 }
 
@@ -41,13 +43,41 @@ impl Changes {
                 lines.insert(path.to_string(), vec![(1, usize::MAX)]);
             }
         }
-        let commit = first_line(&git(&root, &["rev-parse", "--short", &fork])?).unwrap_or(fork);
+        let commit =
+            first_line(&git(&root, &["rev-parse", "--short", &fork])?).unwrap_or(fork.clone());
         Ok(Changes {
             root,
             base,
             commit,
+            fork,
             lines,
         })
+    }
+
+    /// Writes the merge base's files into `dir` (an empty folder), without
+    /// touching the repository: a temporary index read from the commit and
+    /// checked out there. Each restored C# project's package list
+    /// (`obj/project.assets.json`) is copied along, so the C# engine binds
+    /// the base as it binds the branch.
+    pub fn export_base(&self, dir: &Path) -> Result<(), String> {
+        let index = dir.join(".dgf-base-index");
+        git_with_index(&self.root, &["read-tree", &self.fork], &index)?;
+        let work_tree = format!("--work-tree={}", dir.display());
+        git_with_index(&self.root, &[&work_tree, "checkout-index", "--all"], &index)?;
+        let _ = std::fs::remove_file(&index);
+        for assets in restored_projects(&self.root) {
+            let Ok(relative) = assets.strip_prefix(&self.root) else {
+                continue;
+            };
+            let to = dir.join(relative);
+            if to
+                .parent()
+                .is_some_and(|p| std::fs::create_dir_all(p).is_ok())
+            {
+                let _ = std::fs::copy(&assets, to);
+            }
+        }
+        Ok(())
     }
 
     /// Whether lines `start..=end` of `file` (relative to the root) changed.
@@ -56,6 +86,61 @@ impl Changes {
             .get(file)
             .is_some_and(|ranges| ranges.iter().any(|&(from, to)| start <= to && from <= end))
     }
+}
+
+/// `git` with its index in `index` instead of the repository's.
+fn git_with_index(dir: &Path, args: &[&str], index: &Path) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_INDEX_FILE", index)
+        .output()
+        .map_err(|err| format!("could not run git: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`git {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Every `obj/project.assets.json` under `root`, not in build output,
+/// packages or git's own folder.
+fn restored_projects(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut folders = vec![root.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for dir in subfolders(&folder) {
+            let assets = dir.join("project.assets.json");
+            match dir.file_name().and_then(|n| n.to_str()) {
+                Some("obj") if assets.is_file() => found.push(assets),
+                Some("obj") => {}
+                _ => folders.push(dir),
+            }
+        }
+    }
+    found
+}
+
+/// The folders in `folder`, without git's, packages' and build output's.
+fn subfolders(folder: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter(|p| {
+            !matches!(
+                p.file_name().and_then(|n| n.to_str()),
+                Some(".git" | "node_modules" | "bin" | "target")
+            )
+        })
+        .collect()
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
