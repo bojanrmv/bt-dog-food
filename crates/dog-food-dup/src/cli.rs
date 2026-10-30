@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
+use dog_food_core::progress;
 
 use crate::changes::Changes;
 use crate::{report, risk, scan, semantic, Report, Settings};
@@ -116,6 +117,7 @@ pub fn run_args(args: &Args) -> ExitCode {
     match run(args) {
         Ok(code) => code,
         Err((code, err)) => {
+            progress::finish();
             eprintln!("error: {err}");
             ExitCode::from(code)
         }
@@ -132,16 +134,28 @@ fn run(args: &Args) -> Result<ExitCode, (u8, String)> {
     let (paths, root) = scope(args, changes.as_ref());
     // The C# engine runs in its own process, alongside the syntactic scan.
     let engine = start_semantic(args, &paths, &root)?;
+    progress::step("finding copies");
     let mut found = scan(&paths, &root, args.tests, settings);
-    add_semantic(&mut found, engine, &root)?;
+    progress::done(format!(
+        "{} groups in {} files",
+        found.classes.len(),
+        found.files
+    ));
+    semantic_step(args, &mut found, engine, &root)?;
     if let Some(path) = &args.decisions {
         found.apply(crate::decisions::load(path).map_err(|e| (2, e))?);
     }
     if let Some(changes) = &changes {
+        progress::step(format!(
+            "the same scan of the merge base {}, to leave out what was there",
+            changes.commit
+        ));
         let at_base = at_base(changes, args, &paths, settings)?;
+        progress::done(format!("{} groups", at_base.len()));
         found.keep_changed(changes, Some(&at_base));
     }
     assess(&mut found, args, &root)?;
+    progress::finish();
     write(&render(&found, args), args.output.as_deref())?;
     // Repeated queries are advice: a gate fails on copied code only.
     let copied = args.fail_on_copies && found.classes.iter().any(|c| c.kind != "query");
@@ -180,6 +194,30 @@ fn at_base(
     })();
     let _ = std::fs::remove_dir_all(&dir);
     scanned
+}
+
+/// Waits for the C# engine, as a step of its own: it usually takes longest.
+fn semantic_step(
+    args: &Args,
+    found: &mut Report,
+    engine: Option<std::process::Child>,
+    root: &std::path::Path,
+) -> Result<(), (u8, String)> {
+    if engine.is_none() {
+        return Ok(());
+    }
+    progress::step(if args.confirm {
+        "C# engine: the same behaviour written differently, then running it to confirm"
+    } else {
+        "C# engine: the same behaviour written differently, repeated queries"
+    });
+    let before = found.classes.len();
+    add_semantic(found, engine, root)?;
+    progress::done(format!(
+        "{} more groups",
+        found.classes.len().saturating_sub(before)
+    ));
+    Ok(())
 }
 
 /// The C# engine's classes in the report, once it has the syntactic C#

@@ -19,6 +19,7 @@ Every `dgf` command, every option, and how they combine. `dgf <command> --help` 
 - **Paths** on the command line are relative to the current folder; paths in `dgf.toml` are relative to the file. `dgf` finds `dgf.toml` in the current folder or the nearest parent.
 - **Always skipped:** files ignored by `.gitignore` (also outside a git repository), and generated `*.d.ts`, `*.g.cs` and `*.Designer.cs` files.
 - **Output:** every report command takes `--format <FORMAT>` and `-o, --output <FILE>`. Without `-o`, the report goes to the terminal; with it, to the file, and a one-line note to the terminal.
+- **Progress:** while a command works, the terminal shows each step, what it found and how long it took, with a clock on the step under way (`finding copies: 236 groups in 2039 files (3.1 s)`). It goes to stderr and only to a terminal, so piped, in CI or run by an agent, the output is the report alone. `DGF_PROGRESS=0` turns it off; `DGF_PROGRESS=1` also prints the finished steps when the output is not a terminal, for example in a CI log. `dgf mutate --run` reports its runs this way as well.
 
 ## Common options
 

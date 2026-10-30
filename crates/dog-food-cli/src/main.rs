@@ -45,7 +45,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use dog_food_core::FileReport;
+use dog_food_core::{progress, FileReport};
 use rayon::prelude::*;
 
 use baseline::Baseline;
@@ -326,6 +326,7 @@ fn main() -> ExitCode {
         Command::Duplication(args) => return duplication(args),
     };
     result.unwrap_or_else(|(code, message)| {
+        progress::finish();
         tellln!("error: {message}");
         ExitCode::from(code)
     })
@@ -459,8 +460,14 @@ fn scan(paths: &[PathBuf], excludes: Excludes) -> Result<(Vec<FileReport>, Vec<S
     if let Some(missing) = paths.iter().find(|p| !p.exists()) {
         return Err(io(format!("path not found: {}", missing.display())));
     }
+    progress::step("finding source files");
     let files = discover::discover(paths, excludes);
-    Ok(analyze_files(&files))
+    progress::done(format!("{} files", files.len()));
+    progress::step("scoring every function");
+    let (reports, warnings) = analyze_files(&files);
+    let functions: usize = reports.iter().map(|r| r.functions.len()).sum();
+    progress::done(format!("{functions} functions"));
+    Ok((reports, warnings))
 }
 
 /// `--coverage` paths, else `[coverage] paths` from dgf.toml; none means no coverage.
@@ -479,7 +486,10 @@ fn load_coverage(args: &[PathBuf], settings: &Settings) -> Result<Option<Coverag
     if paths.is_empty() {
         return Ok(None);
     }
-    Coverage::load(&paths).map(Some).map_err(usage)
+    progress::step("reading coverage");
+    let coverage = Coverage::load(&paths).map_err(usage)?;
+    progress::done(format!("{} reports", coverage.sources.len()));
+    Ok(Some(coverage))
 }
 
 /// Adds coverage and a CRAP score to every row the reports cover; a CRAP score
@@ -546,6 +556,7 @@ fn compare(args: ChangesArgs) -> Result<ExitCode, Failure> {
     let root = git::root(&settings.cwd).map_err(usage)?;
     let staged_base = args.staged.then(|| "HEAD".to_string());
     let (base, base_warnings) = base_for(args.base.clone().or(staged_base), &settings, &root)?;
+    progress::step(format!("comparing with {base}"));
     let mut run = changes::collect(changes::Request {
         base,
         root: &root,
@@ -562,6 +573,11 @@ fn compare(args: ChangesArgs) -> Result<ExitCode, Failure> {
         limits: &settings.limits,
     })
     .map_err(usage)?;
+    progress::done(format!(
+        "{} changed files, {} functions",
+        run.files.len(),
+        run.rows.len()
+    ));
     run.warnings.splice(0..0, base_warnings);
 
     let code = fail_code(run.verdict() == Status::Fail);
@@ -1105,6 +1121,7 @@ fn save_history(run: &Run, config_dir: &Path, dir: &Path) -> Result<(), Failure>
 
 /// Prints the report, or writes it to `--output`.
 fn write_report(text: &str, out: &OutputArgs) -> Result<(), Failure> {
+    progress::finish();
     let Some(path) = &out.output else {
         say!("{text}");
         return Ok(());

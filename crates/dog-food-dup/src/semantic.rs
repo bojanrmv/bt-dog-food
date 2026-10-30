@@ -241,11 +241,11 @@ fn read(output: std::process::Output) -> Result<Read, String> {
     };
     for wrong in &found.disproved {
         let functions: Vec<&str> = wrong.copies.iter().map(|c| c.function.as_str()).collect();
-        eprintln!(
+        dog_food_core::progress::note(&format!(
             "dgf-dup: left out, running them disproved it: {} ({})",
             functions.join(" vs "),
             wrong.example
-        );
+        ));
     }
     Ok((found.classes.into_iter().map(class).collect(), signatures))
 }
