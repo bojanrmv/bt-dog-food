@@ -190,6 +190,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          prerelease=$([[ "$VERSION" == *-* ]] && echo --prerelease)
+          prerelease=()
+          if [[ "$VERSION" == *-* ]]; then prerelease=(--prerelease); fi
           gh release create "v$VERSION" archives/* --repo "$GITHUB_REPOSITORY" \
-            --title "dgf $VERSION" --generate-notes ${prerelease:+"$prerelease"}
+            --title "dgf $VERSION" --generate-notes "${prerelease[@]}"
