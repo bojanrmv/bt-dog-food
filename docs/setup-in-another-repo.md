@@ -8,7 +8,7 @@ You are setting up **dog-food**, a local CLI (`dgf`) that scores every function 
 dgf --version
 ```
 
-If it is not recognized: `$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"`. If still missing: `cargo install --git https://github.com/bojanrmv/bt-dog-food dog-food-cli --locked`. If the repository has no `.cs`, `.ts`, `.tsx`, `.js`, `.jsx` or `.rs` files, stop and say so.
+If it is not recognized: `dotnet tool install -g dgf` (needs the .NET 10 SDK), then open a new terminal; other ways are in https://github.com/bojanrmv/bt-dog-food/blob/main/docs/install.md. If the repository has no `.cs`, `.ts`, `.tsx`, `.js`, `.jsx` or `.rs` files, stop and say so.
 
 ## 2. Install the skill, then use `--format agent`
 

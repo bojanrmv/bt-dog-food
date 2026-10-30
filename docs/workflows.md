@@ -82,12 +82,14 @@ A snapshot holds the time, commit, branch, summary numbers and every function's 
 
 ## CI
 
-This repository's own workflow, [.github/workflows/ci.yml](../.github/workflows/ci.yml), is a complete example: build and test on Linux and Windows, then
+A job that checks a repository with the released `dgf`:
 
 ```yaml
 - uses: actions/checkout@v4
   with: { fetch-depth: 0 }                       # dgf changes needs the base branch
-- run: cargo install --path crates/dog-food-cli --locked   # or --git <repo url> dog-food-cli
+- uses: actions/setup-dotnet@v4
+  with: { dotnet-version: 10.0.x }
+- run: dotnet tool install -g dgf --version 0.0.1   # pin it: a new release cannot change the gate
 - run: dgf analyze --format markdown >> "$GITHUB_STEP_SUMMARY"          # fails above the limits
 - run: dgf changes --base "origin/${{ github.base_ref }}" --format markdown >> "$GITHUB_STEP_SUMMARY"
   if: github.event_name == 'pull_request'
@@ -95,6 +97,8 @@ This repository's own workflow, [.github/workflows/ci.yml](../.github/workflows/
 - uses: github/codeql-action/upload-sarif@v3      # functions above a limit as PR annotations
   with: { sarif_file: dgf.sarif, category: dog-food }
 ```
+
+This repository's own workflow, [.github/workflows/ci.yml](../.github/workflows/ci.yml), does the same with `dgf` built from its source. In a repository with a [tool manifest](install.md#as-a-net-tool), `dotnet tool restore` installs the pinned version instead.
 
 The exit code does the gating: 1 when something is above `fail`. `-o` writes a file and still sets the exit code. Upload `dgf-report.html` as an artifact to keep the full picture per build.
 

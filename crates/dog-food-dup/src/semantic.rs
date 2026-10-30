@@ -66,10 +66,7 @@ pub fn command(engine: Option<&Path>) -> Command {
     let chosen = engine
         .map(Path::to_path_buf)
         .or_else(|| std::env::var_os("DGF_DUP_CS").map(PathBuf::from))
-        .or_else(|| {
-            let exe = std::env::current_exe().ok()?;
-            shipped(exe.parent()?)
-        })
+        .or_else(|| shipped_beside(&std::env::current_exe().ok()?))
         .unwrap_or_else(|| PathBuf::from("dgf-dup-cs"));
     if chosen.extension().is_some_and(|e| e == "dll") {
         let mut command = Command::new("dotnet");
@@ -78,6 +75,13 @@ pub fn command(engine: Option<&Path>) -> Command {
     } else {
         Command::new(chosen)
     }
+}
+
+/// The engine shipped beside the binary `exe`. The binary can be run
+/// through a link (a .NET tool's command on macOS is one, and macOS gives
+/// the link's path as the program's), so the folder it links to counts too.
+fn shipped_beside(exe: &Path) -> Option<PathBuf> {
+    shipped(exe.parent()?).or_else(|| shipped(std::fs::canonicalize(exe).ok()?.parent()?))
 }
 
 /// The engine shipped in `engine/` under `dir`, the folder of the binary.
@@ -337,5 +341,20 @@ mod tests {
         let dll = dir.path().join("engine").join("dgf-dup-cs.dll");
         std::fs::write(&dll, "").unwrap();
         assert_eq!(shipped(dir.path()), Some(dll));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_engine_is_found_beside_a_binary_run_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("package");
+        std::fs::create_dir_all(package.join("engine")).unwrap();
+        std::fs::write(package.join("engine").join("dgf-dup-cs.dll"), "").unwrap();
+        std::fs::write(package.join("dgf"), "").unwrap();
+        let tools = dir.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        std::os::unix::fs::symlink(package.join("dgf"), tools.join("dgf")).unwrap();
+        let found = shipped_beside(&tools.join("dgf")).unwrap();
+        assert!(found.ends_with("package/engine/dgf-dup-cs.dll"));
     }
 }

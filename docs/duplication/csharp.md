@@ -5,14 +5,13 @@
 `--semantic` adds `dgf-dup-cs`, a .NET tool built on the C# compiler (Roslyn). It finds methods that compute the same result even when the code looks different, reads every LINQ query ([repeated queries](queries.md)), and gives each syntactic C# copy an exact signature. It runs at the same time as the syntactic engine.
 
 ```powershell
-dotnet pack crates/dog-food-dup/semantic -c Release
-dotnet tool install -g dgf-dup-cs --add-source crates/dog-food-dup/semantic/nupkg
+dotnet tool install -g dgf-dup-cs   # only with dgf built from source: the dgf package includes it
 
 dgf dup --semantic                 # both engines, one report
 dgf dup --semantic --confirm       # also run each type-4 group on generated inputs
 ```
 
-The engine is found as `--semantic-engine PATH`, else the `DGF_DUP_CS` variable, else `engine/` beside the `dgf` binary (where the NuGet package and the release downloads put it), else `dgf-dup-cs` on the PATH. Installed with `dotnet tool install -g dgf`, it is already there.
+The engine is found as `--semantic-engine PATH`, else the `DGF_DUP_CS` variable, else `engine/` beside the `dgf` binary, following a link to it (where the NuGet package and the release downloads put it), else `dgf-dup-cs` on the PATH. Installed with `dotnet tool install -g dgf`, it is already there. To run a changed engine from this repository: `dotnet pack crates/dog-food-dup/semantic -c Release`, then `dotnet tool update -g dgf-dup-cs --add-source crates/dog-food-dup/semantic/nupkg`, or point `DGF_DUP_CS` at its `.dll`.
 
 ## Type 4: the same behaviour
 

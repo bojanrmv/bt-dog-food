@@ -7,7 +7,7 @@ Shows the complexity of every function while you work on C#, TypeScript/JavaScri
 - **Status bar**: the most complex function in the open file; click it for the workspace report.
 - **Commands** (Ctrl+Shift+P, "dog-food"): open the workspace, changes (this branch vs main) or history report in the browser, or re-analyze the current file.
 
-Files are analyzed when opened and saved. The extension runs the `dgf` command line tool, which must be installed (`cargo install --path crates/dog-food-cli` in the dog-food repository) or configured with the `dogFood.path` setting.
+Files are analyzed when opened and saved. The extension runs the `dgf` command line tool, which must be installed (`dotnet tool install -g dgf`, or see [install](../../docs/install.md)) or configured with the `dogFood.path` setting.
 
 ## Install
 

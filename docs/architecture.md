@@ -213,15 +213,15 @@ The core stays small; growth happens behind three seams.
 
 ## Distribution
 
-One Rust core, several thin wrappers. Only the first two are in scope for v1.
+One Rust core, delivered as the same native binary everywhere. How a release is made: [releasing](releasing.md).
 
-| Channel | How | Users | When |
+| Channel | How | Users | Status |
 | --- | --- | --- | --- |
-| Rust crate | `dog-food-core` on crates.io | Rust tools embedding the engine | v1 |
-| CLI binary | Prebuilt for Windows, Linux, macOS (x64, arm64) via `cargo-dist` and GitHub Releases | Everyone, CI | v1 |
-| npm package | Native Node module via `napi-rs`, or the CLI binary per platform (the Biome and SWC model) | TS developers: `npx dgf` | v2 |
-| .NET tool | `dotnet tool install dog-food`, wrapping the platform binary | C# developers | v2 |
-| WebAssembly | `wasm-bindgen` build of the core | VS Code extension, browser playground | Later |
+| .NET tool | `dotnet tool install -g dgf`: one package per platform, whose command is the native binary itself (no .NET wrapper), with the C# engine beside it | C# developers, CI | from 0.0.1 |
+| CLI binary | Archives for Windows, Linux (static), macOS (x64, arm64) on GitHub Releases, from the same release workflow | Everyone without .NET | from 0.0.1 |
+| npm package | The CLI binary per platform (the Biome and esbuild model); `dgf` is taken on npm, so a scoped name | TS developers: `npx` | later |
+| Rust crate | `dog-food-core` on crates.io; until then a git dependency | Rust tools embedding the engine | later |
+| WebAssembly | `wasm-bindgen` build of the core | VS Code extension, browser playground | later |
 
 The core library has no I/O assumptions (it accepts paths or in-memory source text), so the WASM and editor builds need no forks.
 

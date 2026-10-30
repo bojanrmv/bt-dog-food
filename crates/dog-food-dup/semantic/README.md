@@ -15,7 +15,7 @@ dgf-dup-cs src --confirm -o semantic.json   # run each group on generated inputs
 dgf-dup-cs src --compare Orders.Total Orders.Sum   # two methods run on the same inputs: 0 agree, 1 differ, 2 not run
 ```
 
-`dgf-dup --semantic` runs `dgf-dup-cs` from PATH, `DGF_DUP_CS`, or `--semantic-engine` (an executable or its `.dll`). A class the syntactic engine already reports for the same functions is not repeated.
+`dgf dup --semantic` runs the engine given with `--semantic-engine` (an executable or its `.dll`), else `DGF_DUP_CS`, else the one in `engine/` beside the `dgf` binary (the `dgf` NuGet package ships it there), else `dgf-dup-cs` from PATH. A class the syntactic engine already reports for the same functions is not repeated.
 
 ## How it works
 

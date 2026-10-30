@@ -33,11 +33,10 @@ Test code and migrations are left out unless you pass `--tests`. Generated files
 
 ## Installing
 
-`dgf dup` comes with `dgf` ([install](../install.md)). The C# engine is a separate .NET tool, needed only for `--semantic`:
+`dgf dup` comes with `dgf` ([install](../install.md)). Installed with `dotnet tool install -g dgf`, the C# engine for `--semantic` comes with it. With `dgf` built from source, install the engine on its own:
 
 ```powershell
-dotnet pack crates/dog-food-dup/semantic -c Release
-dotnet tool install -g dgf-dup-cs --add-source crates/dog-food-dup/semantic/nupkg
+dotnet tool install -g dgf-dup-cs
 ```
 
 ## In this section
