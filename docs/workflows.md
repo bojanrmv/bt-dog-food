@@ -89,7 +89,7 @@ A job that checks a repository with the released `dgf`:
   with: { fetch-depth: 0 }                       # dgf changes needs the base branch
 - uses: actions/setup-dotnet@v4
   with: { dotnet-version: 10.0.x }
-- run: dotnet tool install -g dgf --version 0.0.1   # pin it: a new release cannot change the gate
+- run: dotnet tool install -g dgf --version 0.0.2   # pin it: a new release cannot change the gate
 - run: dgf analyze --format markdown >> "$GITHUB_STEP_SUMMARY"          # fails above the limits
 - run: dgf changes --base "origin/${{ github.base_ref }}" --format markdown >> "$GITHUB_STEP_SUMMARY"
   if: github.event_name == 'pull_request'

@@ -217,8 +217,8 @@ One Rust core, delivered as the same native binary everywhere. How a release is 
 
 | Channel | How | Users | Status |
 | --- | --- | --- | --- |
-| .NET tool | `dotnet tool install -g dgf`: one package per platform, whose command is the native binary itself (no .NET wrapper), with the C# engine beside it | C# developers, CI | from 0.0.1 |
-| CLI binary | Archives for Windows, Linux (static), macOS (x64, arm64) on GitHub Releases, from the same release workflow | Everyone without .NET | from 0.0.1 |
+| .NET tool | `dotnet tool install -g dgf`: one package per platform, whose command is the native binary itself (no .NET wrapper), with the C# engine beside it | C# developers, CI | from 0.0.2 |
+| CLI binary | Archives for Windows, Linux (static), macOS (x64, arm64) on GitHub Releases, from the same release workflow | Everyone without .NET | from 0.0.2 |
 | npm package | The CLI binary per platform (the Biome and esbuild model); `dgf` is taken on npm, so a scoped name | TS developers: `npx` | later |
 | Rust crate | `dog-food-core` on crates.io; until then a git dependency | Rust tools embedding the engine | later |
 | WebAssembly | `wasm-bindgen` build of the core | VS Code extension, browser playground | later |

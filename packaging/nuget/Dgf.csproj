@@ -34,7 +34,7 @@
     <ToolPackageRuntimeIdentifiers Condition="'$(ToolPackageRuntimeIdentifiers)' == ''">$(RuntimeIdentifiers)</ToolPackageRuntimeIdentifiers>
 
     <PackageId>dgf</PackageId>
-    <Version Condition="'$(Version)' == ''">0.0.1</Version>
+    <Version Condition="'$(Version)' == ''">0.0.2</Version>
     <Authors>Bojan Pavlovic</Authors>
     <Description>Measures complexity, duplication and how well tests catch changes, in C#, TypeScript, JavaScript and Rust. One fast native binary; the C# duplication engine included.</Description>
     <PackageTags>complexity;crap;duplication;mutation-testing;code-quality;roslyn;static-analysis</PackageTags>
