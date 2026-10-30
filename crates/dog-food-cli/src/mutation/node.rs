@@ -281,7 +281,7 @@ impl Engine for NodeTests {
                 ));
             }
         }
-        check_baseline(status, &report.outcome)?;
+        check_baseline(status, &report.outcome, Some(&folder))?;
         let wall = started.elapsed();
         // Each name is stored twice (Vitest's and Jest's spelling).
         let tests: Duration = report.times.values().sum::<Duration>() / 2;

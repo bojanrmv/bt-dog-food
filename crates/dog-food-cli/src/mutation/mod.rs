@@ -278,11 +278,22 @@ fn failing_tests(outcome: &HashMap<String, bool>) -> BTreeSet<String> {
 /// for an hour, there is nothing to compare mutants with. When half the
 /// tests or more fail without any mutant, the results would say little, so
 /// the run stops.
-fn check_baseline(status: TestRun, outcome: &HashMap<String, bool>) -> Result<(), String> {
+/// When no test reported, the error quotes what the run's output in
+/// `folder` said: a compile or type error is then one read away.
+fn check_baseline(
+    status: TestRun,
+    outcome: &HashMap<String, bool>,
+    folder: Option<&std::path::Path>,
+) -> Result<(), String> {
     if status == TestRun::TimedOut || outcome.is_empty() {
-        return Err(
-            "the tests did not run without mutants; run them once yourself to see why".into(),
-        );
+        return Err(match folder.and_then(exec::crash_reason) {
+            Some(said) => {
+                format!("the tests did not run without mutants; the run's output said: {said}")
+            }
+            None => {
+                "the tests did not run without mutants; run them once yourself to see why".into()
+            }
+        });
     }
     let failing = outcome.values().filter(|passed| !**passed).count();
     if failing * 2 >= outcome.len() {
@@ -1550,10 +1561,19 @@ mod tests {
                 .map(|(i, p)| (format!("T{i}"), *p))
                 .collect()
         };
-        assert!(check_baseline(TestRun::Failed, &outcome(&[true, true, false])).is_ok());
-        let half = check_baseline(TestRun::Failed, &outcome(&[true, false])).unwrap_err();
+        assert!(check_baseline(TestRun::Failed, &outcome(&[true, true, false]), None).is_ok());
+        let half = check_baseline(TestRun::Failed, &outcome(&[true, false]), None).unwrap_err();
         assert!(half.contains("1 of 2 tests fail"), "{half}");
-        assert!(check_baseline(TestRun::Passed, &HashMap::new()).is_err());
+        assert!(check_baseline(TestRun::Passed, &HashMap::new(), None).is_err());
+        // No test reported: the error quotes what the run's output said.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(exec::log_name(0)),
+            "Building...\nsrc/a.spec.ts(4,1): error TS2532: Object is possibly 'undefined'.\n",
+        )
+        .unwrap();
+        let said = check_baseline(TestRun::Failed, &HashMap::new(), Some(dir.path())).unwrap_err();
+        assert!(said.contains("error TS2532"), "{said}");
     }
 
     #[test]

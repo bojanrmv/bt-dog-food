@@ -369,7 +369,7 @@ impl Engine for Dotnet {
         if status == TestRun::TimedOut && budget.spent() {
             return Ok(None);
         }
-        check_baseline(status, &results.outcome)?;
+        check_baseline(status, &results.outcome, Some(&folder))?;
         let mut reach = Reach {
             failing: failing_tests(&results.outcome),
             files: self.test_files(&results),
