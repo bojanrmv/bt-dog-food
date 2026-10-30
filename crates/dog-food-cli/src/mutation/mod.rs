@@ -241,6 +241,9 @@ pub struct Reach {
     /// Mutants reached outside any test (static setup, module load): they run
     /// with every test.
     pub outside: HashSet<usize>,
+    /// TypeScript: the test files that loaded a mutant outside any test
+    /// (relative to the package): its solo run needs only them.
+    pub outside_files: HashMap<usize, BTreeSet<String>>,
     /// Where each test lives: its test project (C#) or test file (TypeScript).
     pub home: HashMap<String, String>,
     /// Each test's source files, relative to the repository, when known.

@@ -230,6 +230,28 @@ impl NodeTests {
         Ok(errors)
     }
 
+    /// The test files a mutant's solo run needs: those of the tests that
+    /// reach it, and those that load it outside a test. Empty, which runs
+    /// every test, when it is reached outside a test in files not known.
+    fn solo_files(&self, mutant: usize, reach: &Reach) -> Vec<String> {
+        let loaded = reach.outside_files.get(&mutant);
+        if reach.outside.contains(&mutant) && loaded.is_none() {
+            return Vec::new();
+        }
+        let mut files: BTreeSet<String> = reach
+            .by_mutant
+            .get(&mutant)
+            .map(|tests| self.files_for(tests, reach).into_iter().collect())
+            .unwrap_or_default();
+        files.extend(
+            loaded
+                .into_iter()
+                .flatten()
+                .map(|f| pattern(f, self.runner)),
+        );
+        files.into_iter().collect()
+    }
+
     /// Test files (relative to the package) holding `tests`.
     fn files_for(&self, tests: &BTreeSet<String>, reach: &Reach) -> Vec<String> {
         let files: BTreeSet<String> = tests
@@ -313,7 +335,7 @@ impl Engine for NodeTests {
             ..Reach::default()
         };
         for line in lines_in(&reached) {
-            add_reach(&mut reach, &line);
+            add_reach(&mut reach, &line, &self.package);
         }
         Ok(Some(reach))
     }
@@ -346,10 +368,7 @@ impl Engine for NodeTests {
         limit: Duration,
         tag: &str,
     ) -> Result<SoloRun, String> {
-        let files = match reach.by_mutant.get(&mutant) {
-            Some(tests) if !reach.outside.contains(&mutant) => self.files_for(tests, reach),
-            _ => Vec::new(),
-        };
+        let files = self.solo_files(mutant, reach);
         let folder = fresh_folder(&self.sandbox, tag)?;
         let (status, report) = self.run(
             &files,
@@ -395,15 +414,35 @@ fn worse(a: TestRun, b: TestRun) -> TestRun {
     }
 }
 
-fn add_reach(reach: &mut Reach, line: &str) {
-    let Some((test, id)) = line.rsplit_once('\t') else {
+/// One reach record, `test<TAB>id<TAB>spec file`. A mutant reached with no
+/// test running, or under the name of a test that lives in another file
+/// (a name left over from that file, while this one loads its modules),
+/// was reached outside any test: by loading `spec file`.
+fn add_reach(reach: &mut Reach, line: &str, package: &Path) {
+    let (rest, file) = match line.trim_end().rsplit_once('\t') {
+        Some((rest, file)) if rest.contains('\t') => (rest, file),
+        _ => (line.trim_end(), ""),
+    };
+    let Some((test, id)) = rest.rsplit_once('\t') else {
         return;
     };
     let Ok(id) = id.trim().parse::<usize>() else {
         return;
     };
-    if test.is_empty() {
+    let file = Path::new(file)
+        .strip_prefix(package)
+        .map_or(file.to_string(), |p| p.to_string_lossy().into_owned())
+        .replace('\\', "/");
+    let stale = !file.is_empty()
+        && reach
+            .home
+            .get(test)
+            .is_some_and(|home| home.replace('\\', "/") != file);
+    if test.is_empty() || stale {
         reach.outside.insert(id);
+        if !file.is_empty() {
+            reach.outside_files.entry(id).or_default().insert(file);
+        }
     } else {
         reach
             .by_mutant
@@ -684,6 +723,64 @@ mod tests {
         assert_eq!(
             angular_project(dir.path(), &file("projects/site/src/a.ts")),
             None
+        );
+    }
+
+    #[test]
+    fn a_mutant_loaded_under_another_files_test_name_is_reached_outside_tests() {
+        let package = Path::new("/sandbox/web");
+        let mut reach = Reach::default();
+        reach
+            .home
+            .insert("Auth > fails".into(), "src/auth.spec.ts".into());
+        reach
+            .home
+            .insert("Routes > draws".into(), "src/routes.spec.ts".into());
+        // During a test of its own file: that test reaches it.
+        add_reach(
+            &mut reach,
+            "Auth > fails\t1\t/sandbox/web/src/auth.spec.ts",
+            package,
+        );
+        // The routes spec loads the module while the last test name of the
+        // auth spec is still set: not that test, the loading of the file.
+        add_reach(
+            &mut reach,
+            "Auth > fails\t2\t/sandbox/web/src/routes.spec.ts",
+            package,
+        );
+        // No test running at all.
+        add_reach(&mut reach, "\t3\t/sandbox/web/src/routes.spec.ts", package);
+        // A record without a file (an older helper).
+        add_reach(&mut reach, "Routes > draws\t4", package);
+        assert_eq!(
+            reach.by_mutant[&1],
+            BTreeSet::from(["Auth > fails".to_string()])
+        );
+        assert!(!reach.by_mutant.contains_key(&2));
+        assert_eq!(reach.outside, HashSet::from([2, 3]));
+        assert_eq!(
+            reach.outside_files[&2],
+            BTreeSet::from(["src/routes.spec.ts".to_string()])
+        );
+        assert_eq!(
+            reach.by_mutant[&4],
+            BTreeSet::from(["Routes > draws".to_string()])
+        );
+        let tests = NodeTests {
+            package: package.to_path_buf(),
+            runner: Runner::Vitest,
+            script: PathBuf::from("vitest.mjs"),
+            angular: Vec::new(),
+            sandbox: PathBuf::from("/sandbox"),
+            mutated: HashSet::new(),
+        };
+        // Its solo run needs only the file that loads it.
+        assert_eq!(tests.solo_files(2, &reach), ["src/routes.spec.ts"]);
+        reach.outside.insert(9);
+        assert!(
+            tests.solo_files(9, &reach).is_empty(),
+            "files not known: every test"
         );
     }
 

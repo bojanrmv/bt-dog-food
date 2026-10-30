@@ -8,7 +8,10 @@ function __dgfIs(id) {
   const e = g.expect || g[Symbol.for("expect-global")];
   const state = e && typeof e.getState === "function" ? e.getState() : undefined;
   const test = (state && state.currentTestName) || "";
-  const key = test + "\t" + id;
+  // The spec file running: at module load the test name can still be the
+  // last test of another file, which dgf tells apart by this.
+  const file = (state && state.testPath) || "";
+  const key = test + "\t" + id + "\t" + file;
   if (s.reach && !s.seen.has(key)) {
     s.seen.add(key);
     s.fs.appendFileSync(s.reach, key + "\n");
