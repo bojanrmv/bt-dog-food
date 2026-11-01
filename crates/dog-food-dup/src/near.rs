@@ -172,21 +172,11 @@ type Member = (usize, f64, Matches);
 
 fn similar_pairs(units: &[Unit], blocks: &[Block], sources: &[Source]) -> Pairs {
     let grams: Vec<Vec<u64>> = units.iter().map(grams_of).collect();
-    let language = |u: &Unit| {
-        sources[blocks[u.block].file]
-            .path
-            .extension()
-            .map(|e| e.to_ascii_lowercase())
-    };
     let mut pairs = Pairs::new();
     for ((a, b), count) in shared_grams(&grams) {
         let (ua, ub) = (&units[a], &units[b]);
         let enough_grams = count * 10 >= 3 * grams[a].len().min(grams[b].len());
-        if !enough_grams
-            || !close_sizes(ua, ub)
-            || language(ua) != language(ub)
-            || nested(ua, ub, blocks)
-        {
+        if !enough_grams || !comparable(ua, ub, blocks, sources) {
             continue;
         }
         if let Some(found) = compare(ua, ub) {
@@ -194,6 +184,18 @@ fn similar_pairs(units: &[Unit], blocks: &[Block], sources: &[Source]) -> Pairs 
         }
     }
     pairs
+}
+
+/// Whether two units can be copies at all: close in size, in the same
+/// language, and neither inside the other.
+fn comparable(a: &Unit, b: &Unit, blocks: &[Block], sources: &[Source]) -> bool {
+    let language = |u: &Unit| {
+        sources[blocks[u.block].file]
+            .path
+            .extension()
+            .map(|e| e.to_ascii_lowercase())
+    };
+    close_sizes(a, b) && language(a) == language(b) && !nested(a, b, blocks)
 }
 
 /// Whether one unit lies inside the other, such as a function and a lambda
