@@ -647,3 +647,30 @@ fn with_changes_only_the_groups_the_branch_added_are_reported() {
         "{scope}"
     );
 }
+
+#[test]
+fn a_function_is_not_a_near_miss_of_a_lambda_inside_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "src/dialog.ts",
+        "export class Dialog {
+  constructor(private readonly overlay: Overlay, private readonly host: Host) {
+    effect(() => {
+      const open = this.overlay.isOpen();
+      if (open && this.host.element) {
+        this.host.element.classList.add('dialog-open');
+        this.host.focusFirst(this.host.element, { preventScroll: true });
+      } else {
+        this.host.element?.classList.remove('dialog-open');
+        this.host.restoreFocus({ preventScroll: true });
+      }
+    });
+  }
+}
+",
+    );
+    let report = scan(&[root.to_path_buf()], root, false, Settings::default());
+    assert!(report.classes.is_empty(), "{report:#?}");
+}

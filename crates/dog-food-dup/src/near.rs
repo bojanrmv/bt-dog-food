@@ -182,7 +182,11 @@ fn similar_pairs(units: &[Unit], blocks: &[Block], sources: &[Source]) -> Pairs 
     for ((a, b), count) in shared_grams(&grams) {
         let (ua, ub) = (&units[a], &units[b]);
         let enough_grams = count * 10 >= 3 * grams[a].len().min(grams[b].len());
-        if !enough_grams || !close_sizes(ua, ub) || language(ua) != language(ub) {
+        if !enough_grams
+            || !close_sizes(ua, ub)
+            || language(ua) != language(ub)
+            || nested(ua, ub, blocks)
+        {
             continue;
         }
         if let Some(found) = compare(ua, ub) {
@@ -190,6 +194,17 @@ fn similar_pairs(units: &[Unit], blocks: &[Block], sources: &[Source]) -> Pairs 
         }
     }
     pairs
+}
+
+/// Whether one unit lies inside the other, such as a function and a lambda
+/// in it: the same lines, never two copies.
+fn nested(a: &Unit, b: &Unit, blocks: &[Block]) -> bool {
+    let span = |u: &Unit| {
+        let tokens = &u.tokens;
+        (tokens[0].start_byte, tokens[tokens.len() - 1].end_byte)
+    };
+    let ((a0, a1), (b0, b1)) = (span(a), span(b));
+    blocks[a.block].file == blocks[b.block].file && (a0 <= b0 && b1 <= a1 || b0 <= a0 && a1 <= b1)
 }
 
 /// The distinct runs of `GRAM` normalized tokens in a unit, hashed.
