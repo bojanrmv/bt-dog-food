@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use dog_food_core::mutate::{schemata, schemata_typed};
+use dog_food_core::mutate::{schemata_probed, schemata_typed};
 use dog_food_core::Mutant;
 
 use super::Outcome;
@@ -576,6 +576,8 @@ fn link(target: &Path, at: &Path) -> Result<(), String> {
 }
 
 const CSHARP_SWITCH: &str = "global::DogFood.Mutation.DgfMutants.Is";
+/// The class whose `Probing` and `Check` work out probed mutants' values.
+const CSHARP_PROBE: &str = "global::DogFood.Mutation.DgfMutants";
 const CSHARP_CLASS: &str = include_str!("../../assets/DgfMutants.cs");
 const CSHARP_CLASS_FILE: &str = "DgfMutants.g.cs";
 const NODE_SWITCH: &str = "__dgfIs";
@@ -601,9 +603,12 @@ pub fn write(kind: Kind, files: &[FileMutants], sandbox: &Path) -> Result<(), St
         let language = dog_food_core::Language::from_path(&path)
             .ok_or_else(|| format!("{}: not a C# or TypeScript file", path.display()))?;
         let text = match kind {
-            Kind::CSharp => schemata(&file.source, language, &chosen, &|id| {
-                format!("{CSHARP_SWITCH}({id})")
-            }),
+            Kind::CSharp => schemata_probed(
+                &file.source,
+                &chosen,
+                &|id| format!("{CSHARP_SWITCH}({id})"),
+                CSHARP_PROBE,
+            ),
             Kind::Node => {
                 let pragma = if added_lines(&file.relative) > 0 {
                     "// @ts-nocheck\n"

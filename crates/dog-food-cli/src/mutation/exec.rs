@@ -56,12 +56,11 @@ fn wait(mut child: Child, limit: Duration) -> Result<TestRun, String> {
                 TestRun::Failed
             });
         }
-        let elapsed = started.elapsed();
-        let held_back = job
-            .as_ref()
-            .and_then(cpu::Job::used)
-            .is_some_and(|used| used < limit);
-        if elapsed > limit && !(held_back && elapsed < limit * 10) {
+        if past_limit(
+            started.elapsed(),
+            job.as_ref().and_then(cpu::Job::used),
+            limit,
+        ) {
             kill_tree(&mut child, job.as_ref());
             return Ok(TestRun::TimedOut);
         }
@@ -69,8 +68,17 @@ fn wait(mut child: Child, limit: Duration) -> Result<TestRun, String> {
     }
 }
 
+/// Whether a run `elapsed` into its `limit`, having used `used` processor
+/// time (when known), is over it: past the limit, unless it used less than
+/// the limit of processor time, which a busy machine held back; that gets up
+/// to ten times the limit.
+pub fn past_limit(elapsed: Duration, used: Option<Duration>, limit: Duration) -> bool {
+    let held_back = used.is_some_and(|used| used < limit);
+    elapsed > limit && !(held_back && elapsed < limit * 10)
+}
+
 /// Test runners start processes of their own; stop all of them.
-fn kill_tree(child: &mut Child, job: Option<&cpu::Job>) {
+pub fn kill_tree(child: &mut Child, job: Option<&cpu::Job>) {
     if let Some(job) = job {
         job.terminate();
     }
@@ -86,7 +94,7 @@ fn kill_tree(child: &mut Child, job: Option<&cpu::Job>) {
 /// Processor time of a process and everything it starts: on Windows a job
 /// object, which the processes a child starts join as well. Elsewhere there
 /// is none, and only the wall clock counts.
-mod cpu {
+pub mod cpu {
     use std::process::Child;
     use std::time::Duration;
 
@@ -278,12 +286,35 @@ fn clip(text: &str, max: usize) -> String {
 
 /// Every line of every file in `folder`.
 pub fn lines_in(folder: &Path) -> Vec<String> {
+    lines_of(folder, "")
+}
+
+/// The lines of each file in `folder` whose name starts with `prefix`.
+pub fn files_of(folder: &Path, prefix: &str) -> Vec<Vec<String>> {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return Vec::new();
     };
     entries
         .flatten()
-        .filter(|e| e.path().is_file())
+        .filter(|e| e.path().is_file() && e.file_name().to_string_lossy().starts_with(prefix))
+        .map(|e| {
+            std::fs::read_to_string(e.path())
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        })
+        .collect()
+}
+
+/// Every line of every file in `folder` whose name starts with `prefix`.
+pub fn lines_of(folder: &Path, prefix: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().is_file() && e.file_name().to_string_lossy().starts_with(prefix))
         .flat_map(|e| {
             std::fs::read_to_string(e.path())
                 .unwrap_or_default()

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- Runs on the test project's runtime (its runtimeconfig), so the oldest supported one. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>DgfWorker</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Compiled against an old object model; the test project's own copy loads at run time. -->
+    <PackageReference Include="Microsoft.TestPlatform.ObjectModel" Version="16.11.0" ExcludeAssets="runtime" PrivateAssets="all" />
+    <!-- xUnit v2's engine, for xUnit tests: also the test project's own copy at run time. -->
+    <PackageReference Include="xunit.abstractions" Version="2.0.3" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="xunit.extensibility.execution" Version="2.4.2" ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

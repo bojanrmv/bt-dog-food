@@ -2,14 +2,22 @@
 // Added by dog-food (dgf mutate --run) to the mutation sandbox only, never to
 // your source. Decides which mutant is active and records which mutants each
 // test reaches. dog-food's test collector reports the running test through
-// AppDomain data "DgfTest".
+// AppDomain data "DgfTest"; NUnit's own test context, which follows the test
+// wherever it runs, comes first when the tests are NUnit's.
 //   DGF_MUTANT  one mutant id, active for every test
 //   DGF_PLAN    file of "test<TAB>mutant id" lines: a different mutant per test
 //   DGF_REACH   folder: write "test<TAB>mutant id" for every switch reached;
 //               the test is empty outside any test and inside a static
 //               constructor, a field initializer, a lazy cache's factory or
 //               EF Core's OnModelCreating, which run once, in whichever test
-//               comes first, for every test after it
+//               comes first, for every test after it; then the test it ran
+//               in follows the id
+//   DGF_WORKER  "1" in dog-food's test worker, which keeps running between
+//               test runs: the plan and the reach folder of each run come
+//               from AppDomain data "DgfPlan" and "DgfReach" instead
+//   DGF_CONTROL a file dog-food's worker for Microsoft.Testing.Platform maps
+//               (it runs one test at a time): four bytes that change with each
+//               run, the text's length, then "test\nmutant id\nreach folder"
 // </auto-generated>
 #nullable disable
 #pragma warning disable
@@ -20,39 +28,258 @@ namespace DogFood.Mutation
     {
         private static readonly int Active = ReadActive();
         private static readonly System.Collections.Generic.Dictionary<string, int> Plan = ReadPlan();
-        private static readonly string ReachFile = ReachPath();
+        private static readonly string ReachEnv = ReachFromEnvironment();
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> Seen =
             new System.Collections.Concurrent.ConcurrentDictionary<string, bool>();
         private static readonly object Gate = new object();
+        private static readonly System.Func<string> NUnitTest = FindNUnit();
+        private static readonly bool InWorker = System.Environment.GetEnvironmentVariable("DGF_WORKER") == "1";
+        /// This process's reach file in the folder of the run that records reach.
+        private static readonly string ReachName = "reach-" + System.Guid.NewGuid().ToString("N") + ".txt";
+
+        private static readonly System.IO.MemoryMappedFiles.MemoryMappedViewAccessor Control = OpenControl();
+        private static int controlRun = -1;
+        private static string controlTest = "";
+        private static int controlMutant = -1;
+        private static string controlReach;
 
         public static bool Is(int id)
         {
-            var test = System.AppDomain.CurrentDomain.GetData("DgfTest") as string ?? "";
-            if (ReachFile != null)
+            var test = RunningTest();
+            var folder = ReachFolder();
+            if (folder != null)
             {
-                Record(test, id);
+                Record(System.IO.Path.Combine(folder, ReachName), test, id);
             }
-            int planned;
-            if (Plan != null)
-            {
-                return Plan.TryGetValue(test, out planned) && planned == id;
-            }
-            return Active == id;
+            return Planned(test, id) || Active == id;
         }
 
-        private static void Record(string test, int id)
+        /// The folder of the run that records reach, if this run does.
+        private static string ReachFolder()
         {
+            if (Control != null)
+            {
+                ReadControl();
+                return controlReach;
+            }
+            return InWorker ? System.AppDomain.CurrentDomain.GetData("DgfReach") as string : ReachEnv;
+        }
+
+        /// Whether `id` is the mutant planned for `test`.
+        private static bool Planned(string test, int id)
+        {
+            if (Control != null)
+            {
+                return controlMutant == id;
+            }
+            var plan = InWorker
+                ? System.AppDomain.CurrentDomain.GetData("DgfPlan") as System.Collections.Generic.Dictionary<string, int>
+                : Plan;
+            int planned;
+            return plan != null && plan.TryGetValue(test, out planned) && planned == id;
+        }
+
+        /// In a run that records reach, the switches of some comparisons and
+        /// conditions also work out what their mutants would give, without
+        /// side effects, and note in "checked-*.txt" next to the reach file
+        /// "test<TAB>mutant id<TAB>same|changed" for each test, once each. A
+        /// mutant whose value never differs behaves the same in every test,
+        /// so it survives them all without being run.
+        public static bool Probing
+        {
+            get { return ReachFolder() != null; }
+        }
+
+        public static bool Check(bool original, int id, bool mutated)
+        {
+            Checked(id, mutated != original);
+            return original;
+        }
+
+        public static bool Check(bool original, int id1, bool mutated1, int id2, bool mutated2)
+        {
+            Check(original, id1, mutated1);
+            return Check(original, id2, mutated2);
+        }
+
+        public static bool Check(bool original, int id1, bool mutated1, int id2, bool mutated2, int id3, bool mutated3)
+        {
+            Check(original, id1, mutated1, id2, mutated2);
+            return Check(original, id3, mutated3);
+        }
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> Checks =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, bool>();
+        private static readonly string CheckedName = "checked-" + System.Guid.NewGuid().ToString("N") + ".txt";
+
+        private static void Checked(int id, bool changed)
+        {
+            var test = RunningTest();
+            var line = test + "\t" + id + "\t" + (changed ? "changed" : "same");
+            var folder = ReachFolder();
+            if (folder == null || !Checks.TryAdd(line, true))
+            {
+                return;
+            }
+            lock (Gate)
+            {
+                System.IO.File.AppendAllText(System.IO.Path.Combine(folder, CheckedName), line + "\n");
+            }
+        }
+
+        private static System.IO.MemoryMappedFiles.MemoryMappedViewAccessor OpenControl()
+        {
+            var path = System.Environment.GetEnvironmentVariable("DGF_CONTROL");
+            if (string.IsNullOrEmpty(path))
+            {
+                return null;
+            }
+            try
+            {
+                var stream = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete);
+                var file = System.IO.MemoryMappedFiles.MemoryMappedFile.CreateFromFile(
+                    stream, null, 0, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read, System.IO.HandleInheritability.None, false);
+                return file.CreateViewAccessor(0, 0, System.IO.MemoryMappedFiles.MemoryMappedFileAccess.Read);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// Reads the control file again when its run counter changed.
+        private static void ReadControl()
+        {
+            var run = Control.ReadInt32(0);
+            if (run == System.Threading.Volatile.Read(ref controlRun))
+            {
+                return;
+            }
+            lock (Gate)
+            {
+                var length = Control.ReadInt32(4);
+                var bytes = new byte[length];
+                Control.ReadArray(8, bytes, 0, length);
+                var parts = System.Text.Encoding.UTF8.GetString(bytes).Split('\n');
+                controlTest = parts[0];
+                controlMutant = parts.Length > 1 && int.TryParse(parts[1], out var mutant) ? mutant : -1;
+                controlReach = parts.Length > 2 && parts[2].Length > 0 ? parts[2] : null;
+                System.Threading.Volatile.Write(ref controlRun, run);
+            }
+        }
+
+        /// The running test's full name, empty outside any test. NUnit's adapter
+        /// reports a test's start at another moment than the test runs, so for
+        /// NUnit the name comes from NUnit itself.
+        private static string RunningTest()
+        {
+            if (Control != null)
+            {
+                ReadControl();
+                return controlTest;
+            }
+            var name = NUnitTest != null ? NUnitTest() : null;
+            return name ?? System.AppDomain.CurrentDomain.GetData("DgfTest") as string ?? "";
+        }
+
+        /// NUnit's TestContext.CurrentContext.Test: its FullName inside a test
+        /// (the name the adapter gives the test), "" outside one (fixture
+        /// setup), compiled once; null when the tests are not NUnit's.
+        private static System.Func<string> FindNUnit()
+        {
+            try
+            {
+                var context = System.Type.GetType("NUnit.Framework.TestContext, nunit.framework", false);
+                var current = context == null ? null : context.GetProperty("CurrentContext");
+                var test = context == null ? null : context.GetProperty("Test");
+                return current == null || test == null ? null : NUnitName(current, test);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static System.Func<string> NUnitName(System.Reflection.PropertyInfo current, System.Reflection.PropertyInfo test)
+        {
+            var method = test.PropertyType.GetProperty("MethodName");
+            var fullName = test.PropertyType.GetProperty("FullName");
+            if (method == null || fullName == null)
+            {
+                return null;
+            }
+            var running = System.Linq.Expressions.Expression.Variable(test.PropertyType, "test");
+            var body = System.Linq.Expressions.Expression.Block(
+                new[] { running },
+                System.Linq.Expressions.Expression.Assign(
+                    running,
+                    System.Linq.Expressions.Expression.Property(System.Linq.Expressions.Expression.Property(null, current), test)),
+                System.Linq.Expressions.Expression.Condition(
+                    System.Linq.Expressions.Expression.Equal(
+                        System.Linq.Expressions.Expression.Property(running, method),
+                        System.Linq.Expressions.Expression.Constant(null, typeof(string))),
+                    System.Linq.Expressions.Expression.Constant(""),
+                    System.Linq.Expressions.Expression.Property(running, fullName)));
+            return System.Linq.Expressions.Expression.Lambda<System.Func<string>>(body).Compile();
+        }
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, bool> RunOnce =
+            new System.Collections.Concurrent.ConcurrentDictionary<int, bool>();
+
+        /// Reached while no test is known (the adapter reports a test's start
+        /// from another thread, sometimes after the test began; class fixtures
+        /// run before it): dog-food's collector or worker gives these mutants
+        /// to the test that starts next. Code that runs once stays outside.
+        private static void Pending(int id)
+        {
+            var domain = System.AppDomain.CurrentDomain;
+            var pending = domain.GetData("DgfPending") as System.Collections.Concurrent.ConcurrentDictionary<int, bool>;
+            if (pending == null)
+            {
+                lock (Gate)
+                {
+                    pending = domain.GetData("DgfPending") as System.Collections.Concurrent.ConcurrentDictionary<int, bool>;
+                    if (pending == null)
+                    {
+                        pending = new System.Collections.Concurrent.ConcurrentDictionary<int, bool>();
+                        domain.SetData("DgfPending", pending);
+                    }
+                }
+            }
+            if (pending.ContainsKey(id) || RunOnce.ContainsKey(id))
+            {
+                return;
+            }
+            if (InTypeInitializer())
+            {
+                RunOnce.TryAdd(id, true);
+            }
+            else
+            {
+                pending.TryAdd(id, true);
+            }
+        }
+
+        private static void Record(string file, string test, int id)
+        {
+            if (test.Length == 0)
+            {
+                Pending(id);
+            }
             if (!Seen.TryAdd(test + "\t" + id, true))
             {
                 return;
             }
-            if (test.Length > 0 && InTypeInitializer())
-            {
-                test = "";
-            }
+            // Reached in code that runs once for every test after it: outside
+            // any test, with the test it ran in after the id. A static
+            // constructor runs in one test per process; code that dgf finds
+            // in two tests of one process this way runs for each test.
+            var line = test.Length > 0 && InTypeInitializer()
+                ? "\t" + id + "\t" + test + "\n"
+                : test + "\t" + id + "\n";
             lock (Gate)
             {
-                System.IO.File.AppendAllText(ReachFile, test + "\t" + id + "\n");
+                System.IO.File.AppendAllText(file, line);
             }
         }
 
@@ -151,14 +378,10 @@ namespace DogFood.Mutation
             return plan;
         }
 
-        private static string ReachPath()
+        private static string ReachFromEnvironment()
         {
             var folder = System.Environment.GetEnvironmentVariable("DGF_REACH");
-            if (string.IsNullOrEmpty(folder))
-            {
-                return null;
-            }
-            return System.IO.Path.Combine(folder, "reach-" + System.Guid.NewGuid().ToString("N") + ".txt");
+            return string.IsNullOrEmpty(folder) ? null : folder;
         }
     }
 }

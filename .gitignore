@@ -1,5 +1,11 @@
 /target
 
+# .NET build output (fixtures, the collector, the semantic helper, packaging);
+# Rust's src/bin holds sources, not build output
+bin/
+obj/
+!crates/*/src/bin/
+
 # Generated dgf reports
 /dgf-*.html
 /dgf-*.md

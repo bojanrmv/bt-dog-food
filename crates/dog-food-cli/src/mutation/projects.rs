@@ -65,8 +65,20 @@ pub fn all(root: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// A VSTest project (the test SDK), or a Microsoft.Testing.Platform test
+/// application: the MSTest runner or SDK, xUnit v3, TUnit.
 fn is_test(text: &str) -> bool {
-    text.contains("Microsoft.NET.Test.Sdk") || text.contains("<IsTestProject>true")
+    [
+        "Microsoft.NET.Test.Sdk",
+        "<IsTestProject>true",
+        "<EnableMSTestRunner>true",
+        "MSTest.Sdk",
+        "Include=\"MSTest\"",
+        "Include=\"xunit.v3",
+        "Include=\"TUnit",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 fn stem(path: &Path) -> String {
@@ -90,7 +102,7 @@ pub fn select(
         .collect();
     if tests.is_empty() {
         return Err(
-            "no test project found (a .csproj that references Microsoft.NET.Test.Sdk)".into(),
+            "no test project found (a .csproj that references Microsoft.NET.Test.Sdk, MSTest, xunit.v3 or TUnit)".into(),
         );
     }
     let allowed = Globs::new(selection)?;
@@ -357,6 +369,27 @@ mod tests {
             .iter()
             .map(|p| (p.name(), p.filter.clone()))
             .collect()
+    }
+
+    #[test]
+    fn test_platform_apps_are_test_projects_too() {
+        assert!(is_test(TEST_SDK));
+        assert!(is_test(
+            "<PropertyGroup><EnableMSTestRunner>true</EnableMSTestRunner></PropertyGroup>"
+        ));
+        assert!(is_test(r#"<Project Sdk="MSTest.Sdk/3.8.3">"#));
+        assert!(is_test(
+            r#"<PackageReference Include="MSTest" Version="3.8.3" />"#
+        ));
+        assert!(is_test(
+            r#"<PackageReference Include="xunit.v3" Version="3.0.0" />"#
+        ));
+        assert!(is_test(
+            r#"<PackageReference Include="TUnit" Version="0.25.0" />"#
+        ));
+        assert!(!is_test(
+            r#"<PackageReference Include="MSTest.TestFramework" />"#
+        ));
     }
 
     #[test]

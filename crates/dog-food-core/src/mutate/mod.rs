@@ -67,6 +67,11 @@ pub struct Mutant {
     /// excuse it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub boundary_risk: bool,
+    /// The original and the mutated expression at the site can both be
+    /// worked out without side effects, so a run without mutants can tell
+    /// whether the mutant ever changes a value ([`schemata_probed`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub probe: bool,
 }
 
 impl Mutant {
@@ -249,6 +254,7 @@ pub fn mutate(source: &str, language: Language, settings: &Settings) -> Result<M
             let mut mutant = f.mutant(site, src);
             mutant.ignored = rules.ignored(f, src, &methods);
             mutant.boundary_risk = rules.boundary_risk(f, src);
+            mutant.probe = rules.probe(f, &site, src);
             Some(mutant)
         })
         .collect();
@@ -303,6 +309,11 @@ trait Rules {
     fn ignored(&self, found: &Found, src: &[u8], methods: &MethodFilter) -> Option<String>;
     /// Whether the mutant moves a date or time boundary.
     fn boundary_risk(&self, _found: &Found, _src: &[u8]) -> bool {
+        false
+    }
+    /// Whether the switch at `site` can also work out the mutated value
+    /// without side effects (see [`Mutant::probe`]).
+    fn probe(&self, _found: &Found, _site: &Site, _src: &[u8]) -> bool {
         false
     }
     /// The mutator that is only worth a test when no other active mutant is
@@ -421,6 +432,7 @@ impl<'t> Found<'t> {
             prefix: self.prefix.clone(),
             ignored: None,
             boundary_risk: false,
+            probe: false,
         }
     }
 }
@@ -534,6 +546,38 @@ pub fn schemata(
     schemata_typed(source, language, mutants, switch, false)
 }
 
+/// [`schemata`] for C#, where each site of [`Mutant::probe`] mutants also
+/// works out their values in a run without mutants: the original becomes
+/// `(C.Probing ? C.Check(original, id, mutated, ...) : original)`, with `C`
+/// the class `probe` names. `Check` returns the original's value and notes
+/// each mutant whose value differs; only one arm runs, so the original is
+/// still evaluated once.
+pub fn schemata_probed(
+    source: &str,
+    mutants: &[&Mutant],
+    switch: &dyn Fn(usize) -> String,
+    probe: &str,
+) -> String {
+    let mut sites: Vec<(usize, usize)> =
+        mutants.iter().map(|m| (m.site_start, m.site_end)).collect();
+    sites.sort_by_key(|&(start, end)| (start, std::cmp::Reverse(end)));
+    sites.dedup();
+    let blank = without_comments(source, Language::CSharp);
+    let rewrite = Rewrite {
+        source,
+        blank: &blank,
+        mutants,
+        switch,
+        csharp: true,
+        typed: false,
+        probe: Some(probe),
+    };
+    rewrite.render(0, source.len(), &sites)
+}
+
+/// Most mutants one `Check` call compares.
+const PROBED: usize = 3;
+
 /// [`schemata`] for a TypeScript file (not JavaScript): the mutated branch
 /// of a `?:` switch is `(mutated) as never`, so the switch has the
 /// original's type (`never | T` is `T`). Without it, a mutant that changes
@@ -558,6 +602,7 @@ pub fn schemata_typed(
         switch,
         csharp: language == Language::CSharp,
         typed,
+        probe: None,
     };
     rewrite.render(0, source.len(), &sites)
 }
@@ -697,6 +742,32 @@ impl Rewrite<'_> {
         }
     }
 
+    /// `text`, the original at `start..end`, with the values of the site's
+    /// probed mutants worked out next to it in a run without mutants.
+    fn probed(&self, class: &str, start: usize, end: usize, text: String) -> String {
+        let probed: Vec<&&Mutant> = self
+            .at(start, end)
+            .filter(|m| checkable(m))
+            .take(PROBED)
+            .collect();
+        if probed.is_empty() || self.at(start, end).any(|m| m.prefix.is_some()) {
+            return text;
+        }
+        let compared: String = probed
+            .iter()
+            .map(|m| {
+                let copy = format!(
+                    "{}{}{}",
+                    &self.blank[start..m.start_byte],
+                    m.replacement,
+                    &self.blank[m.end_byte..end]
+                );
+                format!(", {}, ({})", m.id, copy.replace(['\r', '\n'], " "))
+            })
+            .collect();
+        format!("({class}.Probing ? {class}.Check(({text}){compared}) : ({text}))")
+    }
+
     /// The copy on the lines it takes: one, or, for a multi-line C# copy,
     /// its own lines between `#line` directives that give them, and the
     /// original after them, the site's line numbers. In TypeScript a line
@@ -721,6 +792,8 @@ struct Rewrite<'a> {
     csharp: bool,
     /// TypeScript, where the mutated branch keeps the original's type.
     typed: bool,
+    /// C#: the class whose `Probing` and `Check` work out probed mutants.
+    probe: Option<&'a str>,
 }
 
 impl Rewrite<'_> {
@@ -746,30 +819,37 @@ impl Rewrite<'_> {
 
     fn wrap(&self, start: usize, end: usize, inner: &[(usize, usize)]) -> String {
         let mut text = self.render(start, end, inner);
-        let at_site = |m: &&&Mutant| m.site_start == start && m.site_end == end;
-        if let Some(prefix) = self
-            .mutants
-            .iter()
-            .filter(at_site)
-            .find_map(|m| m.prefix.as_ref())
-        {
+        if let Some(prefix) = self.at(start, end).find_map(|m| m.prefix.as_ref()) {
             text = format!("{prefix} {text}");
         }
-        for m in self
-            .mutants
-            .iter()
-            .filter(|m| m.site_start == start && m.site_end == end)
-        {
-            let switch = (self.switch)(m.id);
-            text = match m.condition {
-                Some(Condition::False) => format!("(({text}) && !{switch})"),
-                Some(Condition::True) => format!("(({text}) || {switch})"),
-                Some(Condition::Negated) => format!("(({text}) != {switch})"),
-                None => self.copied(m, start, end, &switch, &text),
-            };
+        if let Some(class) = self.probe {
+            text = self.probed(class, start, end, text);
         }
-        text
+        self.at(start, end)
+            .fold(text, |text, m| self.switched(m, start, end, text))
     }
+
+    /// The mutants whose switch goes around `start..end`.
+    fn at(&self, start: usize, end: usize) -> impl Iterator<Item = &&Mutant> {
+        self.mutants
+            .iter()
+            .filter(move |m| m.site_start == start && m.site_end == end)
+    }
+
+    fn switched(&self, m: &Mutant, start: usize, end: usize, text: String) -> String {
+        let switch = (self.switch)(m.id);
+        match m.condition {
+            Some(Condition::False) => format!("(({text}) && !{switch})"),
+            Some(Condition::True) => format!("(({text}) || {switch})"),
+            Some(Condition::Negated) => format!("(({text}) != {switch})"),
+            None => self.copied(m, start, end, &switch, &text),
+        }
+    }
+}
+
+/// A mutant whose value its site can work out next to the original's.
+fn checkable(m: &Mutant) -> bool {
+    m.probe && m.condition.is_none() && !m.statement && !m.multiline && m.prefix.is_none()
 }
 
 #[cfg(test)]
@@ -795,6 +875,42 @@ mod tests {
         assert!(
             plain.contains("(on ? ((a: number) => undefined) : ((a: number) => a + 1))"),
             "{plain}"
+        );
+    }
+
+    #[test]
+    fn comparisons_without_side_effects_and_conditions_are_probed() {
+        let src = "class C {\n    int M(int a, int[] xs, System.Func<int, bool> f) {\n        if (a > xs.Length) { return 1; }\n        if (Count() >= a) { return 2; }\n        f = x => x < a;\n        return 0;\n    }\n    int Count() => 3;\n}\n";
+        let found = mutate(src, Language::CSharp, &Settings::default()).unwrap();
+        let probed = |mutator: &str, original: &str, line: usize| {
+            found
+                .mutants
+                .iter()
+                .filter(|m| m.mutator == mutator && m.original == original && m.line == line)
+                .map(|m| m.probe)
+                .collect::<Vec<_>>()
+        };
+        // `a > xs.Length`: names and member access only.
+        assert_eq!(probed("relational", ">", 3), [true, true]);
+        // A call would run again.
+        assert_eq!(probed("relational", ">=", 4), [false, false]);
+        // A lambda may be an expression tree.
+        assert_eq!(probed("relational", "<", 5), [false, false]);
+        // An `if` that becomes `false`, whatever the condition holds.
+        assert_eq!(probed("condition", "Count() >= a", 4), [true]);
+
+        let chosen: Vec<&Mutant> = found.mutants.iter().filter(|m| m.line == 3).collect();
+        let switched = schemata_probed(src, &chosen, &|id| format!("S({id})"), "P");
+        // The `if` and its comparison share the site: one call checks the
+        // condition mutant and both comparisons, and the original is
+        // evaluated in one arm only. Negation always changes the value.
+        assert!(
+            switched.contains("(P.Probing ? P.Check((a > xs.Length), 0, (false), 2, (a < xs.Length), 3, (a >= xs.Length)) : (a > xs.Length))"),
+            "{switched}"
+        );
+        // Without a probe class, nothing changes.
+        assert!(
+            !schemata(src, Language::CSharp, &chosen, &|id| format!("S({id})")).contains("Probing")
         );
     }
 

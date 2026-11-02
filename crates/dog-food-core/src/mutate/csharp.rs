@@ -30,6 +30,17 @@ impl Rules for CSharp {
         found.mutator == "relational" && compares_dates(found.node, src)
     }
 
+    /// A comparison whose operands have no side effects (`a.Count > limit`),
+    /// or an `if` condition that becomes `false`: the switch can work out the
+    /// mutated value next to the original's. Never in a lambda or a query,
+    /// which may be an expression tree that a query provider translates
+    /// (only calls without parameters, such as the switch, get evaluated
+    /// there), and never where the site declares a variable, which an
+    /// argument of a call would leave unassigned after it.
+    fn probe(&self, found: &Found, site: &Site, src: &[u8]) -> bool {
+        plain_site(found.node, site) && safe_place(found.node, src) && probed_kind(found)
+    }
+
     fn ignored(&self, found: &Found, src: &[u8], methods: &MethodFilter) -> Option<String> {
         let calls = Calls { src, methods };
         if !methods.is_empty() && in_ignored_call(found.node, &calls, true) {
@@ -38,6 +49,86 @@ impl Rules for CSharp {
         excluded_from_coverage(found.node, src)
             .then(|| "in a member marked [ExcludeFromCodeCoverage]".into())
     }
+}
+
+/// The switch goes around `node` itself, as an expression on one line.
+fn plain_site(node: Node, site: &Site) -> bool {
+    let whole = site.start == node.start_byte() && site.end == node.end_byte();
+    whole && !site.statement && site.condition.is_none() && !site.multiline
+}
+
+/// Outside lambdas and queries, declaring nothing.
+fn safe_place(node: Node, src: &[u8]) -> bool {
+    !in_lambda_or_query(node) && declared(node, src).is_empty()
+}
+
+/// A comparison of operands without side effects, or a condition that becomes `false`.
+fn probed_kind(found: &Found) -> bool {
+    let node = found.node;
+    match found.mutator {
+        "relational" => {
+            node.kind() == "binary_expression"
+                && ["left", "right"]
+                    .iter()
+                    .all(|f| node.child_by_field_name(f).is_some_and(side_effect_free))
+        }
+        "condition" => found.replacement == "false",
+        _ => false,
+    }
+}
+
+/// Whether `node` is inside a lambda, an anonymous method or a query.
+fn in_lambda_or_query(node: Node) -> bool {
+    let mut parent = node.parent();
+    while let Some(p) = parent {
+        if matches!(
+            p.kind(),
+            "lambda_expression" | "anonymous_method_expression" | "query_expression"
+        ) {
+            return true;
+        }
+        parent = p.parent();
+    }
+    false
+}
+
+/// Whether evaluating `node` again gives the same value and does nothing
+/// else: names, member access, literals, casts, arithmetic, but no call,
+/// indexer, assignment, `++`, `await` or `new`.
+fn side_effect_free(node: Node) -> bool {
+    let allowed = match node.kind() {
+        "identifier"
+        | "this_expression"
+        | "base_expression"
+        | "member_access_expression"
+        | "conditional_access_expression"
+        | "member_binding_expression"
+        | "parenthesized_expression"
+        | "cast_expression"
+        | "binary_expression"
+        | "integer_literal"
+        | "real_literal"
+        | "string_literal"
+        | "character_literal"
+        | "null_literal"
+        | "boolean_literal"
+        | "predefined_type"
+        | "generic_name"
+        | "qualified_name"
+        | "type_argument_list"
+        | "nullable_type"
+        | "array_type"
+        | "default_expression"
+        | "typeof_expression"
+        | "sizeof_expression" => true,
+        "prefix_unary_expression" => node
+            .child(0)
+            .is_some_and(|op| matches!(op.kind(), "-" | "+" | "!" | "~")),
+        _ => false,
+    };
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.named_children(&mut cursor).collect();
+    allowed && children.into_iter().all(side_effect_free)
 }
 
 /// What makes the mutants of one node kind.

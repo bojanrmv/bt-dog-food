@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>DgfMtp</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS1591;CS8632</NoWarn>
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Microsoft's client for the Microsoft.Testing.Platform server mode, as source. -->
+    <PackageReference Include="Microsoft.Testing.Platform.ServerMode.Client.Sources" Version="2.5.2" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

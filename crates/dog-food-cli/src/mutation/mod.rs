@@ -18,11 +18,13 @@ mod build;
 pub mod cache;
 mod dotnet;
 mod exec;
+pub mod log;
 mod node;
 pub mod priority;
 pub mod projects;
 mod sandbox;
 mod scope;
+mod worker;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -102,6 +104,8 @@ pub struct Options {
     pub rerun_survivors: bool,
     /// One mutant per test run.
     pub no_mix: bool,
+    /// C#: tests run in dog-food's test worker, which stays running.
+    pub worker: bool,
     /// Report the cached results only; test nothing (`--cached`).
     pub cached_only: bool,
 }
@@ -203,6 +207,9 @@ pub struct RunResult {
     /// Killed in a run whose tests did not all report (the test host crashed
     /// or was stopped): a failing test decided it, but the crash may have.
     pub crash_kills: BTreeSet<usize>,
+    /// Survived without a run: tests reach it, but in the run without
+    /// mutants its value never differed from the original's in any of them.
+    pub unchanged: BTreeSet<usize>,
     /// Runtime errors: what the run's output said as it ended.
     pub crash_reasons: HashMap<usize, String>,
     /// Languages whose run failed, and why; the others' results still count.
@@ -256,9 +263,38 @@ pub struct Reach {
     /// Per test home (project or file): what a run of it takes besides its
     /// tests (starting the test host, discovery).
     pub startup: HashMap<String, Duration>,
+    /// Mutants whose switch worked out their value next to the original's
+    /// in the run without mutants, in every test that reached them
+    /// ([`dog_food_core::Mutant::probe`]).
+    pub probed: HashSet<usize>,
+    /// For those: the tests in which their value differed from the original's.
+    pub changed: HashMap<usize, BTreeSet<String>>,
 }
 
 impl Reach {
+    /// The probed mutants that tests reach but whose value no test changed:
+    /// they behave the same in every test, so they survive without a run.
+    /// Every other probed mutant keeps only the tests that changed its value,
+    /// the only ones that can notice it.
+    fn unchanged(&mut self) -> BTreeSet<usize> {
+        let mut unchanged = BTreeSet::new();
+        for id in &self.probed {
+            if self.outside.contains(id) {
+                continue;
+            }
+            let Some(tests) = self.by_mutant.get_mut(id) else {
+                continue;
+            };
+            let changed = self.changed.get(id);
+            tests.retain(|t| changed.is_some_and(|c| c.contains(t)));
+            if tests.is_empty() {
+                self.by_mutant.remove(id);
+                unchanged.insert(*id);
+            }
+        }
+        unchanged
+    }
+
     /// Leaves out the tests that fail anyway: they cannot tell a mutant apart.
     fn set_aside_failing(&mut self) {
         let failing = &self.failing;
@@ -412,6 +448,16 @@ pub trait Engine: Sync {
     /// output.
     fn crash_reason(&self, _tag: &str) -> Option<String> {
         None
+    }
+    /// What the reader should know about how the tests ran (a test project
+    /// that ran without the worker, and why).
+    fn notes(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Whether the run tagged `tag` timed out while it kept a processor busy
+    /// all along: an endless loop, which a longer run would not end either.
+    fn stuck(&self, _tag: &str) -> bool {
+        false
     }
 }
 
@@ -874,6 +920,8 @@ fn prepare(
             &scope.tests,
             scope.build,
             build_args(options),
+            options.worker,
+            options.jobs,
         )?),
         sandbox::Kind::Node => Box::new(node::NodeTests::prepare(&sandbox.dir, &files)?),
     };
@@ -909,6 +957,7 @@ fn run_language(
     let budget = options.budget;
     let mut prepared = prepare(scope, &scope.roots, targets, options, &result.outcomes)?;
     result.prepare += started.elapsed();
+    log_start(&prepared, scope, options, started);
     let built = Instant::now();
     progress(&format!(
         "building the sandbox (preparing it took {:.1} s)",
@@ -928,6 +977,7 @@ fn run_language(
         status = build::build(&mut prepared, scope.kind, &mut result.outcomes, budget);
     }
     result.build += built.elapsed();
+    debug!("build", "{:.1} s, {}", secs(built), build_text(&status));
     result.sandboxes.push(prepared.sandbox.dir.clone());
     result.test_projects.extend(prepared.engine.test_projects());
     if status? == build::Built::OutOfTime {
@@ -957,11 +1007,13 @@ fn run_language(
     note_empty_filters(scope, &reach, result);
     note_failing(&reach, result);
     reach.set_aside_failing();
+    let unchanged = settle_unchanged(&mut reach, result);
     let tested = Instant::now();
     let candidates: Vec<usize> = prepared
         .files
         .iter()
         .flat_map(|f| f.mutants.iter().map(|m| m.id))
+        .filter(|id| !unchanged.contains(id))
         .collect();
     let killers = test_mutants(
         prepared.engine.as_ref(),
@@ -971,8 +1023,91 @@ fn run_language(
         result,
     )?;
     result.mutants += tested.elapsed();
+    log_end(&candidates, result, tested);
+    result.notes.extend(prepared.engine.notes());
     mark_untested(&prepared.files, result, Untested::TestRuns);
     Ok(killer_files(killers, &reach))
+}
+
+fn log_start(prepared: &Prepared, scope: &Scope, options: &Options, started: Instant) {
+    log::open(&exec::runs_folder(&prepared.sandbox.dir).join("dgf-mutate.log"));
+    debug!(
+        "run",
+        "dgf {} {:?}: {} mutants in {} files, jobs {}, worker {}, sandbox {}, prepared in {:.1} s",
+        env!("CARGO_PKG_VERSION"),
+        scope.kind,
+        prepared
+            .files
+            .iter()
+            .map(|f| f.mutants.len())
+            .sum::<usize>(),
+        prepared.files.len(),
+        options.jobs,
+        options.worker,
+        prepared.sandbox.dir.display(),
+        secs(started)
+    );
+}
+
+fn build_text(status: &Result<build::Built, String>) -> String {
+    match status {
+        Ok(build::Built::OutOfTime) => "out of time".to_string(),
+        Ok(_) => "built".to_string(),
+        Err(err) => format!("failed: {err}"),
+    }
+}
+
+/// The mutants whose value no test changed: they survive without a run.
+fn settle_unchanged(reach: &mut Reach, result: &mut RunResult) -> BTreeSet<usize> {
+    let reaching: HashMap<usize, Vec<String>> = reach
+        .probed
+        .iter()
+        .map(|id| (*id, reaching_tests(reach, *id)))
+        .collect();
+    let unchanged = reach.unchanged();
+    debug!(
+        "reach",
+        "{:.1} s; {} tests ({} failing without mutants), {} mutants reached by tests, {} outside any test, {} checked for a change of value, {} never changed (survive without a run)",
+        reach.duration.as_secs_f64(),
+        reach.times.len(),
+        reach.failing.len(),
+        reach.by_mutant.len(),
+        reach.outside.len(),
+        reach.probed.len(),
+        unchanged.len()
+    );
+    for id in &unchanged {
+        result.outcomes.insert(*id, Outcome::Survived);
+        result.unchanged.insert(*id);
+        if let Some(tests) = reaching.get(id) {
+            result.reached.insert(*id, tests.clone());
+        }
+    }
+    unchanged
+}
+
+fn log_end(candidates: &[usize], result: &RunResult, tested: Instant) {
+    let mut tally: BTreeMap<String, usize> = BTreeMap::new();
+    for outcome in candidates.iter().filter_map(|id| result.outcomes.get(id)) {
+        *tally.entry(format!("{outcome:?}")).or_default() += 1;
+    }
+    debug!(
+        "mutants",
+        "{:.1} s, {} test runs ({} second runs after a timeout): {tally:?}",
+        secs(tested),
+        result.test_runs,
+        result.retries
+    );
+    if let Some(peak) = log::peak_memory() {
+        debug!(
+            "memory",
+            "dgf itself: peak working set {:.0} MB",
+            peak as f64 / 1048576.0
+        );
+    }
+    if let Some(path) = log::path() {
+        progress(&format!("debug log: {}", path.display()));
+    }
 }
 
 /// Each test home's (project or file) time in the baseline run, slowest
@@ -1090,9 +1225,11 @@ fn test_mutants(
     Ok(killers)
 }
 
-/// Runs the reached mutants in packs: most fail their first test, so each
-/// runs with one test first, and only the survivors with the rest. Returns
-/// the mutants the packs could not decide, for solo runs.
+/// Runs the reached mutants in packs, in rounds: most fail their quickest
+/// test, so each gets one test first, and each round's survivors their next
+/// untried tests, twice as many each round, so a killed mutant's other tests
+/// never run and the slowest tests only run for what the quick ones miss.
+/// Returns the mutants the packs could not decide, for solo runs.
 fn packed(
     engine: &dyn Engine,
     reached: &[usize],
@@ -1102,21 +1239,43 @@ fn packed(
     killers: &mut HashMap<usize, Vec<String>>,
 ) -> Result<Vec<usize>, String> {
     let mut solo = Vec::new();
-    let first = first_tests(reached, reach);
+    let mut tried: HashMap<usize, BTreeSet<String>> = HashMap::new();
+    let mut open = reached.to_vec();
+    let mut count = 1;
     progress(&format!(
         "{} mutants are reached by tests: first one test each, {} at a time",
         reached.len(),
         options.jobs
     ));
-    let survivors = run_packs(engine, reached, &first, options, result, killers, &mut solo)?;
-    let rest = other_tests(&survivors, reach, &first);
-    let more: Vec<usize> = survivors
-        .into_iter()
-        .filter(|id| rest.by_mutant.contains_key(id))
-        .collect();
-    if !more.is_empty() {
-        progress(&format!("{} survivors: their other tests", more.len()));
-        run_packs(engine, &more, &rest, options, result, killers, &mut solo)?;
+    while !open.is_empty() {
+        let next = Reach {
+            outside: if count == 1 {
+                reach.outside.clone()
+            } else {
+                HashSet::new()
+            },
+            ..next_tests(&open, reach, &tried, count)
+        };
+        let round: Vec<usize> = open
+            .iter()
+            .copied()
+            .filter(|id| next.by_mutant.contains_key(id) || next.outside.contains(id))
+            .collect();
+        if round.is_empty() {
+            break;
+        }
+        if count > 1 {
+            progress(&format!(
+                "{} survivors: up to {count} more tests each",
+                round.len()
+            ));
+        }
+        let survivors = run_packs(engine, &round, &next, options, result, killers, &mut solo)?;
+        for (id, tests) in next.by_mutant {
+            tried.entry(id).or_default().extend(tests);
+        }
+        open = survivors;
+        count *= 2;
     }
     Ok(solo)
 }
@@ -1133,6 +1292,17 @@ fn solo_result(
 ) -> Vec<String> {
     let expected = reach.by_mutant.get(&id);
     let (outcome, killed_by) = solo_outcome(run, &reach.failing, expected);
+    debug!(
+        "solo",
+        "{tag}: mutant {id}{}, {} tests reported, run {:?}: {outcome:?}",
+        if reach.outside.contains(&id) {
+            " (outside any test)"
+        } else {
+            ""
+        },
+        run.1.len(),
+        run.0
+    );
     if outcome == Outcome::Killed && crashed(run.0, &run.1, expected) {
         result.crash_kills.insert(id);
     }
@@ -1167,11 +1337,35 @@ fn run_packs(
     solo: &mut Vec<usize>,
 ) -> Result<Vec<usize>, String> {
     let (packs, outside) = pack(mutants, reach, PACK_TESTS);
+    debug!(
+        "packs",
+        "{} mutants in {} packs, {} to run alone (reached outside any test)",
+        mutants.len() - outside.len(),
+        packs.len(),
+        outside.len()
+    );
     solo.extend(outside);
     let runner = Runner::new(engine, reach, options)?;
-    for (pack, run) in packs.iter().zip(runner.packs(&packs)) {
-        if let Ran::Done(run) = run? {
-            solo.extend(resolve(pack, reach, &run, &mut result.outcomes, killers));
+    for (index, (pack, run)) in packs.iter().zip(runner.packs(&packs)).enumerate() {
+        match run? {
+            Ran::Done(run) => {
+                let undecided = resolve(pack, reach, &run, &mut result.outcomes, killers);
+                let killed = pack
+                    .mutants
+                    .iter()
+                    .filter(|id| result.outcomes.get(id) == Some(&Outcome::Killed))
+                    .count();
+                debug!(
+                    "packs",
+                    "p{index}: {} tests, {} mutants: {killed} killed, {} undecided{}",
+                    pack.plan.len(),
+                    pack.mutants.len(),
+                    undecided.len(),
+                    if run.is_none() { " (timed out)" } else { "" }
+                );
+                solo.extend(undecided);
+            }
+            Ran::Skipped => debug!("packs", "p{index}: skipped, no time left"),
         }
     }
     let (started, again) = runner.finish();
@@ -1184,53 +1378,43 @@ fn run_packs(
         .collect())
 }
 
-/// One test per mutant: the cheapest of those that reach it, where a test
-/// costs its time plus half a second for every mutant it already carries
-/// (each one needs a pack of its own).
-fn first_tests(mutants: &[usize], reach: &Reach) -> Reach {
-    let mut order: Vec<usize> = mutants
+/// Up to `count` tests per mutant that it has not `tried`: the cheapest,
+/// where a test costs its time plus half a second for every mutant it
+/// already carries (each one needs a pack of its own).
+fn next_tests(
+    mutants: &[usize],
+    reach: &Reach,
+    tried: &HashMap<usize, BTreeSet<String>>,
+    count: usize,
+) -> Reach {
+    let none = BTreeSet::new();
+    let untried = |id: &usize| -> Vec<&String> {
+        let tried = tried.get(id).unwrap_or(&none);
+        reach.by_mutant.get(id).map_or(Vec::new(), |tests| {
+            tests.iter().filter(|t| !tried.contains(*t)).collect()
+        })
+    };
+    let mut order: Vec<(usize, Vec<&String>)> = mutants
         .iter()
-        .copied()
-        .filter(|id| reach.by_mutant.contains_key(id))
+        .map(|id| (*id, untried(id)))
+        .filter(|(_, tests)| !tests.is_empty())
         .collect();
-    order.sort_by_key(|id| (reach.by_mutant[id].len(), *id));
+    order.sort_by_key(|(id, tests)| (tests.len(), *id));
     let mut load: HashMap<&String, u32> = HashMap::new();
     let mut by_mutant = HashMap::new();
-    for id in order {
-        let cost = |t: &&String| {
+    for (id, mut tests) in order {
+        tests.sort_by_key(|t| {
             let time = reach.times.get(*t).copied().unwrap_or_default();
             time + Duration::from_millis(500) * load.get(t).copied().unwrap_or(0)
-        };
-        let Some(test) = reach.by_mutant[&id].iter().min_by_key(cost) else {
-            continue;
-        };
-        *load.entry(test).or_default() += 1;
-        by_mutant.insert(id, BTreeSet::from([test.clone()]));
+        });
+        tests.truncate(count);
+        for test in &tests {
+            *load.entry(*test).or_default() += 1;
+        }
+        by_mutant.insert(id, tests.into_iter().cloned().collect::<BTreeSet<_>>());
     }
     Reach {
         by_mutant,
-        ..reach.clone()
-    }
-}
-
-/// The tests the first round did not run, for the mutants that survived it.
-fn other_tests(survivors: &[usize], reach: &Reach, first: &Reach) -> Reach {
-    let by_mutant = survivors
-        .iter()
-        .filter_map(|id| {
-            let tried = first.by_mutant.get(id)?;
-            let rest: BTreeSet<String> = reach
-                .by_mutant
-                .get(id)?
-                .difference(tried)
-                .cloned()
-                .collect();
-            (!rest.is_empty()).then_some((*id, rest))
-        })
-        .collect();
-    Reach {
-        by_mutant,
-        outside: HashSet::new(),
         ..reach.clone()
     }
 }
@@ -1341,8 +1525,11 @@ impl<'a> Runner<'a> {
                     let mut run = solo(limit, &tag);
                     // A busy machine makes slow runs, not endless ones: a
                     // timeout counts only when a run with four times the time
-                    // (and at least 30 s more) also times out.
-                    if matches!(&run, Ok(Ran::Done((TestRun::TimedOut, _)))) {
+                    // (and at least 30 s more) also times out, unless the run
+                    // kept a processor busy all along.
+                    if matches!(&run, Ok(Ran::Done((TestRun::TimedOut, _))))
+                        && !self.engine.stuck(&tag)
+                    {
                         let longer = (limit * 4).max(limit + Duration::from_secs(30));
                         self.again
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1441,11 +1628,17 @@ fn resolve(
     let mut undecided = Vec::new();
     for &id in &pack.mutants {
         let tests = &reach.by_mutant[&id];
-        if tests.iter().any(|t| !results.contains_key(t)) {
+        // A failing test kills the mutant whatever the others do, so a run
+        // may skip a killed mutant's other tests.
+        let failed: Vec<String> = tests
+            .iter()
+            .filter(|t| results.get(*t) == Some(&false))
+            .cloned()
+            .collect();
+        if failed.is_empty() && tests.iter().any(|t| !results.contains_key(t)) {
             undecided.push(id);
             continue;
         }
-        let failed: Vec<String> = tests.iter().filter(|t| !results[*t]).cloned().collect();
         let outcome = if failed.is_empty() {
             Outcome::Survived
         } else {
@@ -1486,6 +1679,7 @@ mod tests {
             low_priority: false,
             rerun_survivors: false,
             no_mix: false,
+            worker: true,
             cached_only: false,
         }
     }
@@ -1592,7 +1786,7 @@ mod tests {
         reach
             .times
             .insert("Other".into(), Duration::from_millis(20));
-        let first = first_tests(&[0, 1, 2, 3], &reach);
+        let first = next_tests(&[0, 1, 2, 3], &reach, &HashMap::new(), 1);
         let one = |id: usize| first.by_mutant[&id].iter().next().unwrap().clone();
         // Mutant 2 has only Fast; 0 and 1 share Fast too (half a second per
         // mutant is far less than the slow test); 3 takes Other.
@@ -1600,10 +1794,19 @@ mod tests {
         assert_eq!(one(2), "Fast");
         assert_eq!(one(0), "Fast");
         assert_eq!(one(3), "Other");
-        let rest = other_tests(&[0, 2, 3], &reach, &first);
+        // The survivors' next round: only tests they have not tried.
+        let tried = first.by_mutant.clone();
+        let rest = next_tests(&[0, 2, 3], &reach, &tried, 2);
         assert_eq!(rest.by_mutant[&0], BTreeSet::from(["Slow".to_string()]));
         assert!(!rest.by_mutant.contains_key(&2), "nothing left for 2");
         assert_eq!(rest.by_mutant[&3], BTreeSet::from(["Slow".to_string()]));
+        // Two at once, cheapest first.
+        let both = next_tests(&[3], &reach, &HashMap::new(), 2);
+        assert_eq!(both.by_mutant[&3].len(), 2);
+        assert_eq!(
+            next_tests(&[3], &reach, &HashMap::new(), 1).by_mutant[&3],
+            BTreeSet::from(["Other".to_string()])
+        );
     }
 
     #[test]
@@ -1640,6 +1843,23 @@ mod tests {
             resolve(&packs[0], &reach, &None, &mut outcomes, &mut killers).len(),
             3
         );
+        // A failing test decides its mutant even when the run skipped the
+        // mutant's other tests; without one, a missing test leaves it open.
+        let skipped = self::reach(&[(0, &["A", "B"]), (1, &["C", "D"])]);
+        let (packs, _) = pack(&[0, 1], &skipped, 100);
+        let results: HashMap<String, bool> = [("A", false), ("C", true)]
+            .iter()
+            .map(|(t, p)| (t.to_string(), *p))
+            .collect();
+        let undecided = resolve(
+            &packs[0],
+            &skipped,
+            &Some(results),
+            &mut outcomes,
+            &mut killers,
+        );
+        assert_eq!(outcomes[&0], Outcome::Killed);
+        assert_eq!(undecided, [1]);
     }
 
     #[test]

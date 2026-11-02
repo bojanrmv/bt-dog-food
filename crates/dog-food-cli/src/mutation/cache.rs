@@ -31,6 +31,10 @@ pub const DEFAULT_DIR: &str = ".dgf/mutation-cache";
 const FILE: &str = "mutants.json";
 const LOCK: &str = "mutants.lock";
 const SCHEMA: u32 = 5;
+/// The dgf that writes the cache: another version may decide mutants
+/// differently (which tests reach them, what survives without a run), so
+/// its results are not reused.
+const TOOL: &str = env!("CARGO_PKG_VERSION");
 /// Entries nobody used for this long are dropped when the cache is saved.
 const KEEP_DAYS: u64 = 30;
 
@@ -38,6 +42,9 @@ const KEEP_DAYS: u64 = 30;
 #[serde(rename_all = "camelCase")]
 pub struct Cache {
     schema_version: u32,
+    /// The dgf version that wrote it; none before 0.0.5.
+    #[serde(default)]
+    tool: String,
     functions: HashMap<String, Entry>,
     /// Phase timings of the last run that tested a set of functions, by `run_key`.
     #[serde(default)]
@@ -140,9 +147,7 @@ impl Cache {
     /// The cache in `dir`; empty when there is none or it has another format.
     pub fn load(dir: &Path) -> Cache {
         let saved = locked(dir, false, || read(dir)).ok().flatten();
-        let mut cache = saved
-            .filter(|c| c.schema_version == SCHEMA)
-            .unwrap_or_default();
+        let mut cache = saved.filter(Cache::current).unwrap_or_default();
         cache.dir = dir.to_path_buf();
         cache
     }
@@ -254,9 +259,7 @@ impl Cache {
         std::fs::create_dir_all(&self.dir)
             .map_err(|err| format!("{}: {err}", self.dir.display()))?;
         locked(&self.dir, true, || {
-            let mut on_disk = read(&self.dir)?
-                .filter(|c| c.schema_version == SCHEMA)
-                .unwrap_or_default();
+            let mut on_disk = read(&self.dir)?.filter(Cache::current).unwrap_or_default();
             for key in &self.touched {
                 let Some(ours) = self.functions.get(key) else {
                     continue;
@@ -270,8 +273,14 @@ impl Cache {
             on_disk.functions.retain(|_, e| e.used >= oldest);
             on_disk.runs.retain(|_, t| t.at / 86_400 >= oldest);
             on_disk.schema_version = SCHEMA;
+            on_disk.tool = TOOL.to_string();
             write(&self.dir, &on_disk)
         })
+    }
+
+    /// Written in this format by this version of dgf.
+    fn current(&self) -> bool {
+        self.schema_version == SCHEMA && self.tool == TOOL
     }
 
     /// The timings of the last run that tested exactly the functions of `key`.
@@ -473,6 +482,22 @@ pub fn function_text(source: &str, start: usize, end: usize) -> Option<(usize, &
 mod tests {
     use super::*;
     use crate::mutation::sandbox::Kind;
+
+    #[test]
+    fn another_versions_results_are_not_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut older = Cache {
+            schema_version: SCHEMA,
+            tool: "0.0.1".into(),
+            ..Cache::default()
+        };
+        older.functions.insert("f".into(), Entry::default());
+        write(dir.path(), &older).unwrap();
+        assert!(Cache::load(dir.path()).functions.is_empty());
+        older.tool = TOOL.into();
+        write(dir.path(), &older).unwrap();
+        assert_eq!(Cache::load(dir.path()).functions.len(), 1);
+    }
 
     fn target(root: &Path, file: &str, source: &str) -> Target {
         let path = root.join(file);

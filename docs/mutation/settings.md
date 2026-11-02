@@ -20,14 +20,16 @@ skip_plain_constructors = true   # constructors that only store their arguments 
 thresholds = { high = 80, low = 60, break = 50 }       # below break: exit code 1
 timeout_factor = 1.5                                   # a test run hangs after (startup + its tests) x 1.5
 timeout_ms = 5000                                      # ... + 5 s
-jobs = 3                                               # test runs at once (default: cores - 1)
+jobs = 3                                               # test runs at once, and baseline shards (default: cores - 1)
 build_jobs = 2                                         # dotnet build -m:2
 low_priority = true                                    # builds and tests below normal priority
+worker = true                                          # C#: keep test projects loaded between test runs (default)
 ```
 
 - **Test filters** use `dotnet test --filter` syntax. `"FILTER"` applies to every test project; `"Shop.Tests:FILTER"` applies to the test project named `Shop.Tests` only. As soon as one filter names a project, only the named projects run (plus every project if there is also a filter without a name). Several filters for one project match a test when any of them does. `--test-filter` can be repeated and replaces `test_filter` from the file.
-- **Test projects** are the `.csproj` files that reference `Microsoft.NET.Test.Sdk`. A run uses those that `test_projects` allows, `exclude_test_projects` (and `--exclude-test-project`) does not exclude, and that reference a project with mutants, directly or through other projects. The globs match the path relative to the repository. A test project that a filter names runs even when the globs leave it out: `--test-filter "App.IntegrationTests:FullyQualifiedName~PricingTests"` brings back one excluded project for one run. Since a filter that names a project means only named projects run, name the others too (`--test-filter "App.Tests:FullyQualifiedName~."` runs all of `App.Tests`). When mutants no test reaches could be reached by a project the run left out, the report says which and gives these flags.
+- **Test projects** are the `.csproj` files that reference `Microsoft.NET.Test.Sdk`, or are Microsoft.Testing.Platform test applications (`EnableMSTestRunner`, `MSTest.Sdk`, the `MSTest`, `xunit.v3` or `TUnit` packages). A run uses those that `test_projects` allows, `exclude_test_projects` (and `--exclude-test-project`) does not exclude, and that reference a project with mutants, directly or through other projects. The globs match the path relative to the repository. A test project that a filter names runs even when the globs leave it out: `--test-filter "App.IntegrationTests:FullyQualifiedName~PricingTests"` brings back one excluded project for one run. Since a filter that names a project means only named projects run, name the others too (`--test-filter "App.Tests:FullyQualifiedName~."` runs all of `App.Tests`). When mutants no test reaches could be reached by a project the run left out, the report says which and gives these flags.
 - The filter applies to every test run: the baseline that records reach, the packs and the solo runs. Mutants that only filtered-out tests reach are *no tests*.
-- Filters, `test_projects` and `exclude_test_projects` are C# only.
+- Filters, `test_projects` and `exclude_test_projects` are C# only. In a Microsoft.Testing.Platform test application, dog-food's worker understands filters made of `FullyQualifiedName=name` and `FullyQualifiedName~part`, joined with `|`.
+- **`worker = false`** (or `--no-worker`) starts `dotnet test` for every test run instead of keeping each test project loaded in dog-food's test worker ([how it works](how-it-works.md)). For a test project the worker cannot serve, dgf does that by itself and says why.
 
 Every other `dgf.toml` section: [configuration](../configuration.md).

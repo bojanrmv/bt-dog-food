@@ -31,8 +31,47 @@ namespace DogFood.Collector
 
         public void TestCaseStart(TestCaseStartArgs testCaseStartArgs)
         {
-            AppDomain.CurrentDomain.SetData("DgfTest", testCaseStartArgs.TestCase.FullyQualifiedName);
+            var name = testCaseStartArgs.TestCase.FullyQualifiedName;
+            AppDomain.CurrentDomain.SetData("DgfTest", name);
+            GivePending(name);
             started = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+
+        // Mutants the switches reached while no test was known (this start
+        // can arrive after the test began; class fixtures run before it)
+        // belong to the test that starts now.
+        private static void GivePending(string test)
+        {
+            var folder = Environment.GetEnvironmentVariable("DGF_REACH");
+            var text = TakePending(test);
+            if (string.IsNullOrEmpty(folder) || text.Length == 0)
+            {
+                return;
+            }
+            lock (Gate)
+            {
+                File.AppendAllText(Path.Combine(folder, "pending-" + System.Diagnostics.Process.GetCurrentProcess().Id + ".txt"), text);
+            }
+        }
+
+        // "test<TAB>mutant" lines for the pending mutants, which are no longer pending.
+        private static string TakePending(string test)
+        {
+            var pending = AppDomain.CurrentDomain.GetData("DgfPending") as System.Collections.Concurrent.ConcurrentDictionary<int, bool>;
+            var text = new System.Text.StringBuilder();
+            if (pending == null)
+            {
+                return "";
+            }
+            foreach (var id in pending.Keys)
+            {
+                bool ignored;
+                if (pending.TryRemove(id, out ignored))
+                {
+                    text.Append(test).Append('\t').Append(id).Append('\n');
+                }
+            }
+            return text.ToString();
         }
 
         public void TestCaseEnd(TestCaseEndArgs testCaseEndArgs)

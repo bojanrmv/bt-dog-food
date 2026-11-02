@@ -2,10 +2,11 @@
 //! in-process collector, so every test reports its name to the mutant
 //! switches and writes its own result.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -13,6 +14,7 @@ use rayon::prelude::*;
 use super::exec::{self, fresh_folder, lines_in, write_plan, Located};
 use super::projects::TestProject;
 use super::sandbox::FileMutants;
+use super::worker::{Pool, Reply, Row, Target, Worker};
 use super::{
     check_baseline, failing_tests, Budget, BuildError, Engine, Pack, PackRun, Reach, Round,
     SoloRun, TestRun,
@@ -21,10 +23,16 @@ use crate::discover::absolute;
 
 const COLLECTOR_CS: &str = include_str!("../../assets/collector/DgfCollector.cs");
 const COLLECTOR_PROJECT: &str = include_str!("../../assets/collector/DgfCollector.csproj");
+const WORKER_CS: &str = include_str!("../../assets/worker/DgfWorker.cs");
+const WORKER_PROJECT: &str = include_str!("../../assets/worker/DgfWorker.csproj");
+const MTP_CS: &str = include_str!("../../assets/mtp/DgfMtp.cs");
+const MTP_PROJECT: &str = include_str!("../../assets/mtp/DgfMtp.csproj");
 /// Longest a build or the baseline test run may take.
 const HOUR: Duration = Duration::from_secs(3600);
 /// The subfolder of a run's folder where the collector writes test results.
 const RESULTS: &str = "results";
+/// Every test's time in a baseline, read by the next run to split its baseline evenly.
+const TIMES: &str = "baseline-times.tsv";
 
 #[derive(Clone)]
 struct Project {
@@ -53,6 +61,28 @@ pub struct Dotnet {
     mutated_restored: AtomicBool,
     /// Extra `dotnet build` arguments: `-m:N`, `-lowPriority`.
     build_args: Vec<String>,
+    /// dog-food's test workers, which keep a test project loaded between
+    /// runs; `None` when turned off or when the worker could not be built.
+    workers: Option<Pool>,
+    /// Test project (assembly) → what a worker serves, found after the
+    /// first build. A project not here runs with `dotnet test`.
+    targets: OnceLock<HashMap<String, Target>>,
+    /// Test projects a worker could not serve, and why: they run with
+    /// `dotnet test` from then on.
+    refused: Mutex<BTreeMap<String, String>>,
+    /// Test project → how much longer a run takes in a new worker than in
+    /// a warm one (starting, finding the tests, loading and compiling).
+    warmup: Mutex<HashMap<String, Duration>>,
+    /// Tags of runs stopped while they kept a processor busy all along: an
+    /// endless loop, not a slow machine.
+    stuck: Mutex<HashSet<String>>,
+    /// Mutant → the assembly (project file name) it is compiled into.
+    owners: HashMap<usize, String>,
+    /// Test runs at once (`--jobs`): the baseline splits across that many workers.
+    jobs: usize,
+    /// Each test's time in the last run's baseline.
+    last_times: Mutex<HashMap<String, Duration>>,
+    notes: Mutex<Vec<String>>,
 }
 
 /// Where a sandbox records the build settings of its last successful build.
@@ -67,6 +97,8 @@ impl Dotnet {
         chosen: &[TestProject],
         settings: u64,
         build_args: Vec<String>,
+        worker: bool,
+        jobs: usize,
     ) -> Result<Dotnet, String> {
         let projects: Vec<Project> = chosen
             .iter()
@@ -90,6 +122,18 @@ impl Dotnet {
             &mutated_solution,
             &solution(sandbox, mutated.iter().map(PathBuf::as_path)),
         )?;
+        let mut notes = Vec::new();
+        let workers = match worker.then(worker_program) {
+            Some(Ok(program)) => Some(Pool::new(
+                program,
+                exec::runs_folder(sandbox).join("workers"),
+            )),
+            Some(Err(err)) => {
+                notes.push(format!("dog-food's test worker could not be built, so every test run started `dotnet test`: {err}"));
+                None
+            }
+            None => None,
+        };
         Ok(Dotnet {
             sandbox: sandbox.to_path_buf(),
             projects,
@@ -103,44 +147,477 @@ impl Dotnet {
             ),
             mutated_restored: AtomicBool::new(false),
             build_args,
+            workers,
+            targets: OnceLock::new(),
+            refused: Mutex::new(BTreeMap::new()),
+            warmup: Mutex::new(HashMap::new()),
+            stuck: Mutex::new(HashSet::new()),
+            owners: owners(sandbox, files),
+            jobs: jobs.max(1),
+            last_times: Mutex::new(HashMap::new()),
+            notes: Mutex::new(notes),
         })
     }
 
-    /// Runs the given projects (with a test filter each) and collects every
-    /// test's result from the collector; side by side when `parallel`.
+    /// Runs the given projects (with a test filter each) for `ask` and
+    /// collects every test's result; side by side when `parallel`. A project
+    /// a worker serves runs there, the others with `dotnet test`.
     fn run(
         &self,
         runs: &[(&Project, Option<String>)],
-        env: &[(&str, String)],
+        ask: Ask,
         limit: Duration,
         folder: &Path,
         parallel: bool,
     ) -> Result<(TestRun, Results), String> {
         let one = |(index, (project, filter)): (usize, &(&Project, Option<String>))| {
-            let mut command = self.test_command(project, filter.as_deref(), folder, index)?;
-            command.envs(env.iter().map(|(k, v)| (*k, v.as_str())));
             let started = Instant::now();
-            let status = exec::run(command, limit, &folder.join(exec::log_name(index)))?;
-            Ok::<_, String>((status, project.assembly.clone(), started.elapsed()))
+            let ran = match self.target(project) {
+                Some(target) => self.in_worker(
+                    project,
+                    &target,
+                    filter.as_deref(),
+                    ask,
+                    limit,
+                    folder,
+                    index,
+                ),
+                None => self.in_command(project, filter.as_deref(), ask, limit, folder, index),
+            }?;
+            Ok::<_, String>((ran, project.assembly.clone(), started.elapsed()))
         };
-        let statuses: Vec<Result<(TestRun, String, Duration), String>> = if parallel {
+        let ran: Vec<Result<ProjectRun, String>> = if parallel {
             runs.par_iter().enumerate().map(one).collect()
         } else {
             runs.iter().enumerate().map(one).collect()
         };
         let mut status = TestRun::Passed;
-        let mut walls = HashMap::new();
-        for run in statuses {
-            let (one_status, assembly, wall) = run?;
+        let mut results = Results::default();
+        for run in ran {
+            let ((one_status, one_results), assembly, wall) = run?;
             status = worst(status, one_status);
-            walls.insert(assembly, wall);
+            results.add(one_results);
+            results.walls.insert(assembly, wall);
         }
         if status == TestRun::TimedOut {
             return Ok((status, Results::default()));
         }
-        let mut results = Results::read(&folder.join(RESULTS), &self.sandbox);
-        results.walls = walls;
         Ok((status, results))
+    }
+
+    /// One project's run with `dotnet test` and dog-food's collector.
+    fn in_command(
+        &self,
+        project: &Project,
+        filter: Option<&str>,
+        ask: Ask,
+        limit: Duration,
+        folder: &Path,
+        index: usize,
+    ) -> Result<(TestRun, Results), String> {
+        let mut command = self.test_command(project, filter, folder, index)?;
+        match ask {
+            Ask::Reach(reached) => command.env("DGF_REACH", reached),
+            Ask::Plan(_, plan) => command.env("DGF_PLAN", plan),
+            Ask::Fresh(mutant) => command.env("DGF_MUTANT", mutant.to_string()),
+        };
+        let started = Instant::now();
+        let status = exec::run(command, limit, &folder.join(exec::log_name(index)))?;
+        let results = if status == TestRun::TimedOut {
+            Results::default()
+        } else {
+            Results::read(&folder.join(format!("{RESULTS}-{index}")), &self.sandbox)
+        };
+        debug!(
+            "dotnet test",
+            "{} in {}: {status:?} in {:.1} s (limit {:.1} s), {} tests, their own time {:.1} s",
+            project.assembly,
+            tag_of(folder),
+            started.elapsed().as_secs_f64(),
+            limit.as_secs_f64(),
+            results.outcome.len(),
+            results.times.values().sum::<Duration>().as_secs_f64()
+        );
+        Ok((status, results))
+    }
+
+    /// One project's run in a worker: a warm one from the pool, or a new
+    /// one with the mutant on from the start for a mutant reached outside
+    /// any test (static setup runs once per process). A worker that timed
+    /// out or crashed is stopped; one that cannot start leaves the project
+    /// to `dotnet test`.
+    #[allow(clippy::too_many_arguments)]
+    fn in_worker(
+        &self,
+        project: &Project,
+        target: &Target,
+        filter: Option<&str>,
+        ask: Ask,
+        limit: Duration,
+        folder: &Path,
+        index: usize,
+    ) -> Result<(TestRun, Results), String> {
+        let pool = self.workers.as_ref().expect("a target needs workers");
+        let started = match ask {
+            Ask::Fresh(mutant) => pool.start(target, &[("DGF_MUTANT", mutant.to_string())]),
+            _ => pool.take(target),
+        };
+        let mut worker = match started {
+            Ok(worker) => worker,
+            Err(why) => {
+                self.refuse(project, why);
+                return self.in_command(project, filter, ask, limit, folder, index);
+            }
+        };
+        if let (Ask::Reach(reached), true) = (ask, !target.mtp && splittable(filter)) {
+            return self.reach_split(
+                project, target, worker, filter, reached, limit, folder, index,
+            );
+        }
+        let request = request_for(ask, &project.assembly, filter, folder, index)?;
+        let limit = if worker.warm {
+            limit
+        } else {
+            limit + self.warmup_of(&project.assembly) * 2
+        };
+        let reply = worker.request(&request, limit);
+        let fresh = matches!(ask, Ask::Fresh(_));
+        Ok(self.finish(project, target, worker, reply, fresh, folder, index))
+    }
+
+    /// Splits the baseline of `project` by test class across workers, one per
+    /// share of `--jobs`, started side by side; they stay warm for the mutants.
+    #[allow(clippy::too_many_arguments)]
+    fn reach_split(
+        &self,
+        project: &Project,
+        target: &Target,
+        mut first: Worker,
+        filter: Option<&str>,
+        reached: &Path,
+        limit: Duration,
+        folder: &Path,
+        index: usize,
+    ) -> Result<(TestRun, Results), String> {
+        let pool = self.workers.as_ref().expect("a target needs workers");
+        let filter_file = folder.join(format!("filter-{index}.txt"));
+        write_file(&filter_file, filter.unwrap_or(""))?;
+        let listed: Vec<String> = match first
+            .request(&format!("list\t{}", filter_file.display()), limit)
+        {
+            Reply::Done(rows) => rows.into_iter().map(|r| r.test).collect(),
+            other => return Ok(self.finish(project, target, first, other, false, folder, index)),
+        };
+        let times = self
+            .last_times
+            .lock()
+            .map(|t| t.clone())
+            .unwrap_or_default();
+        let groups = split_by_class(&listed, self.shards(), &times);
+        debug!(
+            "baseline",
+            "{}: {} tests in {} shards of {:?} tests (jobs {}, {} tests timed last run)",
+            project.assembly,
+            listed.len(),
+            groups.len(),
+            groups.iter().map(Vec::len).collect::<Vec<_>>(),
+            self.jobs,
+            times.len()
+        );
+        if groups.len() < 2 {
+            let request = format!("tests\t{}\t{}", filter_file.display(), reached.display());
+            let reply = first.request(&request, limit);
+            return Ok(self.finish(project, target, first, reply, false, folder, index));
+        }
+        let mut first = Some(first);
+        let ran: Vec<Result<(TestRun, Results, Duration), String>> = std::thread::scope(|scope| {
+            let shards: Vec<_> = groups
+                .into_iter()
+                .enumerate()
+                .map(|(shard, names)| {
+                    let worker = first.take();
+                    scope.spawn(move || {
+                        let started = Instant::now();
+                        let mut worker = match worker {
+                            Some(worker) => worker,
+                            None => pool.take(target)?,
+                        };
+                        let file = folder.join(format!("names-{index}-{shard}.txt"));
+                        write_file(&file, &names.join("\n"))?;
+                        let request = format!("names\t{}\t{}", file.display(), reached.display());
+                        let reply = worker.request(&request, limit);
+                        let (status, results) =
+                            self.finish(project, target, worker, reply, false, folder, index);
+                        Ok((status, results, started.elapsed()))
+                    })
+                })
+                .collect();
+            shards
+                .into_iter()
+                .map(|s| {
+                    s.join()
+                        .unwrap_or_else(|_| Err("a test worker thread failed".into()))
+                })
+                .collect()
+        });
+        let mut status = TestRun::Passed;
+        let mut results = Results::default();
+        let mut warmup = Duration::ZERO;
+        for (shard, ran) in ran.into_iter().enumerate() {
+            let (one, shard_results, wall) = ran?;
+            status = worst(status, one);
+            let tests: Duration = shard_results.times.values().sum();
+            debug!(
+                "baseline",
+                "{} shard {shard}: {one:?} in {:.1} s, its tests {:.1} s",
+                project.assembly,
+                wall.as_secs_f64(),
+                tests.as_secs_f64()
+            );
+            warmup = warmup.max(wall.saturating_sub(tests));
+            results.add(shard_results);
+        }
+        if let Ok(mut known) = self.warmup.lock() {
+            known.insert(project.assembly.clone(), warmup);
+        }
+        Ok((status, results))
+    }
+
+    /// A worker's reply as a run's status and results; a worker that timed
+    /// out or crashed is stopped, a fresh one too, the others go back to the pool.
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        &self,
+        project: &Project,
+        target: &Target,
+        worker: Worker,
+        reply: Reply,
+        fresh: bool,
+        folder: &Path,
+        index: usize,
+    ) -> (TestRun, Results) {
+        match reply {
+            Reply::Done(rows) => {
+                let status = if rows.iter().all(|r| r.passed) {
+                    TestRun::Passed
+                } else {
+                    TestRun::Failed
+                };
+                self.release(target, worker, fresh);
+                (status, self.results(project, rows))
+            }
+            Reply::TimedOut { busy } => {
+                // A worker that had not run tests yet may have spent the time compiling.
+                if busy && worker.warm {
+                    self.mark_stuck(folder);
+                }
+                worker.stop();
+                (TestRun::TimedOut, Results::default())
+            }
+            Reply::Crashed(rows) => {
+                let _ = std::fs::copy(&worker.log, folder.join(exec::log_name(index)));
+                worker.stop();
+                (TestRun::Failed, self.results(project, rows))
+            }
+        }
+    }
+
+    /// A project in a worker starts once: what its first run took besides its
+    /// tests is warm-up, which only a new worker pays again; its later runs
+    /// have no startup.
+    fn warm_startup(&self, mut startup: HashMap<String, Duration>) -> HashMap<String, Duration> {
+        let warm: Vec<String> = self
+            .projects
+            .iter()
+            .filter(|p| self.target(p).is_some())
+            .map(|p| p.assembly.clone())
+            .collect();
+        let Ok(mut warmup) = self.warmup.lock() else {
+            return startup;
+        };
+        for assembly in warm {
+            if let Some(time) = startup.insert(assembly.clone(), Duration::ZERO) {
+                warmup.entry(assembly).or_insert(time);
+            }
+        }
+        startup
+    }
+
+    /// A fresh worker stops (its statics hold the mutant); the others go back to the pool.
+    fn release(&self, target: &Target, worker: Worker, fresh: bool) {
+        match self.workers.as_ref() {
+            Some(pool) if !fresh => pool.give(target, worker),
+            _ => worker.stop(),
+        }
+    }
+
+    fn mark_stuck(&self, folder: &Path) {
+        if let Ok(mut stuck) = self.stuck.lock() {
+            stuck.insert(tag_of(folder));
+        }
+    }
+
+    /// The worker's rows as the collector's results.
+    fn results(&self, project: &Project, rows: Vec<Row>) -> Results {
+        let sandbox = absolute(&self.sandbox);
+        let mut results = Results::default();
+        for row in rows {
+            results
+                .home
+                .insert(row.test.clone(), project.assembly.clone());
+            if let Some(file) = (!row.file.is_empty())
+                .then(|| relative_file(&sandbox, &row.file))
+                .flatten()
+            {
+                results.files.insert(row.test.clone(), file);
+            }
+            results.times.insert(row.test.clone(), row.time);
+            results.outcome.insert(row.test, row.passed);
+        }
+        results
+    }
+
+    /// What a worker serves for `project`, unless it refused the project.
+    fn target(&self, project: &Project) -> Option<Target> {
+        if self
+            .refused
+            .lock()
+            .is_ok_and(|r| r.contains_key(&project.assembly))
+        {
+            return None;
+        }
+        self.targets().get(&project.assembly).cloned()
+    }
+
+    /// The test projects a worker serves: each project's built assembly
+    /// (MSBuild's TargetPath), once the first build made it. `reach` finds
+    /// them before its test runs start; plain threads, not the thread pool
+    /// the runs use, so no run waits on itself.
+    fn targets(&self) -> &HashMap<String, Target> {
+        self.targets.get_or_init(|| {
+            if self.workers.is_none() {
+                return HashMap::new();
+            }
+            let found: Vec<(String, Option<Target>)> = std::thread::scope(|scope| {
+                let lookups: Vec<_> = self
+                    .projects
+                    .iter()
+                    .map(|p| {
+                        scope.spawn(move || {
+                            let target = target_path(&p.path)
+                                .and_then(|(dll, mtp)| Target::of(&dll, mtp));
+                            (p.assembly.clone(), target)
+                        })
+                    })
+                    .collect();
+                lookups.into_iter().filter_map(|l| l.join().ok()).collect()
+            });
+            let found = self.with_mtp_worker(found);
+            let mut targets = HashMap::new();
+            for (assembly, target) in found {
+                match target {
+                    Some(target) => {
+                        debug!(
+                            "targets",
+                            "{assembly}: {}{}",
+                            target.dll.display(),
+                            if target.mtp { " (testing platform)" } else { "" }
+                        );
+                        targets.insert(assembly, target);
+                    }
+                    None => {
+                        debug!("targets", "{assembly}: dotnet test");
+                        self.refuse_quietly(&assembly, "it has several target frameworks, no VSTest adapter, or its build output is not where MSBuild says")
+                    }
+                }
+            }
+            targets
+        })
+    }
+
+    /// The runs whose test project can see `mutant`: its build output holds
+    /// the mutant's assembly. A test project that does not reference that
+    /// assembly cannot notice the mutant, however its tests run. When no
+    /// output holds an assembly of that name (another AssemblyName), or a
+    /// project runs with `dotnet test`, nothing is left out.
+    fn seeing<'a>(
+        &self,
+        mutant: usize,
+        runs: Vec<(&'a Project, Option<String>)>,
+    ) -> Vec<(&'a Project, Option<String>)> {
+        let Some(owner) = self.owners.get(&mutant) else {
+            return runs;
+        };
+        let sees = |project: &Project| {
+            self.target(project).map(|t| {
+                t.dll
+                    .parent()
+                    .is_some_and(|dir| dir.join(format!("{owner}.dll")).is_file())
+            })
+        };
+        let seen: Vec<Option<bool>> = runs.iter().map(|(p, _)| sees(p)).collect();
+        if seen.contains(&Some(false)) && seen.contains(&Some(true)) {
+            runs.into_iter()
+                .zip(seen)
+                .filter(|(_, sees)| *sees != Some(false))
+                .map(|(run, _)| run)
+                .collect()
+        } else {
+            runs
+        }
+    }
+
+    /// Builds the worker for Microsoft.Testing.Platform test applications
+    /// when a test project is one; without it, those projects get no target.
+    fn with_mtp_worker(
+        &self,
+        found: Vec<(String, Option<Target>)>,
+    ) -> Vec<(String, Option<Target>)> {
+        let wanted = found.iter().any(|(_, t)| t.as_ref().is_some_and(|t| t.mtp));
+        let Some(pool) = self.workers.as_ref().filter(|_| wanted) else {
+            return found;
+        };
+        match mtp_program() {
+            Ok(program) => {
+                pool.set_mtp(program);
+                found
+            }
+            Err(err) => found
+                .into_iter()
+                .map(|(assembly, target)| match target {
+                    Some(t) if t.mtp => {
+                        self.refuse_quietly(&assembly, &err);
+                        (assembly, None)
+                    }
+                    other => (assembly, other),
+                })
+                .collect(),
+        }
+    }
+
+    /// Workers per test project for the baseline: `--jobs` shared by the projects a worker serves.
+    fn shards(&self) -> usize {
+        (self.jobs / self.targets().len().max(1)).max(1)
+    }
+
+    fn refuse(&self, project: &Project, why: String) {
+        self.refuse_quietly(&project.assembly, &why);
+    }
+
+    fn refuse_quietly(&self, assembly: &str, why: &str) {
+        if let Ok(mut refused) = self.refused.lock() {
+            refused
+                .entry(assembly.to_string())
+                .or_insert_with(|| why.to_string());
+        }
+    }
+
+    fn warmup_of(&self, assembly: &str) -> Duration {
+        self.warmup
+            .lock()
+            .ok()
+            .and_then(|w| w.get(assembly).copied())
+            .unwrap_or(Duration::from_secs(30))
     }
 
     fn test_command(
@@ -153,7 +630,7 @@ impl Dotnet {
         let settings = folder.join(format!("run-{index}.runsettings"));
         std::fs::write(&settings, run_settings(&self.collector, filter))
             .map_err(|err| format!("{}: {err}", settings.display()))?;
-        let results = folder.join(RESULTS);
+        let results = folder.join(format!("{RESULTS}-{index}"));
         std::fs::create_dir_all(&results).map_err(|err| err.to_string())?;
         let mut command = dotnet(&[
             "test",
@@ -359,27 +836,46 @@ impl Engine for Dotnet {
     }
 
     fn reach(&self, budget: Budget) -> Result<Option<Reach>, String> {
+        let last = exec::runs_folder(&self.sandbox)
+            .join("baseline")
+            .join(TIMES);
+        if let Ok(mut times) = self.last_times.lock() {
+            *times = read_times(&last);
+        }
         let folder = fresh_folder(&self.sandbox, "baseline")?;
         let reached = folder.join("reach");
         std::fs::create_dir_all(&reached).map_err(|err| err.to_string())?;
         let started = Instant::now();
+        self.targets();
         let runs = self.runs_for(None, &Reach::default());
-        let env = [("DGF_REACH", reached.to_string_lossy().into_owned())];
-        let (status, results) = self.run(&runs, &env, budget.limit(HOUR), &folder, true)?;
+        let (status, results) = self.run(
+            &runs,
+            Ask::Reach(&reached),
+            budget.limit(HOUR),
+            &folder,
+            true,
+        )?;
         if status == TestRun::TimedOut && budget.spent() {
             return Ok(None);
         }
         check_baseline(status, &results.outcome, Some(&folder))?;
+        let startup = self.warm_startup(startup(&results.walls, &results.home, &results.times));
         let mut reach = Reach {
             failing: failing_tests(&results.outcome),
             files: self.test_files(&results),
-            startup: startup(&results.walls, &results.home, &results.times),
+            startup,
             home: results.home,
             times: results.times,
             duration: started.elapsed(),
             ..Reach::default()
         };
-        record_reach(&mut reach, &lines_in(&reached));
+        record_reach(
+            &mut reach,
+            &exec::files_of(&reached, "reach-"),
+            &exec::lines_of(&reached, "pending-"),
+        );
+        (reach.probed, reach.changed) = checked(&exec::lines_of(&reached, "checked-"));
+        write_times(&folder.join(TIMES), &reach);
         Ok(Some(reach))
     }
 
@@ -395,8 +891,9 @@ impl Engine for Dotnet {
         write_plan(&plan, &pack.plan)?;
         let tests: BTreeSet<String> = pack.plan.iter().map(|(t, _)| t.clone()).collect();
         let runs = self.runs_for(Some(&tests), reach);
-        let env = [("DGF_PLAN", plan.to_string_lossy().into_owned())];
-        let (status, results) = self.run(&runs, &env, limit, &folder, false)?;
+        let grouped = by_project(&pack.plan, reach);
+        let (status, results) =
+            self.run(&runs, Ask::Plan(&grouped, &plan), limit, &folder, false)?;
         Ok((status != TestRun::TimedOut).then_some(results.outcome))
     }
 
@@ -412,13 +909,21 @@ impl Engine for Dotnet {
             .then(|| reach.by_mutant.get(&mutant))
             .flatten();
         let runs = self.runs_for(tests, reach);
-        let (status, results) = self.run(
-            &runs,
-            &[("DGF_MUTANT", mutant.to_string())],
-            limit,
-            &folder,
-            false,
-        )?;
+        let (status, results) = match tests {
+            // Every test that reaches it, each with the mutant.
+            Some(tests) => {
+                let entries: Vec<(String, usize)> =
+                    tests.iter().map(|t| (t.clone(), mutant)).collect();
+                let plan = folder.join("plan.txt");
+                write_plan(&plan, &entries)?;
+                let grouped = by_project(&entries, reach);
+                self.run(&runs, Ask::Plan(&grouped, &plan), limit, &folder, false)?
+            }
+            None => {
+                let runs = self.seeing(mutant, runs);
+                self.run(&runs, Ask::Fresh(mutant), limit, &folder, false)?
+            }
+        };
         Ok((status, results.outcome))
     }
 
@@ -435,6 +940,236 @@ impl Engine for Dotnet {
     fn crash_reason(&self, tag: &str) -> Option<String> {
         exec::crash_reason(&exec::runs_folder(&self.sandbox).join(tag))
     }
+
+    fn stuck(&self, tag: &str) -> bool {
+        self.stuck.lock().is_ok_and(|s| s.contains(tag))
+    }
+
+    fn notes(&self) -> Vec<String> {
+        let mut notes = self.notes.lock().map(|n| n.clone()).unwrap_or_default();
+        if self.workers.is_some() {
+            if let Ok(refused) = self.refused.lock() {
+                notes.extend(refused.iter().map(|(project, why)| {
+                    format!("{project} ran with `dotnet test` for every test run, not in dog-food's test worker: {why}")
+                }));
+            }
+        }
+        notes
+    }
+}
+
+/// One project's part of a run: its status and results, its assembly, and how long it took.
+type ProjectRun = ((TestRun, Results), String, Duration);
+
+/// What a test run is for.
+#[derive(Clone, Copy)]
+enum Ask<'a> {
+    /// No mutant; record which mutants each test reaches in the folder.
+    Reach(&'a Path),
+    /// Each planned test with its mutant: the plan by test project (for
+    /// workers) and as one file (for `dotnet test`).
+    Plan(&'a HashMap<String, Vec<(String, usize)>>, &'a Path),
+    /// One mutant on from the start, for every test: a mutant reached
+    /// outside any test, which needs a new process.
+    Fresh(usize),
+}
+
+/// Mutant → the name of the project file (and so, as a rule, the assembly)
+/// its source file belongs to.
+fn owners(sandbox: &Path, files: &[FileMutants]) -> HashMap<usize, String> {
+    let mut owners = HashMap::new();
+    for file in files {
+        let Some(project) = super::sandbox::project_file(&sandbox.join(&file.relative)) else {
+            continue;
+        };
+        let name = project
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for mutant in &file.mutants {
+            owners.insert(mutant.id, name.clone());
+        }
+    }
+    owners
+}
+
+/// Whether the worker can match `filter` itself: none, or conditions on
+/// FullyQualifiedName and DisplayName only.
+fn splittable(filter: Option<&str>) -> bool {
+    filter.is_none_or(|f| {
+        f.split(['|', '&']).all(|term| {
+            let term = term.trim().trim_start_matches(['(', '!']);
+            let name = term.split(['=', '~', '!']).next().unwrap_or("").trim();
+            term.is_empty() || matches!(name, "FullyQualifiedName" | "DisplayName")
+        })
+    })
+}
+
+/// `tests` in at most `shards` groups of whole test classes (a class's
+/// tests share fixtures), the slowest class first into the quickest group;
+/// a test's time from the last baseline, 50 ms when it has none.
+fn split_by_class(
+    tests: &[String],
+    shards: usize,
+    times: &HashMap<String, Duration>,
+) -> Vec<Vec<String>> {
+    let cost = |test: &String| {
+        times
+            .get(test)
+            .copied()
+            .unwrap_or(Duration::ZERO)
+            .max(Duration::from_millis(50))
+    };
+    let mut classes: BTreeMap<&str, (Duration, Vec<String>)> = BTreeMap::new();
+    for test in tests {
+        let name = test.split('(').next().unwrap_or(test);
+        let class = classes
+            .entry(name.rsplit_once('.').map_or(name, |(class, _)| class))
+            .or_default();
+        class.0 += cost(test);
+        class.1.push(test.clone());
+    }
+    let mut ordered: Vec<(Duration, Vec<String>)> = classes.into_values().collect();
+    ordered.sort_by_key(|(time, _)| std::cmp::Reverse(*time));
+    let mut groups: Vec<(Duration, Vec<String>)> =
+        vec![Default::default(); shards.min(ordered.len()).max(1)];
+    for (time, class) in ordered {
+        let quickest = groups
+            .iter_mut()
+            .min_by_key(|(total, _)| *total)
+            .expect("one group");
+        quickest.0 += time;
+        quickest.1.extend(class);
+    }
+    groups
+        .into_iter()
+        .map(|(_, tests)| tests)
+        .filter(|g| !g.is_empty())
+        .collect()
+}
+
+/// The times `write_times` kept from the last baseline.
+fn read_times(path: &Path) -> HashMap<String, Duration> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let ms = parts.next()?.parse().ok()?;
+            let test = parts.nth(1)?;
+            Some((test.to_string(), Duration::from_millis(ms)))
+        })
+        .collect()
+}
+
+/// Every test's time in the baseline, slowest first, and the slowest classes in the log.
+fn write_times(path: &Path, reach: &Reach) {
+    let mut tests: Vec<(&String, &Duration)> = reach.times.iter().collect();
+    tests.sort_by(|a, b| b.1.cmp(a.1));
+    let mut text = String::from("ms\tproject\ttest\n");
+    let mut classes: HashMap<&str, Duration> = HashMap::new();
+    for (test, time) in &tests {
+        let project = reach.home.get(*test).map_or("", String::as_str);
+        text.push_str(&format!("{}\t{project}\t{test}\n", time.as_millis()));
+        let name = test.split('(').next().unwrap_or(test);
+        *classes
+            .entry(name.rsplit_once('.').map_or(name, |(c, _)| c))
+            .or_default() += **time;
+    }
+    let _ = std::fs::write(path, text);
+    let mut slowest: Vec<(&str, Duration)> = classes.into_iter().collect();
+    slowest.sort_by_key(|(_, time)| std::cmp::Reverse(*time));
+    for (class, time) in slowest.iter().take(10) {
+        debug!(
+            "baseline",
+            "slow class {class}: {:.1} s",
+            time.as_secs_f64()
+        );
+    }
+    debug!("baseline", "every test's time: {}", path.display());
+}
+
+/// The tag of the run whose output goes to `folder`.
+fn tag_of(folder: &Path) -> String {
+    folder
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The worker request for `ask` in the run `folder`, with the files it names.
+fn request_for(
+    ask: Ask,
+    assembly: &str,
+    filter: Option<&str>,
+    folder: &Path,
+    index: usize,
+) -> Result<String, String> {
+    if let Ask::Plan(by_project, _) = ask {
+        let plan = folder.join(format!("plan-{index}.txt"));
+        write_plan(
+            &plan,
+            by_project.get(assembly).map_or(&[][..], Vec::as_slice),
+        )?;
+        return Ok(format!("plan\t{}", plan.display()));
+    }
+    let filter_file = folder.join(format!("filter-{index}.txt"));
+    write_file(&filter_file, filter.unwrap_or(""))?;
+    Ok(match ask {
+        Ask::Reach(reached) => format!("tests\t{}\t{}", filter_file.display(), reached.display()),
+        _ => format!("tests\t{}", filter_file.display()),
+    })
+}
+
+/// A plan's entries by the test project (assembly) of their test, quickest
+/// test first: a worker that runs one test at a time skips a mutant's other
+/// tests once one fails.
+fn by_project(plan: &[(String, usize)], reach: &Reach) -> HashMap<String, Vec<(String, usize)>> {
+    let mut grouped: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+    for (test, mutant) in plan {
+        let home = reach.home.get(test).cloned().unwrap_or_default();
+        grouped
+            .entry(home)
+            .or_default()
+            .push((test.clone(), *mutant));
+    }
+    for entries in grouped.values_mut() {
+        entries.sort_by_key(|(test, _)| reach.times.get(test).copied().unwrap_or_default());
+    }
+    grouped
+}
+
+/// The assembly a test project builds (MSBuild's TargetPath), and whether it
+/// is a Microsoft.Testing.Platform test application; `None` for a project
+/// with several target frameworks, which has no TargetPath.
+fn target_path(project: &Path) -> Option<(PathBuf, bool)> {
+    let output = dotnet(&[
+        "msbuild",
+        &project.to_string_lossy(),
+        "-getProperty:TargetPath",
+        "-getProperty:IsTestingPlatformApplication",
+        "-nologo",
+    ])
+    .output()
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    target_properties(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// MSBuild's `{"Properties": {"TargetPath": ..., "IsTestingPlatformApplication": ...}}`.
+fn target_properties(json: &str) -> Option<(PathBuf, bool)> {
+    let value: serde_json::Value = serde_json::from_str(json.trim()).ok()?;
+    let properties = &value["Properties"];
+    let path = properties["TargetPath"]
+        .as_str()
+        .filter(|p| !p.is_empty())?;
+    let mtp = properties["IsTestingPlatformApplication"]
+        .as_str()
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    Some((PathBuf::from(path), mtp))
 }
 
 /// What the collector wrote: every test's result, its assembly and its file.
@@ -451,6 +1186,15 @@ struct Results {
 }
 
 impl Results {
+    /// Adds another project's results.
+    fn add(&mut self, other: Results) {
+        self.outcome.extend(other.outcome);
+        self.home.extend(other.home);
+        self.files.extend(other.files);
+        self.times.extend(other.times);
+        self.walls.extend(other.walls);
+    }
+
     /// Lines "test<TAB>passed|failed<TAB>assembly path<TAB>source file<TAB>ms";
     /// a test that ran several times (theory rows) fails if any row failed.
     fn read(folder: &Path, sandbox: &Path) -> Results {
@@ -545,25 +1289,111 @@ fn assembly_name(source: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Reach lines "test<TAB>mutant"; an empty test means outside any test.
-fn record_reach(reach: &mut Reach, lines: &[String]) {
+/// Lines "test<TAB>mutant<TAB>same|changed" from the switches that worked
+/// out a mutant's value next to the original's: the mutants checked, and
+/// for each the tests in which its value differed.
+fn checked(lines: &[String]) -> (HashSet<usize>, HashMap<usize, BTreeSet<String>>) {
+    let mut probed = HashSet::new();
+    let mut changed: HashMap<usize, BTreeSet<String>> = HashMap::new();
     for line in lines {
-        let Some((test, id)) = line.rsplit_once('\t') else {
+        let mut parts = line.split('\t');
+        let (Some(test), Some(Ok(id)), Some(verdict)) = (
+            parts.next(),
+            parts.next().map(|id| id.trim().parse::<usize>()),
+            parts.next(),
+        ) else {
             continue;
         };
-        let Ok(id) = id.trim().parse::<usize>() else {
+        probed.insert(id);
+        if verdict.trim() == "changed" {
+            changed.entry(id).or_default().insert(test.to_string());
+        }
+    }
+    (probed, changed)
+}
+
+/// Reach lines "test<TAB>mutant", one file per test process; an empty test
+/// means outside any test, in code that runs once per process, with the test
+/// it ran in after the id. Found that way in two tests of one process, it
+/// runs for each test (a cache per test object) and belongs to them.
+///
+/// `pending` lines "test<TAB>mutant" name the test that started next after a
+/// mutant was reached with no test known: the test began before its start was
+/// reported, or a class fixture ran. Such a mutant, never seen in code that
+/// runs once, belongs to every test of that test's class.
+fn record_reach(reach: &mut Reach, files: &[Vec<String>], pending: &[String]) {
+    let mut run_once = HashSet::new();
+    let per_test: Vec<(usize, BTreeSet<String>)> = files
+        .iter()
+        .flat_map(|lines| read_reach(reach, lines, &mut run_once))
+        .collect();
+    for (id, tests) in per_test {
+        reach.outside.remove(&id);
+        reach.by_mutant.entry(id).or_default().extend(tests);
+    }
+    give_pending(reach, pending, &run_once);
+}
+
+fn give_pending(reach: &mut Reach, pending: &[String], run_once: &HashSet<usize>) {
+    for (test, id) in pending.iter().filter_map(|line| pending_line(line)) {
+        if !run_once.contains(&id) && reach.outside.remove(&id) {
+            give_to_class(reach, test, id);
+        }
+    }
+}
+
+/// One process's reach lines into `reach`; returns the code found outside
+/// any test in two or more of its tests, which runs for each test.
+fn read_reach(
+    reach: &mut Reach,
+    lines: &[String],
+    run_once: &mut HashSet<usize>,
+) -> Vec<(usize, BTreeSet<String>)> {
+    let mut ran_in: HashMap<usize, BTreeSet<String>> = HashMap::new();
+    for line in lines {
+        let mut parts = line.split('\t');
+        let test = parts.next().unwrap_or("");
+        let Some(Ok(id)) = parts.next().map(|id| id.trim().parse::<usize>()) else {
             continue;
         };
-        if test.is_empty() {
-            reach.outside.insert(id);
-        } else {
+        if !test.is_empty() {
             reach
                 .by_mutant
                 .entry(id)
                 .or_default()
                 .insert(test.to_string());
+            continue;
+        }
+        reach.outside.insert(id);
+        if let Some(during) = parts.next().map(str::trim).filter(|t| !t.is_empty()) {
+            run_once.insert(id);
+            ran_in.entry(id).or_default().insert(during.to_string());
         }
     }
+    ran_in.into_iter().filter(|(_, t)| t.len() > 1).collect()
+}
+
+fn pending_line(line: &str) -> Option<(&str, usize)> {
+    let (test, id) = line.rsplit_once('\t')?;
+    Some((test, id.trim().parse().ok()?))
+}
+
+/// `id` belongs to `test` and every other test of its class.
+fn give_to_class(reach: &mut Reach, test: &str, id: usize) {
+    let class = |test: &str| {
+        let name = test.split('(').next().unwrap_or(test);
+        name.rsplit_once('.').map_or(name, |(c, _)| c).to_string()
+    };
+    let owner = class(test);
+    let mates: Vec<String> = reach
+        .home
+        .keys()
+        .filter(|t| class(t) == owner)
+        .cloned()
+        .collect();
+    let tests = reach.by_mutant.entry(id).or_default();
+    tests.insert(test.to_string());
+    tests.extend(mates);
 }
 
 /// `FullyQualifiedName=A|FullyQualifiedName=B`. It goes into the run
@@ -595,6 +1425,10 @@ fn dotnet(args: &[&str]) -> Command {
         .env("DOTNET_NOLOGO", "1")
         .env("MSBUILDDISABLENODEREUSE", "1");
     command
+}
+
+fn write_file(path: &Path, text: &str) -> Result<(), String> {
+    std::fs::write(path, text).map_err(|err| format!("{}: {err}", path.display()))
 }
 
 fn write_if_changed(path: &Path, text: &str) -> Result<(), String> {
@@ -642,28 +1476,69 @@ fn guid(text: &str) -> String {
     )
 }
 
-/// Builds dog-food's collector once per version of its source; other dgf
-/// processes wait while one builds it.
+/// Builds dog-food's collector once per version of its source.
 fn collector() -> Result<PathBuf, String> {
-    let version = super::fnv(&[COLLECTOR_CS.as_bytes(), COLLECTOR_PROJECT.as_bytes()]);
+    built(
+        "collector",
+        "DgfCollector",
+        COLLECTOR_CS,
+        COLLECTOR_PROJECT,
+        "dog-food's test collector",
+    )
+}
+
+/// Builds dog-food's test worker once per version of its source.
+fn worker_program() -> Result<PathBuf, String> {
+    built(
+        "worker",
+        "DgfWorker",
+        WORKER_CS,
+        WORKER_PROJECT,
+        "dog-food's test worker",
+    )
+}
+
+/// Builds dog-food's worker for Microsoft.Testing.Platform test applications
+/// once per version of its source.
+fn mtp_program() -> Result<PathBuf, String> {
+    built(
+        "mtp",
+        "DgfMtp",
+        MTP_CS,
+        MTP_PROJECT,
+        "dog-food's worker for Microsoft.Testing.Platform",
+    )
+}
+
+/// Builds the C# project `name` (`source` in `assembly`.cs, `project` in
+/// `assembly`.csproj) once per version of its text, and returns its dll;
+/// other dgf processes wait while one builds it.
+fn built(
+    name: &str,
+    assembly: &str,
+    source: &str,
+    project: &str,
+    what: &str,
+) -> Result<PathBuf, String> {
+    let version = super::fnv(&[source.as_bytes(), project.as_bytes()]);
     let dir = super::sandbox::temp_root()
         .join("dgf-mutate")
-        .join(format!("collector-{version:016x}"));
-    let dll = dir.join("out").join("DgfCollector.dll");
+        .join(format!("{name}-{version:016x}"));
+    let dll = dir.join("out").join(format!("{assembly}.dll"));
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     let lock = std::fs::File::create(dir.with_extension("lock")).map_err(|err| err.to_string())?;
     lock.lock().map_err(|err| err.to_string())?;
     if dll.exists() {
         return Ok(dll);
     }
-    std::fs::write(dir.join("DgfCollector.cs"), COLLECTOR_CS).map_err(|err| err.to_string())?;
-    std::fs::write(dir.join("DgfCollector.csproj"), COLLECTOR_PROJECT)
-        .map_err(|err| err.to_string())?;
+    let csproj = dir.join(format!("{assembly}.csproj"));
+    std::fs::write(dir.join(format!("{assembly}.cs")), source).map_err(|err| err.to_string())?;
+    std::fs::write(&csproj, project).map_err(|err| err.to_string())?;
     let out = dir.join("out");
     let build = || {
         dotnet(&[
             "build",
-            &dir.join("DgfCollector.csproj").to_string_lossy(),
+            &csproj.to_string_lossy(),
             "-c",
             "Release",
             "-o",
@@ -683,7 +1558,7 @@ fn collector() -> Result<PathBuf, String> {
     }
     if !output.status.success() {
         return Err(format!(
-            "could not build dog-food's test collector:\n{}{}",
+            "could not build {what}:\n{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ));
@@ -792,15 +1667,113 @@ mod tests {
         let mut reach = Reach::default();
         record_reach(
             &mut reach,
-            &[
+            &[vec![
                 "A.one\t3".into(),
                 "A.two\t3".into(),
                 "\t5".into(),
                 "junk".into(),
-            ],
+            ]],
+            &[],
         );
         assert_eq!(reach.by_mutant[&3].len(), 2);
         assert!(reach.outside.contains(&5));
+    }
+
+    #[test]
+    fn a_mutant_reached_before_its_test_was_reported_belongs_to_that_tests_class() {
+        let mut reach = Reach::default();
+        for test in ["Ns.Rules.one", "Ns.Rules.two", "Ns.Other.one"] {
+            reach.home.insert(test.into(), "Ns.Tests".into());
+        }
+        record_reach(
+            &mut reach,
+            &[vec!["\t4".into(), "\t9\tNs.Other.one".into()]],
+            &["Ns.Rules.two\t4".into(), "Ns.Rules.two\t9".into()],
+        );
+        assert!(!reach.outside.contains(&4));
+        assert_eq!(
+            reach.by_mutant[&4],
+            BTreeSet::from(["Ns.Rules.one".to_string(), "Ns.Rules.two".to_string()])
+        );
+        assert!(reach.outside.contains(&9), "run once: stays outside");
+    }
+
+    #[test]
+    fn the_baseline_splits_by_whole_classes_into_even_groups() {
+        let tests: Vec<String> = ["A.T.a", "A.T.b", "A.T.c", "A.U.a", "A.V.a(1)", "A.V.a(2)"]
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
+        let none = HashMap::new();
+        let groups = split_by_class(&tests, 2, &none);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0], ["A.T.a", "A.T.b", "A.T.c"]);
+        assert_eq!(groups[1].len(), 3);
+        assert_eq!(
+            split_by_class(&tests, 8, &none).len(),
+            3,
+            "no more groups than classes"
+        );
+        assert_eq!(split_by_class(&tests, 1, &none).len(), 1);
+        // With last run's times, a single slow test gets a group of its own.
+        let times = HashMap::from([("A.U.a".to_string(), Duration::from_secs(20))]);
+        let timed = split_by_class(&tests, 2, &times);
+        assert!(timed.contains(&vec!["A.U.a".to_string()]), "{timed:?}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("times.tsv");
+        std::fs::write(&path, "ms\tproject\ttest\n20000\tA.Tests\tA.U.a\n").unwrap();
+        assert_eq!(read_times(&path), times);
+        assert!(splittable(None));
+        assert!(splittable(Some("FullyQualifiedName~Pricing|DisplayName=x")));
+        assert!(splittable(Some(
+            "(FullyQualifiedName!~Slow)&FullyQualifiedName~A"
+        )));
+        assert!(!splittable(Some("Category=Unit")));
+    }
+
+    #[test]
+    fn msbuild_properties_give_the_test_assembly_and_whether_it_is_a_platform_app() {
+        let vstest = r#"{"Properties": {"TargetPath": "C:\\s\\bin\\Debug\\net10.0\\Shop.Tests.dll", "IsTestingPlatformApplication": ""}}"#;
+        assert_eq!(
+            target_properties(vstest),
+            Some((
+                PathBuf::from(r"C:\s\bin\Debug\net10.0\Shop.Tests.dll"),
+                false
+            ))
+        );
+        let mtp = r#"{"Properties": {"TargetPath": "/s/bin/Shop.Tests.dll", "IsTestingPlatformApplication": "true"}}"#;
+        assert_eq!(target_properties(mtp).map(|(_, mtp)| mtp), Some(true));
+        // Several target frameworks: no TargetPath.
+        assert_eq!(
+            target_properties(
+                r#"{"Properties": {"TargetPath": "", "IsTestingPlatformApplication": ""}}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn code_run_once_stays_outside_and_code_run_per_test_belongs_to_its_tests() {
+        let mut reach = Reach::default();
+        let line = |id: usize, test: &str| format!("\t{id}\t{test}");
+        record_reach(
+            &mut reach,
+            &[
+                // One process: a static constructor once, a cache per test object twice.
+                vec![
+                    line(7, "A.one"),
+                    line(8, "A.one"),
+                    line(8, "A.two"),
+                    "\t9".into(),
+                ],
+                // Another process of the same project builds the static again.
+                vec![line(7, "A.three")],
+            ],
+            &[],
+        );
+        assert!(reach.outside.contains(&7) && reach.outside.contains(&9));
+        assert!(!reach.outside.contains(&8));
+        assert_eq!(reach.by_mutant[&8].len(), 2);
     }
 
     #[test]

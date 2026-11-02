@@ -1084,6 +1084,8 @@ fn report_language(path: &Path) -> &'static str {
 fn agent_why(result: &RunResult, m: &Mutant) -> String {
     let reason = if result.outcomes.get(&m.id) == Some(&Outcome::NoCoverage) {
         "no_test_runs_this"
+    } else if result.unchanged.contains(&m.id) {
+        "no_test_changes_its_value"
     } else {
         "tests_still_pass"
     };
@@ -1097,6 +1099,22 @@ fn agent_why(result: &RunResult, m: &Mutant) -> String {
         why.push_str(" cached");
     }
     why
+}
+
+/// What a test needs for a mutant that survived because no test changed its
+/// value: the input on which the mutated expression gives another result.
+fn unchanged_hint(m: &Mutant) -> String {
+    match m.mutator {
+        "condition" => format!(
+            "no test makes `{}` true: add one where it holds and check what that branch does",
+            short(&m.original)
+        ),
+        "relational" => format!(
+            "no test gives the comparison values where `{}` and `{}` differ (for a boundary, the two sides equal): add that case",
+            m.original, m.replacement
+        ),
+        _ => "no test gives it values where the mutant differs from the original: add that case".into(),
+    }
 }
 
 /// The `tests:` line of a survivor with no reaching tests on record.
@@ -1364,7 +1382,7 @@ fn function_json(t: &Target, result: &RunResult) -> serde_json::Value {
     let mutants: Vec<serde_json::Value> = t
         .mutants
         .iter()
-        .map(|m| serde_json::json!({ "mutant": m, "outcome": result.outcomes.get(&m.id), "cached": result.cached.contains(&m.id), "untested": result.untested.get(&m.id) }))
+        .map(|m| serde_json::json!({ "mutant": m, "outcome": result.outcomes.get(&m.id), "cached": result.cached.contains(&m.id), "untested": result.untested.get(&m.id), "unchanged": result.unchanged.contains(&m.id) }))
         .collect();
     let counts = tally(t.mutants.iter(), result);
     serde_json::json!({
@@ -1477,10 +1495,13 @@ fn agent_survivor(out: &mut String, t: &Target, m: &Mutant, result: &RunResult) 
         agent_why(result, m)
     );
     let tests = result.reached.get(&m.id).filter(|t| !t.is_empty());
+    let unchanged = result.unchanged.contains(&m.id).then(|| unchanged_hint(m));
     let hint = if m.boundary_risk {
         "a date boundary: the result on the boundary day itself (the off-by-one-day bug); never call this one equivalent"
     } else {
-        assertion_hint(m.mutator)
+        unchanged
+            .as_deref()
+            .unwrap_or_else(|| assertion_hint(m.mutator))
     };
     let _ = writeln!(
         out,

@@ -10,6 +10,8 @@ use std::process::{Command, Output};
 use serde_json::Value;
 
 const SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/e2e/dotnet");
+/// An MSTest project on Microsoft.Testing.Platform (the MSTest runner).
+const PLATFORM_SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/e2e/dotnet-mtp");
 const EXCLUDE_ACCEPTANCE: &str = "**/*.Acceptance.Tests.csproj";
 
 fn has_tools() -> bool {
@@ -27,14 +29,18 @@ fn has_tools() -> bool {
 /// the same folder every time, so its sandbox (and the build output in it)
 /// is reused and later test runs build incrementally.
 fn repository() -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("dotnet-sample");
+    repository_of(SAMPLE, "dotnet-sample")
+}
+
+fn repository_of(sample: &str, name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     for state in [".git", ".dgf"] {
         if dir.join(state).exists() {
             std::fs::remove_dir_all(dir.join(state)).unwrap();
         }
     }
     std::fs::create_dir_all(&dir).unwrap();
-    copy(Path::new(SAMPLE), &dir);
+    copy(Path::new(sample), &dir);
     let git = |args: &[&str]| {
         let status = Command::new("git")
             .args([
@@ -132,7 +138,8 @@ fn sandbox(report: &Value) -> PathBuf {
     PathBuf::from(report["sandboxes"][0].as_str().unwrap())
 }
 
-/// Every mutant of the C# mutator fixtures, switched in at once, compiles:
+/// Every mutant of the C# mutator fixtures, switched in at once, compiles,
+/// with the values of probed mutants worked out next to their originals:
 /// a switch in a wrong place would otherwise cost a rebuild per run.
 /// `Modern.cs` needs C# 15, so a .NET 11 SDK.
 #[test]
@@ -177,10 +184,13 @@ fn compile_switched(fixture: &str, framework: &str) {
         .filter(|m| m.ignored.is_none())
         .collect();
     assert!(active.len() > 40, "{fixture}: {} mutants", active.len());
-    let switched =
-        dog_food_core::mutate::schemata(&source, dog_food_core::Language::CSharp, &active, &|id| {
-            format!("Dgf.Is({id})")
-        });
+    assert!(active.iter().any(|m| m.probe), "{fixture}: nothing probed");
+    let switched = dog_food_core::mutate::schemata_probed(
+        &source,
+        &active,
+        &|id| format!("Dgf.Is({id})"),
+        "Dgf",
+    );
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("fixture-compile")
         .join(framework);
@@ -197,7 +207,7 @@ fn compile_switched(fixture: &str, framework: &str) {
     );
     write(
         "Dgf.cs",
-        "public static class Dgf { public static bool Is(int id) => System.Environment.GetEnvironmentVariable(\"DGF\") == id.ToString(); }\n",
+        "public static class Dgf {\n    public static bool Is(int id) => System.Environment.GetEnvironmentVariable(\"DGF\") == id.ToString();\n    public static bool Probing => false;\n    public static bool Check(bool o, int a, bool x) => o;\n    public static bool Check(bool o, int a, bool x, int b, bool y) => o;\n    public static bool Check(bool o, int a, bool x, int b, bool y, int c, bool z) => o;\n}\n",
     );
     write(fixture, &switched);
     let output = Command::new("dotnet")
@@ -211,6 +221,41 @@ fn compile_switched(fixture: &str, framework: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// A Microsoft.Testing.Platform test application runs in the platform's
+/// server mode, kept running, one test at a time with its mutant: the same
+/// verdicts as any test run, a hang stopped, and a static initializer's
+/// mutants run with a new test application each.
+#[test]
+fn mutation_runs_on_a_testing_platform_app() {
+    if !has_tools() {
+        eprintln!("skipped: needs git and a .NET 10 SDK (or DGF_SKIP_E2E is set)");
+        return;
+    }
+    let root = &repository_of(PLATFORM_SAMPLE, "dotnet-mtp-sample");
+    let (code, report) = run(root, &["--no-cache"]);
+    assert_eq!(code, 0, "{report}");
+    let notes = report["notes"].to_string();
+    assert!(!notes.contains("dotnet test"), "{notes}");
+    assert_eq!(outcome(&report, "Calc.Add", 9, "+ -> -"), "killed");
+    assert_eq!(outcome(&report, "Calc.IsAdult", 11, ">= -> >"), "killed");
+    // The loop never ends with `distance += step`.
+    assert_eq!(outcome(&report, "Calc.Count", 18, "-= -> +="), "timeout");
+    // Built once, before the first test: the test reads the second step.
+    let build = report["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "Calc.Build")
+        .unwrap();
+    let outcomes: Vec<&str> = build["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, ["survived", "killed"], "{build}");
 }
 
 #[test]
@@ -229,10 +274,12 @@ fn mutation_runs_on_a_dotnet_solution() {
         projects.contains("Shop.Tests") && !projects.contains("Acceptance"),
         "{projects}"
     );
-    assert_eq!(
-        outcome(&first, "Pricing.Discount", 10, "> -> >="),
-        "survived"
-    );
+    // No test left has a total of exactly 100: in the run without mutants
+    // the mutated comparison never gave another value, so the mutant survives
+    // without a run of its own.
+    let boundary = mutant(&first, "Pricing.Discount", 10, "> -> >=");
+    assert_eq!(boundary["outcome"], "survived");
+    assert_eq!(boundary["unchanged"], true, "{boundary}");
     assert_eq!(
         outcome(&first, "Pricing.IsActive", 35, "<= -> <"),
         "survived"
@@ -255,6 +302,30 @@ fn mutation_runs_on_a_dotnet_solution() {
     assert_eq!(
         outcome(&first, "Codes.Square/lambda@23:60", 23, "* -> /"),
         "killed"
+    );
+    // NUnit's adapter reports a test's start at another moment than the test
+    // runs; the switch asks NUnit itself, so the boundary test reaches the
+    // mutant under its own name, not outside any test.
+    let grade = mutant(&first, "Grades.Of", 7, ">= -> >");
+    assert_eq!(grade["outcome"], "killed", "{grade}");
+    let id = grade["mutant"]["id"].as_u64().unwrap();
+    let mut runs = sandbox(&first).into_os_string();
+    runs.push(".runs");
+    let reach: Vec<String> = std::fs::read_dir(Path::new(&runs).join("baseline").join("reach"))
+        .unwrap()
+        .flatten()
+        .flat_map(|f| {
+            std::fs::read_to_string(f.path())
+                .unwrap()
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        reach.iter().any(|l| l.ends_with(&format!("\t{id}"))
+            && l.contains("GradesTests.Scores_get_their_grade(50")),
+        "{reach:?}"
     );
     // The source generator behind [GeneratedRegex] still ran: nothing in
     // Pricing failed to build. The only mutants that do not compile are the
@@ -442,8 +513,9 @@ fn mutation_runs_on_a_dotnet_solution() {
         "{mutant_lines:?}"
     );
 
-    // One mutant per test run, at low priority, with fewer build nodes: the
-    // same verdicts as packed runs.
+    // One mutant per test run, at low priority, with fewer build nodes, and
+    // `dotnet test` for every run instead of the worker: the same verdicts
+    // as packed runs in warm workers.
     let (_, alone) = run(
         root,
         &[
@@ -451,11 +523,13 @@ fn mutation_runs_on_a_dotnet_solution() {
             "--exclude-test-project",
             EXCLUDE_ACCEPTANCE,
             "--no-mix",
+            "--no-worker",
             "--low-priority",
             "--build-jobs",
             "2",
         ],
     );
+    assert_eq!(outcome(&alone, "Grades.Of", 7, ">= -> >"), "killed");
     assert_eq!(
         outcome(&alone, "Pricing.Discount", 10, "> -> >="),
         "survived"
@@ -467,7 +541,17 @@ fn mutation_runs_on_a_dotnet_solution() {
     // One run per mutant, a crashed one included, plus a second, longer run
     // for each that timed out (a busy machine or an endless loop).
     let tally = |name: &str| alone["tally"][name].as_u64().unwrap();
-    let tested = tally("killed") + tally("survived") + tally("timeout") + tally("runtimeError");
+    // A survivor whose value no test changed needs no run.
+    let unchanged = alone["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|f| f["mutants"].as_array().unwrap())
+        .filter(|m| m["unchanged"] == true)
+        .count() as u64;
+    assert!(unchanged > 0, "{alone}");
+    let tested =
+        tally("killed") + tally("survived") + tally("timeout") + tally("runtimeError") - unchanged;
     let retries = alone["timings"]["retries"].as_u64().unwrap();
     assert_eq!(
         alone["timings"]["testRuns"].as_u64().unwrap(),
