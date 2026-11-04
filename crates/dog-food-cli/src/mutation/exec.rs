@@ -223,11 +223,31 @@ pub fn runs_folder(sandbox: &Path) -> PathBuf {
 pub fn fresh_folder(sandbox: &Path, tag: &str) -> Result<PathBuf, String> {
     let folder = runs_folder(sandbox).join(tag);
     if folder.exists() {
-        std::fs::remove_dir_all(&folder)
+        clear_folder(&folder)
             .map_err(|err| format!("could not clear {}: {err}", folder.display()))?;
     }
     std::fs::create_dir_all(&folder).map_err(|err| err.to_string())?;
     Ok(folder)
+}
+
+/// Removes `folder`. On Windows a folder something else has open (an
+/// indexer, a scanner, a test host still closing) is denied for a moment:
+/// such a removal is tried again a few times over about a second.
+fn clear_folder(folder: &Path) -> std::io::Result<()> {
+    let mut wait = Duration::from_millis(50);
+    for _ in 0..5 {
+        match std::fs::remove_dir_all(folder) {
+            Err(err) if held(&err) => std::thread::sleep(wait),
+            other => return other,
+        }
+        wait *= 2;
+    }
+    std::fs::remove_dir_all(folder)
+}
+
+/// Access denied, or a sharing violation (Windows error 32).
+fn held(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::PermissionDenied || err.raw_os_error() == Some(32)
 }
 
 /// The name of a run's output log in its folder (`index` tells apart the

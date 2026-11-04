@@ -4,7 +4,7 @@
 //! costs only its tests. A worker serves one run at a time; the pool keeps
 //! the idle ones per test assembly for the runs going on side by side.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -63,18 +63,33 @@ pub struct Row {
     pub file: String,
 }
 
+/// What a worker reported for one request.
+#[derive(Debug, Default)]
+pub struct Report {
+    pub rows: Vec<Row>,
+    /// After a plan: the (test, mutant) pairs whose mutant took effect.
+    pub activated: BTreeSet<(String, usize)>,
+    /// After a plan: failed tests that fail without their mutant too.
+    pub polluted: BTreeSet<String>,
+}
+
 #[derive(Debug)]
 pub enum Reply {
-    Done(Vec<Row>),
+    Done(Report),
     /// Past the limit: the worker was stopped. `busy` when it kept a
-    /// processor busy all along, as an endless loop does: no busy machine
-    /// held it back, so a longer run would not end either.
+    /// processor busy all along, as an endless loop does.
     TimedOut {
         busy: bool,
     },
     /// The worker ended before it finished (a mutant crashed it), with the
     /// tests it reported first.
-    Crashed(Vec<Row>),
+    Crashed(Report),
+}
+
+/// An "activated" line: test, mutant id.
+fn activated(line: &str) -> Option<(String, usize)> {
+    let (test, id) = line.strip_prefix("activated\t")?.rsplit_once('\t')?;
+    Some((test.to_string(), id.trim().parse().ok()?))
 }
 
 /// A "result" line: test, passed or failed, milliseconds, source file.
@@ -255,7 +270,7 @@ impl Worker {
     pub fn request(&mut self, request: &str, limit: Duration) -> Reply {
         let sent = writeln!(self.stdin, "{request}").and_then(|()| self.stdin.flush());
         if sent.is_err() {
-            return Reply::Crashed(Vec::new());
+            return Reply::Crashed(Report::default());
         }
         let started = Instant::now();
         let before = self.used();
@@ -266,15 +281,15 @@ impl Worker {
     }
 
     fn wait(&mut self, started: Instant, before: Option<Duration>, limit: Duration) -> Reply {
-        let mut rows = Vec::new();
+        let mut report = Report::default();
         loop {
             match self.lines.recv_timeout(Duration::from_millis(20)) {
                 Ok(line) if line == "done" => {
                     self.warm = true;
-                    return Reply::Done(rows);
+                    return Reply::Done(report);
                 }
-                Ok(line) => self.read(&line, &mut rows),
-                Err(RecvTimeoutError::Disconnected) => return Reply::Crashed(rows),
+                Ok(line) => self.read(&line, &mut report),
+                Err(RecvTimeoutError::Disconnected) => return Reply::Crashed(report),
                 Err(RecvTimeoutError::Timeout) => {}
             }
             if let Some(stopped) = self.over(started, before, limit) {
@@ -283,11 +298,15 @@ impl Worker {
         }
     }
 
-    fn read(&mut self, line: &str, rows: &mut Vec<Row>) {
+    fn read(&mut self, line: &str, report: &mut Report) {
         if line.starts_with("stats\t") {
             self.stats = stats(line);
+        } else if let Some(pair) = activated(line) {
+            report.activated.insert(pair);
+        } else if let Some(test) = line.strip_prefix("polluted\t") {
+            report.polluted.insert(test.trim().to_string());
         } else {
-            rows.extend(row(line));
+            report.rows.extend(row(line));
         }
     }
 
@@ -315,10 +334,10 @@ impl Worker {
         warm: bool,
     ) {
         let (verdict, rows): (&str, &[Row]) = match reply {
-            Reply::Done(rows) => ("done", rows),
+            Reply::Done(report) => ("done", &report.rows),
             Reply::TimedOut { busy: true } => ("timed out, busy all along", &[]),
             Reply::TimedOut { busy: false } => ("timed out", &[]),
-            Reply::Crashed(rows) => ("crashed", rows),
+            Reply::Crashed(report) => ("crashed", &report.rows),
         };
         debug!(
             "request",

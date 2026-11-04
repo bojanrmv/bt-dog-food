@@ -18,4 +18,13 @@ public class CalcTests
 
     [TestMethod]
     public void Thirty_in_tens_is_three() => Assert.AreEqual(3, Calc.Count(30, 10));
+
+    [TestMethod]
+    public void Zero_is_guarded_through() => Assert.AreEqual(0, Calc.Guarded(0));
+
+    [TestMethod]
+    public void Two_doubled_is_four() => Assert.AreEqual(4, Calc.Doubled(2));
+
+    [TestMethod]
+    public void Two_scaled_is_five() => Assert.AreEqual(5, Calc.Scaled(2));
 }

@@ -11,13 +11,15 @@
 //               constructor, a field initializer, a lazy cache's factory or
 //               EF Core's OnModelCreating, which run once, in whichever test
 //               comes first, for every test after it; then the test it ran
-//               in follows the id
+//               in and the kind ("cctor" or "lazy") follow the id
+//   In a planned run, the switch also notes each planned mutant that took
+//               effect in its test ("activated"): see Activated below
 //   DGF_WORKER  "1" in dog-food's test worker, which keeps running between
 //               test runs: the plan and the reach folder of each run come
 //               from AppDomain data "DgfPlan" and "DgfReach" instead
 //   DGF_CONTROL a file dog-food's worker for Microsoft.Testing.Platform maps
 //               (it runs one test at a time): four bytes that change with each
-//               run, the text's length, then "test\nmutant id\nreach folder"
+//               run, the text's length, then "test\nmutant id\nreach folder\nactivated file"
 // </auto-generated>
 #nullable disable
 #pragma warning disable
@@ -42,6 +44,7 @@ namespace DogFood.Mutation
         private static string controlTest = "";
         private static int controlMutant = -1;
         private static string controlReach;
+        private static string controlActivated;
 
         public static bool Is(int id)
         {
@@ -51,7 +54,56 @@ namespace DogFood.Mutation
             {
                 Record(System.IO.Path.Combine(folder, ReachName), test, id);
             }
-            return Planned(test, id) || Active == id;
+            if (Active == id)
+            {
+                return true;
+            }
+            var planned = Planned(test, id);
+            if (planned)
+            {
+                Activated(test, id);
+            }
+            return planned;
+        }
+
+        /// Notes that the planned mutant `id` took effect in `test`, once per
+        /// run: a planned test whose mutant never did ran the original code
+        /// (a static built before the mutant was on, a cached value), and
+        /// its pass says nothing. dog-food's worker reads AppDomain data
+        /// "DgfActivated"; the Microsoft.Testing.Platform worker names a file
+        /// in the control file; `dotnet test` gets the plan file's name with
+        /// ".activated".
+        private static void Activated(string test, int id)
+        {
+            var pair = test + "\t" + id;
+            if (InWorker)
+            {
+                var set = System.AppDomain.CurrentDomain.GetData("DgfActivated") as System.Collections.Concurrent.ConcurrentDictionary<string, bool>;
+                if (set != null)
+                {
+                    set.TryAdd(pair, true);
+                }
+                return;
+            }
+            var file = Control != null ? controlActivated : PlanActivatedFile;
+            if (file == null || !ActivatedWritten.TryAdd(file + "\n" + pair, true))
+            {
+                return;
+            }
+            lock (Gate)
+            {
+                System.IO.File.AppendAllText(file, pair + "\n");
+            }
+        }
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> ActivatedWritten =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, bool>();
+        private static readonly string PlanActivatedFile = PlanActivated();
+
+        private static string PlanActivated()
+        {
+            var path = System.Environment.GetEnvironmentVariable("DGF_PLAN");
+            return string.IsNullOrEmpty(path) ? null : path + ".activated";
         }
 
         /// The folder of the run that records reach, if this run does.
@@ -162,10 +214,17 @@ namespace DogFood.Mutation
                 Control.ReadArray(8, bytes, 0, length);
                 var parts = System.Text.Encoding.UTF8.GetString(bytes).Split('\n');
                 controlTest = parts[0];
-                controlMutant = parts.Length > 1 && int.TryParse(parts[1], out var mutant) ? mutant : -1;
-                controlReach = parts.Length > 2 && parts[2].Length > 0 ? parts[2] : null;
+                controlMutant = int.TryParse(Part(parts, 1) ?? "", out var mutant) ? mutant : -1;
+                controlReach = Part(parts, 2);
+                controlActivated = Part(parts, 3);
                 System.Threading.Volatile.Write(ref controlRun, run);
             }
+        }
+
+        /// Part `i` of the control file's text, null when absent or empty.
+        private static string Part(string[] parts, int i)
+        {
+            return parts.Length > i && parts[i].Length > 0 ? parts[i] : null;
         }
 
         /// The running test's full name, empty outside any test. NUnit's adapter
@@ -230,7 +289,7 @@ namespace DogFood.Mutation
         /// from another thread, sometimes after the test began; class fixtures
         /// run before it): dog-food's collector or worker gives these mutants
         /// to the test that starts next. Code that runs once stays outside.
-        private static void Pending(int id)
+        private static void Pending(int id, bool runsOnce)
         {
             var domain = System.AppDomain.CurrentDomain;
             var pending = domain.GetData("DgfPending") as System.Collections.Concurrent.ConcurrentDictionary<int, bool>;
@@ -250,7 +309,7 @@ namespace DogFood.Mutation
             {
                 return;
             }
-            if (InTypeInitializer())
+            if (runsOnce)
             {
                 RunOnce.TryAdd(id, true);
             }
@@ -260,60 +319,95 @@ namespace DogFood.Mutation
             }
         }
 
+        /// Hits per test and mutant in a run that records reach: the stack
+        /// is read on the first hit and then at 2, 4, 8 ... 1024, so a site
+        /// reached from ordinary code first and from a static constructor
+        /// later in the same test is still found, at a bounded cost.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> Hits =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
+
         private static void Record(string file, string test, int id)
         {
-            if (test.Length == 0)
-            {
-                Pending(id);
-            }
-            if (!Seen.TryAdd(test + "\t" + id, true))
+            var key = test + "\t" + id;
+            var hits = Hits.AddOrUpdate(key, 1, (_, n) => n + 1);
+            if (!WalksAt(hits))
             {
                 return;
             }
-            // Reached in code that runs once for every test after it: outside
-            // any test, with the test it ran in after the id. A static
-            // constructor runs in one test per process; code that dgf finds
-            // in two tests of one process this way runs for each test.
-            var line = test.Length > 0 && InTypeInitializer()
-                ? "\t" + id + "\t" + test + "\n"
-                : test + "\t" + id + "\n";
+            var kind = RunsOnceKind();
+            if (test.Length == 0)
+            {
+                Pending(id, kind != null);
+            }
+            if (!Seen.TryAdd(key + "\t" + (kind ?? ""), true))
+            {
+                return;
+            }
             lock (Gate)
             {
-                System.IO.File.AppendAllText(file, line);
+                System.IO.File.AppendAllText(file, ReachLine(test, id, kind));
             }
         }
 
-        /// Whether code that runs once for every test after it is on the
-        /// stack: a static constructor (field initializers are part of it) of
-        /// another type, or a lazy cache filling a value on first use. Every
-        /// frame is read: with inlining, skipping a fixed number could skip it.
+        /// The stack is read at hits 1, 2, 4, ... 1024 of a test and mutant.
+        private static bool WalksAt(int hits)
+        {
+            return hits <= 1024 && (hits & (hits - 1)) == 0;
+        }
+
+        /// Reached in code that runs once for every test after it: outside
+        /// any test, with the test it ran in and the kind after the id. A
+        /// static constructor ("cctor") runs once per process, whatever
+        /// tests it is first seen in; a lazy fill ("lazy") that dgf finds
+        /// in two tests of one process runs for each test.
+        private static string ReachLine(string test, int id, string kind)
+        {
+            return test.Length > 0 && kind != null
+                ? "\t" + id + "\t" + test + "\t" + kind + "\n"
+                : test + "\t" + id + "\n";
+        }
+
+        /// What code that runs once for every test after it is on the stack:
+        /// "cctor" for a static constructor (field initializers are part of
+        /// it) of another type, "lazy" for a lazy cache filling a value on
+        /// first use, null for neither. A static constructor counts over a
+        /// lazy fill inside it. Every frame is read: with inlining, skipping
+        /// a fixed number could skip it.
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-        private static bool InTypeInitializer()
+        private static string RunsOnceKind()
         {
             var frames = new System.Diagnostics.StackTrace(false).GetFrames();
             if (frames == null)
             {
-                return false;
+                return null;
             }
+            string kind = null;
             foreach (var frame in frames)
             {
-                if (RunsOnce(frame.GetMethod()))
+                var found = RunsOnce(frame.GetMethod());
+                if (found == "cctor")
                 {
-                    return true;
+                    return found;
                 }
+                kind = kind ?? found;
             }
-            return false;
+            return kind;
         }
 
-        /// A static constructor or a lazy cache, other than dog-food's own.
-        private static bool RunsOnce(System.Reflection.MethodBase method)
+        /// "cctor" for a static constructor, "lazy" for a lazy cache, other
+        /// than dog-food's own; null otherwise.
+        private static string RunsOnce(System.Reflection.MethodBase method)
         {
             if (method == null || method.DeclaringType == typeof(DgfMutants))
             {
-                return false;
+                return null;
             }
             // IsConstructor is false for a static constructor: match its name.
-            return method.Name == System.Reflection.ConstructorInfo.TypeConstructorName || FillsLazily(method);
+            if (method.Name == System.Reflection.ConstructorInfo.TypeConstructorName)
+            {
+                return "cctor";
+            }
+            return FillsLazily(method) ? "lazy" : null;
         }
 
         /// Code that runs once per key or value and is cached for every caller

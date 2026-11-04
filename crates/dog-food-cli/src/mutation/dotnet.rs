@@ -14,10 +14,10 @@ use rayon::prelude::*;
 use super::exec::{self, fresh_folder, lines_in, write_plan, Located};
 use super::projects::TestProject;
 use super::sandbox::FileMutants;
-use super::worker::{Pool, Reply, Row, Target, Worker};
+use super::worker::{Pool, Reply, Report, Target, Worker};
 use super::{
     check_baseline, failing_tests, Budget, BuildError, Engine, Pack, PackRun, Reach, Round,
-    SoloRun, TestRun,
+    SoloRun, TestResults, TestRun,
 };
 use crate::discover::absolute;
 
@@ -70,12 +70,11 @@ pub struct Dotnet {
     /// Test projects a worker could not serve, and why: they run with
     /// `dotnet test` from then on.
     refused: Mutex<BTreeMap<String, String>>,
+    /// Test project → workers the kill check retired as polluted.
+    retired: Mutex<HashMap<String, usize>>,
     /// Test project → how much longer a run takes in a new worker than in
     /// a warm one (starting, finding the tests, loading and compiling).
     warmup: Mutex<HashMap<String, Duration>>,
-    /// Tags of runs stopped while they kept a processor busy all along: an
-    /// endless loop, not a slow machine.
-    stuck: Mutex<HashSet<String>>,
     /// Mutant → the assembly (project file name) it is compiled into.
     owners: HashMap<usize, String>,
     /// Test runs at once (`--jobs`): the baseline splits across that many workers.
@@ -87,6 +86,9 @@ pub struct Dotnet {
 
 /// Where a sandbox records the build settings of its last successful build.
 pub const RESTORED: &str = ".dgf-restored";
+
+/// Polluted workers of one test project after which its kill check is off.
+const RETIREMENTS: usize = 10;
 
 impl Dotnet {
     /// Uses the test projects `chosen` (relative to the repository, which the
@@ -150,8 +152,8 @@ impl Dotnet {
             workers,
             targets: OnceLock::new(),
             refused: Mutex::new(BTreeMap::new()),
+            retired: Mutex::new(HashMap::new()),
             warmup: Mutex::new(HashMap::new()),
-            stuck: Mutex::new(HashSet::new()),
             owners: owners(sandbox, files),
             jobs: jobs.max(1),
             last_times: Mutex::new(HashMap::new()),
@@ -219,15 +221,21 @@ impl Dotnet {
         match ask {
             Ask::Reach(reached) => command.env("DGF_REACH", reached),
             Ask::Plan(_, plan) => command.env("DGF_PLAN", plan),
-            Ask::Fresh(mutant) => command.env("DGF_MUTANT", mutant.to_string()),
+            Ask::Fresh(mutant, _) => command.env("DGF_MUTANT", mutant.to_string()),
         };
         let started = Instant::now();
         let status = exec::run(command, limit, &folder.join(exec::log_name(index)))?;
-        let results = if status == TestRun::TimedOut {
+        let mut results = if status == TestRun::TimedOut {
             Results::default()
         } else {
             Results::read(&folder.join(format!("{RESULTS}-{index}")), &self.sandbox)
         };
+        if let Ask::Plan(_, plan) = ask {
+            // The switches note the planned mutants that took effect next to the plan.
+            results.activation_known = true;
+            results.activated = activated_in(&plan.with_extension("txt.activated"));
+        }
+        let status = command_status(status, ask, &project.assembly, &results);
         debug!(
             "dotnet test",
             "{} in {}: {status:?} in {:.1} s (limit {:.1} s), {} tests, their own time {:.1} s",
@@ -259,7 +267,7 @@ impl Dotnet {
     ) -> Result<(TestRun, Results), String> {
         let pool = self.workers.as_ref().expect("a target needs workers");
         let started = match ask {
-            Ask::Fresh(mutant) => pool.start(target, &[("DGF_MUTANT", mutant.to_string())]),
+            Ask::Fresh(mutant, _) => pool.start(target, &[("DGF_MUTANT", mutant.to_string())]),
             _ => pool.take(target),
         };
         let mut worker = match started {
@@ -274,15 +282,16 @@ impl Dotnet {
                 project, target, worker, filter, reached, limit, folder, index,
             );
         }
-        let request = request_for(ask, &project.assembly, filter, folder, index)?;
+        let check = self.checks(&project.assembly);
+        let request = request_for(ask, &project.assembly, filter, folder, index, check)?;
         let limit = if worker.warm {
             limit
         } else {
             limit + self.warmup_of(&project.assembly) * 2
         };
         let reply = worker.request(&request, limit);
-        let fresh = matches!(ask, Ask::Fresh(_));
-        Ok(self.finish(project, target, worker, reply, fresh, folder, index))
+        let fresh = matches!(ask, Ask::Fresh(..));
+        Ok(self.finish(project, target, worker, reply, fresh, ask, folder, index))
     }
 
     /// Splits the baseline of `project` by test class across workers, one per
@@ -302,12 +311,14 @@ impl Dotnet {
         let pool = self.workers.as_ref().expect("a target needs workers");
         let filter_file = folder.join(format!("filter-{index}.txt"));
         write_file(&filter_file, filter.unwrap_or(""))?;
-        let listed: Vec<String> = match first
-            .request(&format!("list\t{}", filter_file.display()), limit)
-        {
-            Reply::Done(rows) => rows.into_iter().map(|r| r.test).collect(),
-            other => return Ok(self.finish(project, target, first, other, false, folder, index)),
-        };
+        let ask = Ask::Reach(reached);
+        let listed: Vec<String> =
+            match first.request(&format!("list\t{}", filter_file.display()), limit) {
+                Reply::Done(report) => report.rows.into_iter().map(|r| r.test).collect(),
+                other => {
+                    return Ok(self.finish(project, target, first, other, false, ask, folder, index))
+                }
+            };
         let times = self
             .last_times
             .lock()
@@ -327,7 +338,7 @@ impl Dotnet {
         if groups.len() < 2 {
             let request = format!("tests\t{}\t{}", filter_file.display(), reached.display());
             let reply = first.request(&request, limit);
-            return Ok(self.finish(project, target, first, reply, false, folder, index));
+            return Ok(self.finish(project, target, first, reply, false, ask, folder, index));
         }
         let mut first = Some(first);
         let ran: Vec<Result<(TestRun, Results, Duration), String>> = std::thread::scope(|scope| {
@@ -347,7 +358,7 @@ impl Dotnet {
                         let request = format!("names\t{}\t{}", file.display(), reached.display());
                         let reply = worker.request(&request, limit);
                         let (status, results) =
-                            self.finish(project, target, worker, reply, false, folder, index);
+                            self.finish(project, target, worker, reply, false, ask, folder, index);
                         Ok((status, results, started.elapsed()))
                     })
                 })
@@ -393,33 +404,71 @@ impl Dotnet {
         worker: Worker,
         reply: Reply,
         fresh: bool,
+        ask: Ask,
         folder: &Path,
         index: usize,
     ) -> (TestRun, Results) {
         match reply {
-            Reply::Done(rows) => {
-                let status = if rows.iter().all(|r| r.passed) {
+            Reply::Done(report) => {
+                let status = if report.rows.iter().all(|r| r.passed) {
                     TestRun::Passed
                 } else {
                     TestRun::Failed
                 };
-                self.release(target, worker, fresh);
-                (status, self.results(project, rows))
-            }
-            Reply::TimedOut { busy } => {
-                // A worker that had not run tests yet may have spent the time compiling.
-                if busy && worker.warm {
-                    self.mark_stuck(folder);
+                if report.polluted.is_empty() {
+                    self.release(target, worker, fresh);
+                } else {
+                    self.retire(project, worker);
                 }
+                (
+                    status,
+                    self.results(project, report, matches!(ask, Ask::Plan(..))),
+                )
+            }
+            Reply::TimedOut { .. } => {
                 worker.stop();
                 (TestRun::TimedOut, Results::default())
             }
-            Reply::Crashed(rows) => {
+            Reply::Crashed(report) => {
                 let _ = std::fs::copy(&worker.log, folder.join(exec::log_name(index)));
                 worker.stop();
-                (TestRun::Failed, self.results(project, rows))
+                (TestRun::Crashed, self.results(project, report, false))
             }
         }
+    }
+
+    /// Stops a worker the kill check found polluted (a test fails in it
+    /// without its mutant): its state is not to be trusted again. After
+    /// `RETIREMENTS` of a project's workers, the check is turned off for
+    /// the project, with a note: its tests are not idempotent, and the
+    /// check would retire a worker per kill.
+    fn retire(&self, project: &Project, worker: Worker) {
+        worker.stop();
+        let Ok(mut retired) = self.retired.lock() else {
+            return;
+        };
+        let count = retired.entry(project.assembly.clone()).or_insert(0);
+        *count += 1;
+        debug!(
+            "kill check",
+            "{}: a worker retired, {count} so far: a test failed in it without its mutant",
+            project.assembly
+        );
+        if *count == RETIREMENTS {
+            if let Ok(mut notes) = self.notes.lock() {
+                notes.push(format!(
+                    "{}: the kill check retired {RETIREMENTS} of its workers (a test failed again without its mutant each time), so its tests are not idempotent and the check is off for it from here on; its kills are not checked against process state",
+                    project.assembly
+                ));
+            }
+        }
+    }
+
+    /// Whether `assembly`'s plan runs still get the kill check.
+    fn checks(&self, assembly: &str) -> bool {
+        self.retired
+            .lock()
+            .is_ok_and(|r| r.get(assembly).is_none_or(|n| *n < RETIREMENTS))
     }
 
     /// A project in a worker starts once: what its first run took besides its
@@ -451,17 +500,17 @@ impl Dotnet {
         }
     }
 
-    fn mark_stuck(&self, folder: &Path) {
-        if let Ok(mut stuck) = self.stuck.lock() {
-            stuck.insert(tag_of(folder));
-        }
-    }
-
-    /// The worker's rows as the collector's results.
-    fn results(&self, project: &Project, rows: Vec<Row>) -> Results {
+    /// The worker's report as the collector's results; `planned` runs
+    /// report which mutants took effect.
+    fn results(&self, project: &Project, report: Report, planned: bool) -> Results {
         let sandbox = absolute(&self.sandbox);
-        let mut results = Results::default();
-        for row in rows {
+        let mut results = Results {
+            polluted: report.polluted,
+            activated: report.activated,
+            activation_known: planned,
+            ..Results::default()
+        };
+        for row in report.rows {
             results
                 .home
                 .insert(row.test.clone(), project.assembly.clone());
@@ -781,6 +830,7 @@ fn missing_reference(errors: &[String]) -> bool {
 fn worst(a: TestRun, b: TestRun) -> TestRun {
     match (a, b) {
         (TestRun::TimedOut, _) | (_, TestRun::TimedOut) => TestRun::TimedOut,
+        (TestRun::Crashed, _) | (_, TestRun::Crashed) => TestRun::Crashed,
         (TestRun::Failed, _) | (_, TestRun::Failed) => TestRun::Failed,
         _ => TestRun::Passed,
     }
@@ -894,37 +944,42 @@ impl Engine for Dotnet {
         let grouped = by_project(&pack.plan, reach);
         let (status, results) =
             self.run(&runs, Ask::Plan(&grouped, &plan), limit, &folder, false)?;
-        Ok((status != TestRun::TimedOut).then_some(results.outcome))
+        Ok((status != TestRun::TimedOut).then_some(results.into_test_results()))
     }
 
     fn solo(
         &self,
         mutant: usize,
         reach: &Reach,
+        fresh: bool,
         limit: Duration,
         tag: &str,
     ) -> Result<SoloRun, String> {
         let folder = fresh_folder(&self.sandbox, tag)?;
-        let tests = (!reach.outside.contains(&mutant))
-            .then(|| reach.by_mutant.get(&mutant))
-            .flatten();
+        if fresh || reach.outside.contains(&mutant) {
+            // A new process with the mutant on from the start, which stops
+            // at the first failing test.
+            let ordered = fresh_order(mutant, reach);
+            let all: BTreeSet<String> = ordered.values().flatten().cloned().collect();
+            let runs = self.seeing(mutant, self.runs_for(Some(&all), reach));
+            let (status, results) =
+                self.run(&runs, Ask::Fresh(mutant, &ordered), limit, &folder, false)?;
+            return Ok((status, results.into_test_results()));
+        }
+        // Every test that reaches it, each with the mutant, in a warm process.
+        let tests = reach.by_mutant.get(&mutant);
         let runs = self.runs_for(tests, reach);
-        let (status, results) = match tests {
-            // Every test that reaches it, each with the mutant.
-            Some(tests) => {
-                let entries: Vec<(String, usize)> =
-                    tests.iter().map(|t| (t.clone(), mutant)).collect();
-                let plan = folder.join("plan.txt");
-                write_plan(&plan, &entries)?;
-                let grouped = by_project(&entries, reach);
-                self.run(&runs, Ask::Plan(&grouped, &plan), limit, &folder, false)?
-            }
-            None => {
-                let runs = self.seeing(mutant, runs);
-                self.run(&runs, Ask::Fresh(mutant), limit, &folder, false)?
-            }
-        };
-        Ok((status, results.outcome))
+        let entries: Vec<(String, usize)> = tests
+            .into_iter()
+            .flatten()
+            .map(|t| (t.clone(), mutant))
+            .collect();
+        let plan = folder.join("plan.txt");
+        write_plan(&plan, &entries)?;
+        let grouped = by_project(&entries, reach);
+        let (status, results) =
+            self.run(&runs, Ask::Plan(&grouped, &plan), limit, &folder, false)?;
+        Ok((status, results.into_test_results()))
     }
 
     fn test_projects(&self) -> Vec<String> {
@@ -939,10 +994,6 @@ impl Engine for Dotnet {
 
     fn crash_reason(&self, tag: &str) -> Option<String> {
         exec::crash_reason(&exec::runs_folder(&self.sandbox).join(tag))
-    }
-
-    fn stuck(&self, tag: &str) -> bool {
-        self.stuck.lock().is_ok_and(|s| s.contains(tag))
     }
 
     fn notes(&self) -> Vec<String> {
@@ -969,9 +1020,11 @@ enum Ask<'a> {
     /// Each planned test with its mutant: the plan by test project (for
     /// workers) and as one file (for `dotnet test`).
     Plan(&'a HashMap<String, Vec<(String, usize)>>, &'a Path),
-    /// One mutant on from the start, for every test: a mutant reached
-    /// outside any test, which needs a new process.
-    Fresh(usize),
+    /// One mutant on from the start, in a new process: a mutant reached
+    /// outside any test, or one a warm process cannot be trusted on. The
+    /// tests to run, by test project, in order; a worker stops at the first
+    /// failure.
+    Fresh(usize, &'a HashMap<String, Vec<String>>),
 }
 
 /// Mutant → the name of the project file (and so, as a rule, the assembly)
@@ -991,6 +1044,28 @@ fn owners(sandbox: &Path, files: &[FileMutants]) -> HashMap<usize, String> {
         }
     }
     owners
+}
+
+/// How a `dotnet test` run ended: it runs every planned test, so a failed
+/// run with one of `assembly`'s missing lost its host. (A worker says so
+/// itself.)
+fn command_status(status: TestRun, ask: Ask, assembly: &str, results: &Results) -> TestRun {
+    match ask {
+        Ask::Plan(grouped, _)
+            if status == TestRun::Failed && planned_missing(grouped.get(assembly), results) =>
+        {
+            TestRun::Crashed
+        }
+        _ => status,
+    }
+}
+
+/// Whether a planned test of this project did not report.
+fn planned_missing(planned: Option<&Vec<(String, usize)>>, results: &Results) -> bool {
+    planned.is_some_and(|plan| {
+        plan.iter()
+            .any(|(test, _)| !results.outcome.contains_key(test))
+    })
 }
 
 /// Whether the worker can match `filter` itself: none, or conditions on
@@ -1105,6 +1180,7 @@ fn request_for(
     filter: Option<&str>,
     folder: &Path,
     index: usize,
+    check: bool,
 ) -> Result<String, String> {
     if let Ask::Plan(by_project, _) = ask {
         let plan = folder.join(format!("plan-{index}.txt"));
@@ -1112,7 +1188,14 @@ fn request_for(
             &plan,
             by_project.get(assembly).map_or(&[][..], Vec::as_slice),
         )?;
-        return Ok(format!("plan\t{}", plan.display()));
+        let nocheck = if check { "" } else { "\tnocheck" };
+        return Ok(format!("plan\t{}{nocheck}", plan.display()));
+    }
+    if let Ask::Fresh(_, by_project) = ask {
+        let names = folder.join(format!("kill-{index}.txt"));
+        let ordered = by_project.get(assembly).map_or(&[][..], Vec::as_slice);
+        write_file(&names, &ordered.join("\n"))?;
+        return Ok(format!("kill\t{}", names.display()));
     }
     let filter_file = folder.join(format!("filter-{index}.txt"));
     write_file(&filter_file, filter.unwrap_or(""))?;
@@ -1120,6 +1203,77 @@ fn request_for(
         Ask::Reach(reached) => format!("tests\t{}\t{}", filter_file.display(), reached.display()),
         _ => format!("tests\t{}", filter_file.display()),
     })
+}
+
+/// The "test<TAB>mutant" lines the switches wrote next to a plan for the
+/// planned mutants that took effect.
+fn activated_in(file: &Path) -> BTreeSet<(String, usize)> {
+    std::fs::read_to_string(file)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (test, id) = line.rsplit_once('\t')?;
+            Some((test.to_string(), id.trim().parse().ok()?))
+        })
+        .collect()
+}
+
+/// The tests a fresh run of `mutant` runs, by test project, in order: the
+/// tests that reach it, quickest first; then, for a mutant reached in code
+/// that runs once, the rest of the classes that code ran in, then every
+/// other test. Tests that fail without mutants are left out. The run stops
+/// at the first failure, so the likeliest killers go first.
+fn fresh_order(mutant: usize, reach: &Reach) -> HashMap<String, Vec<String>> {
+    let reaching: Vec<String> = reach
+        .by_mutant
+        .get(&mutant)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    let mut ordered = by_time(reach, reaching);
+    if reach.outside.contains(&mutant) {
+        let (mates, rest) = around_static(mutant, reach, &ordered);
+        ordered.extend(by_time(reach, mates));
+        ordered.extend(by_time(reach, rest));
+    }
+    let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+    for test in ordered {
+        let home = reach.home.get(&test).cloned().unwrap_or_default();
+        grouped.entry(home).or_default().push(test);
+    }
+    grouped
+}
+
+/// The other tests a mutant reached in code that runs once may be noticed
+/// by: those of the classes that code first ran in, and the rest; `taken`
+/// and the tests that fail anyway are left out.
+fn around_static(mutant: usize, reach: &Reach, taken: &[String]) -> (Vec<String>, Vec<String>) {
+    let classes: BTreeSet<String> = reach
+        .outside_in
+        .get(&mutant)
+        .into_iter()
+        .flatten()
+        .map(|t| class_of_test(t))
+        .collect();
+    reach
+        .home
+        .keys()
+        .filter(|t| !taken.contains(t) && !reach.failing.contains(*t))
+        .cloned()
+        .partition(|t| classes.contains(&class_of_test(t)))
+}
+
+/// `tests` quickest first (by their time in the baseline), ties by name.
+fn by_time(reach: &Reach, mut tests: Vec<String>) -> Vec<String> {
+    tests.sort_by_key(|t| (reach.times.get(t).copied().unwrap_or_default(), t.clone()));
+    tests
+}
+
+/// The class of a test's full name, without the method and a theory row's arguments.
+fn class_of_test(test: &str) -> String {
+    let name = test.split('(').next().unwrap_or(test);
+    name.rsplit_once('.').map_or(name, |(c, _)| c).to_string()
 }
 
 /// A plan's entries by the test project (assembly) of their test, quickest
@@ -1183,15 +1337,33 @@ struct Results {
     times: HashMap<String, Duration>,
     /// Test project (assembly) → how long its `dotnet test` took.
     walls: HashMap<String, Duration>,
+    /// Failed tests that fail without their mutant too (the kill check).
+    polluted: BTreeSet<String>,
+    /// The (test, mutant) pairs whose planned mutant took effect.
+    activated: BTreeSet<(String, usize)>,
+    /// Whether the run reported activation at all (a plan run does).
+    activation_known: bool,
 }
 
 impl Results {
+    /// What a run reported, for the engine's caller.
+    fn into_test_results(self) -> TestResults {
+        TestResults {
+            outcome: self.outcome,
+            polluted: self.polluted,
+            activated: self.activation_known.then_some(self.activated),
+        }
+    }
+
     /// Adds another project's results.
     fn add(&mut self, other: Results) {
         self.outcome.extend(other.outcome);
         self.home.extend(other.home);
         self.files.extend(other.files);
         self.times.extend(other.times);
+        self.polluted.extend(other.polluted);
+        self.activated.extend(other.activated);
+        self.activation_known |= other.activation_known;
         self.walls.extend(other.walls);
     }
 
@@ -1314,24 +1486,38 @@ fn checked(lines: &[String]) -> (HashSet<usize>, HashMap<usize, BTreeSet<String>
 
 /// Reach lines "test<TAB>mutant", one file per test process; an empty test
 /// means outside any test, in code that runs once per process, with the test
-/// it ran in after the id. Found that way in two tests of one process, it
-/// runs for each test (a cache per test object) and belongs to them.
+/// it ran in and the kind after the id. A static constructor ("cctor")
+/// runs once per process, whichever tests it is first seen in, even one
+/// shared by several classes' constructors: the mutant stays outside any
+/// test and gets a process of its own. A lazy fill ("lazy") found in two
+/// tests of one process runs for each test (a cache per test object) and
+/// belongs to them.
 ///
 /// `pending` lines "test<TAB>mutant" name the test that started next after a
 /// mutant was reached with no test known: the test began before its start was
 /// reported, or a class fixture ran. Such a mutant, never seen in code that
 /// runs once, belongs to every test of that test's class.
 fn record_reach(reach: &mut Reach, files: &[Vec<String>], pending: &[String]) {
-    let mut run_once = HashSet::new();
+    let mut once = RunOnce::default();
     let per_test: Vec<(usize, BTreeSet<String>)> = files
         .iter()
-        .flat_map(|lines| read_reach(reach, lines, &mut run_once))
+        .flat_map(|lines| read_reach(reach, lines, &mut once))
         .collect();
     for (id, tests) in per_test {
-        reach.outside.remove(&id);
+        if !once.cctor.contains(&id) {
+            reach.outside.remove(&id);
+        }
         reach.by_mutant.entry(id).or_default().extend(tests);
     }
-    give_pending(reach, pending, &run_once);
+    give_pending(reach, pending, &once.any);
+}
+
+/// The mutants reached in code that runs once, and those of them reached
+/// in a static constructor.
+#[derive(Default)]
+struct RunOnce {
+    any: HashSet<usize>,
+    cctor: HashSet<usize>,
 }
 
 fn give_pending(reach: &mut Reach, pending: &[String], run_once: &HashSet<usize>) {
@@ -1342,14 +1528,14 @@ fn give_pending(reach: &mut Reach, pending: &[String], run_once: &HashSet<usize>
     }
 }
 
-/// One process's reach lines into `reach`; returns the code found outside
-/// any test in two or more of its tests, which runs for each test.
+/// One process's reach lines into `reach`; returns the lazy fills found
+/// outside any test in two or more of its tests, which run for each test.
 fn read_reach(
     reach: &mut Reach,
     lines: &[String],
-    run_once: &mut HashSet<usize>,
+    once: &mut RunOnce,
 ) -> Vec<(usize, BTreeSet<String>)> {
-    let mut ran_in: HashMap<usize, BTreeSet<String>> = HashMap::new();
+    let mut lazy_in: HashMap<usize, BTreeSet<String>> = HashMap::new();
     for line in lines {
         let mut parts = line.split('\t');
         let test = parts.next().unwrap_or("");
@@ -1365,12 +1551,25 @@ fn read_reach(
             continue;
         }
         reach.outside.insert(id);
-        if let Some(during) = parts.next().map(str::trim).filter(|t| !t.is_empty()) {
-            run_once.insert(id);
-            ran_in.entry(id).or_default().insert(during.to_string());
+        let during = parts.next().map(str::trim).filter(|t| !t.is_empty());
+        let Some(during) = during else {
+            continue;
+        };
+        once.any.insert(id);
+        reach
+            .outside_in
+            .entry(id)
+            .or_default()
+            .insert(during.to_string());
+        // A line without a kind comes from a static constructor: the kind
+        // "lazy" is the only one that can run per test.
+        if parts.next().map(str::trim) == Some("lazy") {
+            lazy_in.entry(id).or_default().insert(during.to_string());
+        } else {
+            once.cctor.insert(id);
         }
     }
-    ran_in.into_iter().filter(|(_, t)| t.len() > 1).collect()
+    lazy_in.into_iter().filter(|(_, t)| t.len() > 1).collect()
 }
 
 fn pending_line(line: &str) -> Option<(&str, usize)> {
@@ -1380,15 +1579,11 @@ fn pending_line(line: &str) -> Option<(&str, usize)> {
 
 /// `id` belongs to `test` and every other test of its class.
 fn give_to_class(reach: &mut Reach, test: &str, id: usize) {
-    let class = |test: &str| {
-        let name = test.split('(').next().unwrap_or(test);
-        name.rsplit_once('.').map_or(name, |(c, _)| c).to_string()
-    };
-    let owner = class(test);
+    let owner = class_of_test(test);
     let mates: Vec<String> = reach
         .home
         .keys()
-        .filter(|t| class(t) == owner)
+        .filter(|t| class_of_test(t) == owner)
         .cloned()
         .collect();
     let tests = reach.by_mutant.entry(id).or_default();
@@ -1755,25 +1950,74 @@ mod tests {
     #[test]
     fn code_run_once_stays_outside_and_code_run_per_test_belongs_to_its_tests() {
         let mut reach = Reach::default();
-        let line = |id: usize, test: &str| format!("\t{id}\t{test}");
+        let line = |id: usize, test: &str, kind: &str| format!("\t{id}\t{test}\t{kind}");
         record_reach(
             &mut reach,
             &[
-                // One process: a static constructor once, a cache per test object twice.
+                // One process: a static constructor once, a cache per test
+                // object twice, and a helper that two classes' static
+                // constructors call, each first touched in another test.
                 vec![
-                    line(7, "A.one"),
-                    line(8, "A.one"),
-                    line(8, "A.two"),
+                    line(7, "A.one", "cctor"),
+                    line(8, "A.one", "lazy"),
+                    line(8, "A.two", "lazy"),
                     "\t9".into(),
+                    line(6, "A.one", "cctor"),
+                    line(6, "B.one", "cctor"),
                 ],
                 // Another process of the same project builds the static again.
-                vec![line(7, "A.three")],
+                vec![line(7, "A.three", "cctor")],
             ],
             &[],
         );
         assert!(reach.outside.contains(&7) && reach.outside.contains(&9));
         assert!(!reach.outside.contains(&8));
         assert_eq!(reach.by_mutant[&8].len(), 2);
+        // Seen in two tests, but in static constructors: once per process.
+        assert!(reach.outside.contains(&6));
+        assert_eq!(
+            reach.outside_in[&6],
+            BTreeSet::from(["A.one".to_string(), "B.one".to_string()])
+        );
+        // A line without a kind (an older switch) is read as a static constructor.
+        let mut old = Reach::default();
+        record_reach(
+            &mut old,
+            &[vec!["\t5\tA.one".into(), "\t5\tA.two".into()]],
+            &[],
+        );
+        assert!(old.outside.contains(&5));
+    }
+
+    #[test]
+    fn a_fresh_run_puts_the_reaching_tests_first_then_the_classes_the_static_ran_in() {
+        let mut reach = Reach::default();
+        for (test, ms) in [
+            ("Ns.A.one", 30),
+            ("Ns.A.two", 10),
+            ("Ns.B.one", 20),
+            ("Ns.C.one", 5),
+            ("Ns.C.bad", 1),
+        ] {
+            reach.home.insert(test.into(), "Ns.Tests".into());
+            reach.times.insert(test.into(), Duration::from_millis(ms));
+        }
+        reach.failing.insert("Ns.C.bad".into());
+        reach
+            .by_mutant
+            .insert(4, BTreeSet::from(["Ns.B.one".to_string()]));
+        reach.outside.insert(4);
+        reach
+            .outside_in
+            .insert(4, BTreeSet::from(["Ns.A.one".to_string()]));
+        let order = fresh_order(4, &reach);
+        assert_eq!(
+            order["Ns.Tests"],
+            ["Ns.B.one", "Ns.A.two", "Ns.A.one", "Ns.C.one"]
+        );
+        // Not reached outside any test: only the tests that reach it.
+        reach.outside.remove(&4);
+        assert_eq!(fresh_order(4, &reach)["Ns.Tests"], ["Ns.B.one"]);
     }
 
     #[test]

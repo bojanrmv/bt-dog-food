@@ -15,7 +15,7 @@ use super::exec::{self, error_location, fresh_folder, lines_in, write_plan, Loca
 use super::sandbox::FileMutants;
 use super::{
     check_baseline, failing_tests, Budget, BuildError, Engine, Pack, PackRun, Reach, Round,
-    SoloRun, TestRun,
+    SoloRun, TestResults, TestRun,
 };
 use crate::discover::absolute;
 
@@ -387,13 +387,14 @@ impl Engine for NodeTests {
             limit,
             &folder,
         )?;
-        Ok((status != TestRun::TimedOut).then_some(report.outcome))
+        Ok((status != TestRun::TimedOut).then(|| TestResults::of(report.outcome)))
     }
 
     fn solo(
         &self,
         mutant: usize,
         reach: &Reach,
+        _fresh: bool,
         limit: Duration,
         tag: &str,
     ) -> Result<SoloRun, String> {
@@ -405,7 +406,18 @@ impl Engine for NodeTests {
             limit,
             &folder,
         )?;
-        Ok((status, report.outcome))
+        // The runner runs every test of the files, so a failed run with a
+        // reaching test missing lost its worker.
+        let missing = reach
+            .by_mutant
+            .get(&mutant)
+            .is_some_and(|tests| tests.iter().any(|t| !report.outcome.contains_key(t)));
+        let status = if status == TestRun::Failed && missing {
+            TestRun::Crashed
+        } else {
+            status
+        };
+        Ok((status, TestResults::of(report.outcome)))
     }
 
     fn test_projects(&self) -> Vec<String> {
@@ -444,7 +456,8 @@ fn worse(a: TestRun, b: TestRun) -> TestRun {
     let rank = |r: TestRun| match r {
         TestRun::Passed => 0,
         TestRun::Failed => 1,
-        TestRun::TimedOut => 2,
+        TestRun::Crashed => 2,
+        TestRun::TimedOut => 3,
     };
     if rank(b) > rank(a) {
         b

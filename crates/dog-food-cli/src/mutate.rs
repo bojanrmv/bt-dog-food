@@ -381,10 +381,11 @@ fn retested_text(targets: &[Target], result: &RunResult) -> String {
     out
 }
 
-/// The survivors tested again and the score of what changed tests reach,
-/// each after a blank line.
+/// The mutants whose test run could not start, the survivors tested again
+/// and the score of what changed tests reach, each after a blank line.
 fn rerun_and_reach_text(targets: &[Target], result: &RunResult) -> String {
     [
+        run_errors_text(targets, result),
         retested_text(targets, result),
         tests_reach_text(targets, result),
     ]
@@ -1036,13 +1037,7 @@ fn report_mutant(m: &Mutant, result: &RunResult) -> serde_json::Value {
 /// The schema's status for a mutant, and why when the status needs it.
 fn report_status(m: &Mutant, result: &RunResult) -> (&'static str, Option<String>) {
     let Some(outcome) = result.outcomes.get(&m.id) else {
-        return (
-            "Pending",
-            result
-                .untested
-                .get(&m.id)
-                .map(|s| untested_why(*s).to_string()),
-        );
+        return ("Pending", untested_reason(result, m.id));
     };
     let status = STATUSES
         .iter()
@@ -1255,21 +1250,15 @@ fn untested_text(targets: &[Target], result: &RunResult) -> String {
     if !result.budget_hit() {
         return String::new();
     }
-    let stopped = |step: &Untested| {
-        !matches!(
-            step,
-            Untested::NoRunner | Untested::NotCached | Untested::Failed
-        )
-    };
     let mut out = format!(
         "\nThe time budget ran out; {} mutants were not tested (the results so far are saved):\n",
-        result.untested.values().filter(|s| stopped(s)).count()
+        result.untested.values().filter(|s| s.by_budget()).count()
     );
     for (t, m) in targets
         .iter()
         .flat_map(|t| t.mutants.iter().map(move |m| (t, m)))
     {
-        if let Some(step) = result.untested.get(&m.id).filter(|s| stopped(s)) {
+        if result.untested.get(&m.id).is_some_and(|s| s.by_budget()) {
             let _ = writeln!(
                 out,
                 "  {}:{}:{}  {}  ->  {}   ({}, {})  in {}",
@@ -1279,7 +1268,7 @@ fn untested_text(targets: &[Target], result: &RunResult) -> String {
                 short(&m.original),
                 m.replacement,
                 m.mutator,
-                untested_why(*step),
+                untested_reason(result, m.id).unwrap_or_default(),
                 t.name
             );
         }
@@ -1287,15 +1276,86 @@ fn untested_text(targets: &[Target], result: &RunResult) -> String {
     out
 }
 
-fn untested_why(step: Untested) -> &'static str {
-    match step {
-        Untested::Build => "stopped while building",
-        Untested::Baseline => "stopped during the baseline test run",
-        Untested::TestRuns => "its test runs did not finish",
-        Untested::NoRunner => "no vitest or jest package above this file",
-        Untested::NotCached => "not in the cache (--cached tests nothing)",
-        Untested::Failed => "the run of its language failed (the error is at the end)",
+/// Mutants whose own test run could not start, by the error, most first:
+/// not the budget's doing and not the mutant's, so they count as untested.
+fn run_errors_text(targets: &[Target], result: &RunResult) -> String {
+    by_reason_text(
+        targets,
+        "not tested, their test run could not start (run again to test them):",
+        |m| result.run_errors.get(&m.id).map(String::as_str),
+    )
+}
+
+/// The mutants `reason_of` gives a reason for, grouped by it, the largest
+/// group first, under `heading`; empty when there are none.
+fn by_reason_text<'a>(
+    targets: &'a [Target],
+    heading: &str,
+    reason_of: impl Fn(&'a Mutant) -> Option<&'a str>,
+) -> String {
+    let mut by_reason: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (t, m) in targets
+        .iter()
+        .flat_map(|t| t.mutants.iter().map(move |m| (t, m)))
+    {
+        if let Some(reason) = reason_of(m) {
+            by_reason
+                .entry(reason)
+                .or_default()
+                .push(format!("{}:{}", t.file, m.line));
+        }
     }
+    if by_reason.is_empty() {
+        return String::new();
+    }
+    let mut groups: Vec<_> = by_reason.into_iter().collect();
+    groups.sort_by_key(|(_, at)| std::cmp::Reverse(at.len()));
+    let mut out = format!("{heading}\n");
+    for (reason, at) in groups {
+        let _ = writeln!(out, "  {} mutants, e.g. {}: {reason}", at.len(), at[0]);
+    }
+    out
+}
+
+/// Why a mutant without an outcome was left untested, with the evidence it
+/// has when some of its tests ran.
+fn untested_reason(result: &RunResult, id: usize) -> Option<String> {
+    let step = result.untested.get(&id)?;
+    let mut why = untested_why(*step).to_string();
+    if let Some((ran, of)) = result.partial.get(&id).filter(|(ran, _)| *ran > 0) {
+        let _ = write!(why, "; {ran} of {of} tests ran, none failed");
+    }
+    Some(why)
+}
+
+/// Each untested step as the reports name it.
+const UNTESTED_WORDS: [(Untested, &str); 7] = [
+    (Untested::Build, "stopped while building"),
+    (Untested::Baseline, "stopped during the baseline test run"),
+    (Untested::TestRuns, "its test runs did not finish"),
+    (
+        Untested::NoRunner,
+        "no vitest or jest package above this file",
+    ),
+    (
+        Untested::NotCached,
+        "not in the cache (--cached tests nothing)",
+    ),
+    (
+        Untested::Failed,
+        "the run of its language failed (the error is at the end)",
+    ),
+    (
+        Untested::RunError,
+        "its test run could not start (the error is at the end)",
+    ),
+];
+
+fn untested_why(step: Untested) -> &'static str {
+    UNTESTED_WORDS
+        .iter()
+        .find(|(s, _)| *s == step)
+        .map_or("?", |(_, word)| word)
 }
 
 /// Where a score falls among the thresholds, in words.
@@ -1429,34 +1489,18 @@ fn crash_kills_text(targets: &[Target], result: &RunResult) -> String {
 /// Mutants that crashed the test run, grouped by what the run's output said
 /// as it ended, most first: one reason for all of them points at the setup.
 fn crashes_text(targets: &[Target], result: &RunResult) -> String {
-    let mut by_reason: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for (t, m) in targets
-        .iter()
-        .flat_map(|t| t.mutants.iter().map(move |m| (t, m)))
-        .filter(|(_, m)| result.outcomes.get(&m.id) == Some(&Outcome::RuntimeError))
-    {
-        let reason = result
-            .crash_reasons
-            .get(&m.id)
-            .map_or("no output kept (a result from the cache)", String::as_str);
-        by_reason
-            .entry(reason)
-            .or_default()
-            .push(format!("{}:{}", t.file, m.line));
-    }
-    if by_reason.is_empty() {
-        return String::new();
-    }
-    let mut groups: Vec<_> = by_reason.into_iter().collect();
-    groups.sort_by_key(|(_, at)| std::cmp::Reverse(at.len()));
-    let mut out = String::from(
-        "crashed the test run (by what its output said last):
-",
-    );
-    for (reason, at) in groups {
-        let _ = writeln!(out, "  {} mutants, e.g. {}: {reason}", at.len(), at[0]);
-    }
-    out
+    by_reason_text(
+        targets,
+        "crashed the test run (by what its output said last):",
+        |m| {
+            (result.outcomes.get(&m.id) == Some(&Outcome::RuntimeError)).then(|| {
+                result
+                    .crash_reasons
+                    .get(&m.id)
+                    .map_or("no output kept (a result from the cache)", String::as_str)
+            })
+        },
+    )
 }
 
 /// How many survivors each mutator left, most first: a class of
@@ -1540,6 +1584,7 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
     agent_survivors(&mut out, targets, result);
     out.push_str(&crash_kills_text(targets, result));
     out.push_str(&crashes_text(targets, result));
+    out.push_str(&run_errors_text(targets, result));
     let suppressed = suppressions_text(targets, "");
     if !suppressed.is_empty() {
         let _ = write!(

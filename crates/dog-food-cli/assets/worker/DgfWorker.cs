@@ -6,16 +6,23 @@
 // nothing per framework.
 //
 // Requests, one per line on standard input:
-//   plan<TAB>file                 file of "test<TAB>mutant id" lines: run those tests, each with its mutant
+//   plan<TAB>file[<TAB>nocheck]   file of "test<TAB>mutant id" lines: run those tests, each with its mutant;
+//                                 then run each failed test again with no mutant (the kill check), unless
+//                                 "nocheck": a test that fails again was failed by state the process
+//                                 carries, not by its mutant
 //   tests<TAB>file[<TAB>folder]   file holding a VSTest test filter (empty: every test): run the matching
 //                                 tests; with a folder, record which mutants each test reaches there
 //   list<TAB>file                 the tests a filter on FullyQualifiedName or DisplayName keeps, as results
 //   names<TAB>file[<TAB>folder]   run the tests named in the file, one per line; a folder records reach
+//   kill<TAB>file                 run the tests named in the file in that order, a class at a time, and
+//                                 stop at the first failure (a worker started with one mutant on)
 //   quit
 // Replies on standard output: "ready<TAB>tests" once started (or "error<TAB>why" and exit), then for
-// every request "result<TAB>test<TAB>passed|failed<TAB>ms<TAB>source file" lines, a "stats" line
-// (bytes allocated so far, gen 0/1/2 collections, heap, working set, peak working set) and "done".
-// Anything the tests write to the console goes to standard error.
+// every request "result<TAB>test<TAB>passed|failed<TAB>ms<TAB>source file" lines, after a plan
+// "activated<TAB>test<TAB>mutant id" for each planned mutant that took effect in its test and
+// "polluted<TAB>test" for each failed test when the kill check found one that fails without its
+// mutant, a "stats" line (bytes allocated so far, gen 0/1/2 collections, heap, working set, peak
+// working set) and "done". Anything the tests write to the console goes to standard error.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -90,8 +97,13 @@ namespace DogFood.Worker
         }
 
         /// Runs the planned tests; the mutant switches read the plan from
-        /// AppDomain data "DgfPlan" while they run.
-        internal static void RunPlan(string[] lines, Suite suite, Recorder recorder)
+        /// AppDomain data "DgfPlan" while they run, and note in "DgfActivated"
+        /// the planned mutants that took effect. Then the kill check: each
+        /// failed test runs again with no mutant. One that fails again was
+        /// failed by state this process carries (a static built with an
+        /// earlier mutant on, a cached value), so no kill of this request can
+        /// be trusted: every failed test is reported polluted.
+        internal static void RunPlan(string[] lines, bool check, Suite suite, Recorder recorder)
         {
             var plan = new Dictionary<string, int>();
             foreach (var row in lines)
@@ -103,7 +115,66 @@ namespace DogFood.Worker
                     plan[row.Substring(0, tab)] = id;
                 }
             }
-            With("DgfPlan", plan, () => suite.Run(plan.Keys, recorder));
+            var activated = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>();
+            With("DgfActivated", activated, () => With("DgfPlan", plan, () => suite.Run(plan.Keys, recorder)));
+            recorder.Activated.AddRange(activated.Keys);
+            var failed = recorder.Results.Where(r => !r.Passed).Select(r => r.Name).ToList();
+            if (check && failed.Any(name => FailsWithoutMutant(name, suite)))
+            {
+                recorder.Polluted.AddRange(failed);
+            }
+        }
+
+        private static bool FailsWithoutMutant(string name, Suite suite)
+        {
+            var again = new Recorder();
+            suite.Run(new[] { name }, again);
+            return again.Results.Any(r => !r.Passed);
+        }
+
+        /// Runs `names` in that order, a class at a time, and stops at the
+        /// first failure: in a worker started with one mutant on, one failing
+        /// test decides it.
+        internal static void RunUntilKilled(string[] names, Suite suite, Recorder recorder)
+        {
+            foreach (var group in ByClass(names.Where(n => n.Length > 0)))
+            {
+                suite.Run(group, recorder);
+                if (recorder.Results.Any(r => !r.Passed))
+                {
+                    return;
+                }
+            }
+        }
+
+        /// Consecutive names of one class, in order.
+        internal static IEnumerable<List<string>> ByClass(IEnumerable<string> names)
+        {
+            var group = new List<string>();
+            string current = null;
+            foreach (var name in names)
+            {
+                var cls = ClassOf(name);
+                if (group.Count > 0 && cls != current)
+                {
+                    yield return group;
+                    group = new List<string>();
+                }
+                current = cls;
+                group.Add(name);
+            }
+            if (group.Count > 0)
+            {
+                yield return group;
+            }
+        }
+
+        private static string ClassOf(string name)
+        {
+            var paren = name.IndexOf('(');
+            var method = paren > 0 ? name.Substring(0, paren) : name;
+            var dot = method.LastIndexOf('.');
+            return dot > 0 ? method.Substring(0, dot) : method;
         }
 
         /// The tests a filter on FullyQualifiedName or DisplayName keeps, with the test platform's own matching.
@@ -210,11 +281,15 @@ namespace DogFood.Worker
 
         private void Dispatch(string[] parts, Recorder recorder)
         {
-            var reach = parts.Length > 2 ? parts[2] : null;
+            var third = Part(parts, 2);
+            var reach = third;
             switch (parts[0])
             {
                 case "plan":
-                    Program.RunPlan(File.ReadAllLines(parts[1]), Suite, recorder);
+                    Program.RunPlan(File.ReadAllLines(parts[1]), third != "nocheck", Suite, recorder);
+                    break;
+                case "kill":
+                    Program.RunUntilKilled(File.ReadAllLines(parts[1]), Suite, recorder);
                     break;
                 case "tests":
                     Program.RunFiltered(tests, File.ReadAllText(parts[1]).Trim(), reach, adapters, recorder);
@@ -226,6 +301,11 @@ namespace DogFood.Worker
                     Program.With("DgfReach", reach, () => Suite.Run(File.ReadAllLines(parts[1]), recorder));
                     break;
             }
+        }
+
+        private static string Part(string[] parts, int i)
+        {
+            return parts.Length > i ? parts[i] : null;
         }
 
         private void List(string filter)
@@ -241,6 +321,14 @@ namespace DogFood.Worker
             foreach (var result in recorder.Results)
             {
                 protocol.WriteLine("result\t" + result.Name + "\t" + (result.Passed ? "passed" : "failed") + "\t" + result.Milliseconds + "\t" + result.File);
+            }
+            foreach (var pair in recorder.Activated)
+            {
+                protocol.WriteLine("activated\t" + pair);
+            }
+            foreach (var name in recorder.Polluted)
+            {
+                protocol.WriteLine("polluted\t" + name);
             }
             using (var self = Process.GetCurrentProcess())
             {
@@ -596,6 +684,10 @@ namespace DogFood.Worker
     internal sealed class Recorder : IFrameworkHandle
     {
         public readonly List<Result> Results = new List<Result>();
+        /// "test<TAB>mutant id" for each planned mutant that took effect in its test.
+        public readonly List<string> Activated = new List<string>();
+        /// Failed tests whose failure the kill check could not pin on their mutant.
+        public readonly List<string> Polluted = new List<string>();
         private readonly Dictionary<string, Result> byName = new Dictionary<string, Result>();
         // A test's time is the wall time since the one before it ended: with the class fixtures it set up.
         private readonly Stopwatch since = Stopwatch.StartNew();

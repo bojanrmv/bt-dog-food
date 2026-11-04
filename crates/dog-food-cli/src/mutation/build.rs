@@ -326,7 +326,14 @@ mod tests {
         fn pack(&self, _: &Pack, _: &Reach, _: Duration, _: &str) -> Result<PackRun, String> {
             unreachable!()
         }
-        fn solo(&self, _: usize, _: &Reach, _: Duration, _: &str) -> Result<SoloRun, String> {
+        fn solo(
+            &self,
+            _: usize,
+            _: &Reach,
+            _: bool,
+            _: Duration,
+            _: &str,
+        ) -> Result<SoloRun, String> {
             unreachable!()
         }
         fn test_projects(&self) -> Vec<String> {
@@ -366,7 +373,14 @@ mod tests {
         fn pack(&self, _: &Pack, _: &Reach, _: Duration, _: &str) -> Result<PackRun, String> {
             unreachable!()
         }
-        fn solo(&self, _: usize, _: &Reach, _: Duration, _: &str) -> Result<SoloRun, String> {
+        fn solo(
+            &self,
+            _: usize,
+            _: &Reach,
+            _: bool,
+            _: Duration,
+            _: &str,
+        ) -> Result<SoloRun, String> {
             unreachable!()
         }
         fn test_projects(&self) -> Vec<String> {

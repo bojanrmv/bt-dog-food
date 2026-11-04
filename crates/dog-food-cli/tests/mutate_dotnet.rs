@@ -242,6 +242,26 @@ fn mutation_runs_on_a_testing_platform_app() {
     assert_eq!(outcome(&report, "Calc.IsAdult", 11, ">= -> >"), "killed");
     // The loop never ends with `distance += step`.
     assert_eq!(outcome(&report, "Calc.Count", 18, "-= -> +="), "timeout");
+    // Zero gets through to a kill of the test host: the worker says it
+    // crashed (it does not pool itself as warm), and a new one serves the
+    // next run.
+    assert_eq!(
+        outcome(&report, "Calc.Guarded", 28, "< -> <="),
+        "runtime-error",
+        "{report}"
+    );
+    // A value cached once per process in ordinary code: the mutant that
+    // fills it with the wrong value is killed, and the mutant whose test
+    // then reads the polluted cache in the same warm process is not (the
+    // kill check sends it to a fresh process, where it survives). Which
+    // of the two tests runs first in the pack differs between runs; the
+    // outcomes must not.
+    assert_eq!(outcome(&report, "Calc.Doubled", 45, "* -> /"), "killed");
+    assert_eq!(
+        outcome(&report, "Calc.Scaled", 53, ">= -> >"),
+        "survived",
+        "{report}"
+    );
     // Built once, before the first test: the test reads the second step.
     let build = report["functions"]
         .as_array()

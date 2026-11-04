@@ -31,7 +31,7 @@ mutation score 14% · 3 killed, 5 survived, 14 no tests, 0 timeout, 0 did not co
 | survived | every test that reaches it passed: a gap | not detected |
 | no tests | no test reaches this code | not detected |
 | did not compile | removed before testing | left out |
-| crashed the test run | the test run ended before the tests it was meant to run reported | left out |
+| crashed the test run | the test host ended before the tests it was asked for reported (dog-food's worker says so itself; a `dotnet test` run that failed with a planned test missing counts too), or no test reported at all | left out |
 | ignored | a `dgf-disable` comment, `ignore_methods`, `skip_plain_constructors` or `[ExcludeFromCodeCoverage]`; never tested | left out |
 | not tested | `--max-minutes` ran out first | left out |
 
@@ -51,7 +51,7 @@ The HTML page is described in [the dashboards](../dashboards.md#mutation).
 
 ## Time budget
 
-`--max-minutes N` (or `max_minutes`) stops a run cleanly when the time is up: test runs still going are stopped, nothing new starts, every outcome so far goes into the cache, and the report lists each untested mutant with the step that did not finish (building, the baseline test run, or its own test runs). The exit code is then **4**. Running the same command again continues where it stopped, since the finished mutants come from the cache.
+`--max-minutes N` (or `max_minutes`) stops a run cleanly when the time is up: test runs still going are stopped, nothing new starts, every outcome so far goes into the cache, and the report lists each untested mutant with the step that did not finish (building, the baseline test run, or its own test runs) and, for a mutant some of whose tests ran, how many of them passed: it is not a survivor until every test that reaches it has. A mutant whose own test run could not start (a run folder that could not be cleared, a worker that would not start) is listed as not tested with the error, outside the budget's count, and the run goes on without it. The exit code is then **4**. Running the same command again continues where it stopped, since the finished mutants come from the cache.
 
 ## Exit codes
 
