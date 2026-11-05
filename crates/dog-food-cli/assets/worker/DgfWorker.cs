@@ -23,6 +23,8 @@
 // "polluted<TAB>test" for each failed test when the kill check found one that fails without its
 // mutant, a "stats" line (bytes allocated so far, gen 0/1/2 collections, heap, working set, peak
 // working set) and "done". Anything the tests write to the console goes to standard error.
+// A request that takes a while also gets "alive<TAB>seconds<TAB>results so far<TAB>running test<TAB>threads
+// <TAB>queued work items<TAB>working set<TAB>gen 2 collections" every 5 seconds, for the debug log.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -269,7 +271,10 @@ namespace DogFood.Worker
             var recorder = new Recorder();
             try
             {
-                Dispatch(parts, recorder);
+                using (parts[0] == "list" ? null : new Heartbeat(protocol, () => recorder.Results.Count))
+                {
+                    Dispatch(parts, recorder);
+                }
             }
             catch (Exception error)
             {
@@ -336,6 +341,44 @@ namespace DogFood.Worker
             }
             protocol.WriteLine("done");
             protocol.Flush();
+        }
+    }
+
+    /// Says every few seconds what the worker is doing while a request runs,
+    /// from a thread of its own so a stuck test or thread pool cannot stop it.
+    internal sealed class Heartbeat : IDisposable
+    {
+        private readonly ManualResetEventSlim stop = new ManualResetEventSlim();
+        private readonly Thread thread;
+
+        public Heartbeat(StreamWriter protocol, Func<int> results)
+        {
+            var clock = Stopwatch.StartNew();
+            thread = new Thread(() =>
+            {
+                while (!stop.Wait(TimeSpan.FromSeconds(5)))
+                {
+                    try
+                    {
+                        using (var self = Process.GetCurrentProcess())
+                        {
+                            protocol.WriteLine("alive\t" + (long)clock.Elapsed.TotalSeconds + "\t" + results() + "\t" + AppDomain.CurrentDomain.GetData("DgfTest") + "\t" + ThreadPool.ThreadCount + "\t" + ThreadPool.PendingWorkItemCount + "\t" + self.WorkingSet64 + "\t" + GC.CollectionCount(2));
+                            protocol.Flush();
+                        }
+                    }
+                    catch (Exception error) when (error is IOException || error is ObjectDisposedException)
+                    {
+                        return;
+                    }
+                }
+            }) { IsBackground = true, Name = "dgf heartbeat", Priority = ThreadPriority.AboveNormal };
+            thread.Start();
+        }
+
+        public void Dispose()
+        {
+            stop.Set();
+            thread.Join();
         }
     }
 

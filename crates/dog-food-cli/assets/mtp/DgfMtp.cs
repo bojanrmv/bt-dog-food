@@ -31,6 +31,7 @@ using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Testing.Platform.ServerMode.Client;
 
@@ -111,7 +112,10 @@ namespace DogFood.Mtp
             var results = new Results();
             try
             {
-                await Serve(parts, results);
+                using (parts[0] == "list" ? null : new Heartbeat(protocol, nodes))
+                {
+                    await Serve(parts, results);
+                }
             }
             catch (Exception error)
             {
@@ -476,6 +480,47 @@ namespace DogFood.Mtp
     }
 
     /// What the test application reported about its test nodes.
+    /// Says every few seconds what the worker is doing while a request runs,
+    /// on a thread of its own: "alive", seconds, tests reported so far, the
+    /// running test, threads, queued work items, working set, gen 2 collections.
+    internal sealed class Heartbeat : IDisposable
+    {
+        private readonly ManualResetEventSlim stop = new ManualResetEventSlim();
+        private readonly Thread thread;
+
+        public Heartbeat(StreamWriter protocol, Nodes nodes)
+        {
+            var clock = Stopwatch.StartNew();
+            var before = nodes.Reported;
+            thread = new Thread(() =>
+            {
+                while (!stop.Wait(TimeSpan.FromSeconds(5)))
+                {
+                    try
+                    {
+                        using var self = Process.GetCurrentProcess();
+                        lock (protocol)
+                        {
+                            protocol.WriteLine("alive\t" + (long)clock.Elapsed.TotalSeconds + "\t" + (nodes.Reported - before) + "\t" + nodes.Current + "\t" + ThreadPool.ThreadCount + "\t" + ThreadPool.PendingWorkItemCount + "\t" + self.WorkingSet64 + "\t" + GC.CollectionCount(2));
+                            protocol.Flush();
+                        }
+                    }
+                    catch (Exception error) when (error is IOException || error is ObjectDisposedException)
+                    {
+                        return;
+                    }
+                }
+            }) { IsBackground = true, Name = "dgf heartbeat", Priority = ThreadPriority.AboveNormal };
+            thread.Start();
+        }
+
+        public void Dispose()
+        {
+            stop.Set();
+            thread.Join();
+        }
+    }
+
     internal sealed class Nodes
     {
         private readonly object gate = new object();
@@ -489,6 +534,9 @@ namespace DogFood.Mtp
         /// Told when a test starts, and when all of a test's rows passed.
         public Action<string>? Started;
         public Action<string, long, string>? Passed;
+        /// For the heartbeat: the test running now, and how many tests reported.
+        public volatile string? Current;
+        public volatile int Reported;
 
         public void Add(IReadOnlyList<MtpTestNodeUpdate> changes)
         {
@@ -511,6 +559,7 @@ namespace DogFood.Mtp
             if (execution == "in-progress")
             {
                 clocks[uid] = Stopwatch.StartNew();
+                Current = known[uid].Name;
                 Started?.Invoke(known[uid].Name);
             }
             else if (execution != "discovered")
@@ -520,6 +569,8 @@ namespace DogFood.Mtp
                 // ended (a class fixture, the request itself) is this test's.
                 times[uid] = Math.Max(Duration(uid, change), since.ElapsedMilliseconds);
                 since.Restart();
+                Current = null;
+                Reported = Reported + 1;
                 TellPassed(known[uid].Name);
             }
         }

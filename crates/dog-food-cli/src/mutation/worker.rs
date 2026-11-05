@@ -18,6 +18,10 @@ use super::exec::{self, cpu};
 /// Longest a worker may take to start and find its tests.
 const START: Duration = Duration::from_secs(600);
 
+/// A worker says it is alive every 5 seconds during a request: this long
+/// with no word at all means its process is frozen or starved of processor.
+const SILENCE: Duration = Duration::from_secs(15);
+
 /// A test project a worker can serve: its test assembly, with the runtime
 /// and dependency files the build wrote next to it, and a VSTest adapter;
 /// or a Microsoft.Testing.Platform test application (`mtp`), which runs in
@@ -137,6 +141,8 @@ pub struct Worker {
     name: String,
     /// Its memory after the last request, for the debug log.
     stats: Option<Stats>,
+    /// The last thing it said about itself during this request, in words.
+    last_word: Option<String>,
 }
 
 /// A worker's memory after a request: bytes allocated since it started, GC
@@ -166,6 +172,58 @@ fn stats(line: &str) -> Option<Stats> {
         working_set,
         peak,
     })
+}
+
+/// An "alive" line, in words for the debug log: seconds into the request,
+/// results so far, the running test, threads, queued work items, working set
+/// and gen 2 collections.
+fn alive(line: &str) -> Option<String> {
+    let parts: Vec<&str> = line
+        .strip_prefix("alive\t")?
+        .trim_end()
+        .split('\t')
+        .collect();
+    let [seconds, results, test, threads, queued, working_set, gen2] = parts[..] else {
+        return None;
+    };
+    let running = if test.is_empty() {
+        "no test running (loading the tests, or between two)".to_string()
+    } else {
+        format!("in {test}")
+    };
+    Some(format!(
+        "{seconds} s into the request, {results} results, {running}, {threads} threads ({queued} queued), working set {:.0} MB, {gen2} gen 2 collections",
+        megabytes(working_set.parse().ok()?)
+    ))
+}
+
+/// When a worker last said anything, and when the log last said it had not.
+struct Silence {
+    heard: Instant,
+    told: Instant,
+}
+
+impl Silence {
+    fn new(now: Instant) -> Silence {
+        Silence {
+            heard: now,
+            told: now,
+        }
+    }
+
+    fn heard(&mut self, now: Instant) {
+        self.heard = now;
+        self.told = now;
+    }
+
+    /// How long it has been silent, once per `SILENCE`.
+    fn check(&mut self, now: Instant) -> Option<Duration> {
+        if now.duration_since(self.told) < SILENCE {
+            return None;
+        }
+        self.told = now;
+        Some(now.duration_since(self.heard))
+    }
 }
 
 fn megabytes(bytes: u64) -> f64 {
@@ -237,6 +295,7 @@ impl Worker {
             log: log.to_path_buf(),
             name,
             stats: None,
+            last_word: None,
         };
         let ready = worker.lines.recv_timeout(START);
         let took = started.elapsed().as_secs_f64();
@@ -291,6 +350,7 @@ impl Worker {
         let started = Instant::now();
         let before = self.used();
         let warm = self.warm;
+        self.last_word = None;
         let reply = self.wait(started, before, limit);
         self.trace(request, &reply, started, before, limit, warm);
         reply
@@ -298,15 +358,29 @@ impl Worker {
 
     fn wait(&mut self, started: Instant, before: Option<Duration>, limit: Duration) -> Reply {
         let mut report = Report::default();
+        let mut silence = Silence::new(started);
         loop {
             match self.lines.recv_timeout(Duration::from_millis(20)) {
                 Ok(line) if line == "done" => {
                     self.warm = true;
                     return Reply::Done(report);
                 }
-                Ok(line) => self.read(&line, &mut report),
+                Ok(line) => {
+                    silence.heard(Instant::now());
+                    self.read(&line, &mut report);
+                }
                 Err(RecvTimeoutError::Disconnected) => return Reply::Crashed(report),
                 Err(RecvTimeoutError::Timeout) => {}
+            }
+            if let Some(quiet) = silence.check(Instant::now()) {
+                debug!(
+                    "silent",
+                    "{}: no word for {:.0} s, not even its heartbeat, so its process is frozen or starved (processor {})",
+                    self.name,
+                    quiet.as_secs_f64(),
+                    self.used_since(before)
+                        .map_or("?".into(), |u| format!("{:.3} s", u.as_secs_f64()))
+                );
             }
             if let Some(busy) = self.over(started, before, limit) {
                 return Reply::TimedOut { busy, report };
@@ -315,7 +389,10 @@ impl Worker {
     }
 
     fn read(&mut self, line: &str, report: &mut Report) {
-        if line.starts_with("stats\t") {
+        if let Some(said) = alive(line) {
+            debug!("alive", "{} {said}", self.name);
+            self.last_word = Some(said);
+        } else if line.starts_with("stats\t") {
             self.stats = stats(line);
         } else if let Some(pair) = activated(line) {
             report.activated.insert(pair);
@@ -374,6 +451,15 @@ impl Worker {
             rows.iter().filter(|r| !r.passed).count(),
             rows.iter().map(|r| r.time).sum::<Duration>().as_secs_f64()
         );
+        if let Reply::TimedOut { report, .. } = reply {
+            debug!(
+                "request",
+                "{}: its last word: {}; tests that started and did not report: {:?}",
+                self.name,
+                self.last_word.as_deref().unwrap_or("none"),
+                report.running
+            );
+        }
         if let (Some(s), Reply::Done(_)) = (self.stats, reply) {
             debug!(
                 "memory",
@@ -396,7 +482,14 @@ impl Worker {
 
     /// Stops the worker and whatever it started.
     pub fn stop(mut self) {
+        let started = Instant::now();
         exec::kill_tree(&mut self.child, self.job.as_ref());
+        debug!(
+            "worker",
+            "{} stopped in {:.2} s",
+            self.name,
+            started.elapsed().as_secs_f64()
+        );
     }
 
     /// Asks the worker to end, and stops it when it does not.
@@ -492,6 +585,32 @@ impl Drop for Pool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_heartbeat_says_which_test_runs_or_that_none_does() {
+        let said = alive("alive\t15\t3\tA.B.C\t14\t2\t104857600\t1\r").unwrap();
+        assert_eq!(
+            said,
+            "15 s into the request, 3 results, in A.B.C, 14 threads (2 queued), working set 100 MB, 1 gen 2 collections"
+        );
+        let said = alive("alive\t5\t0\t\t4\t0\t1048576\t0").unwrap();
+        assert!(said.contains("no test running"), "{said}");
+        assert_eq!(alive("alive\t5"), None);
+        assert_eq!(alive("result\tA\tpassed\t1\t"), None);
+    }
+
+    #[test]
+    fn silence_is_told_once_per_period_and_a_word_ends_it() {
+        let start = Instant::now();
+        let mut silence = Silence::new(start);
+        assert_eq!(silence.check(start + SILENCE / 2), None);
+        assert_eq!(silence.check(start + SILENCE), Some(SILENCE));
+        assert_eq!(silence.check(start + SILENCE + SILENCE / 2), None);
+        assert_eq!(silence.check(start + SILENCE * 2), Some(SILENCE * 2));
+        silence.heard(start + SILENCE * 2);
+        assert_eq!(silence.check(start + SILENCE * 2 + SILENCE / 2), None);
+        assert_eq!(silence.check(start + SILENCE * 3), Some(SILENCE));
+    }
 
     #[test]
     fn result_lines_give_rows_and_other_lines_none() {

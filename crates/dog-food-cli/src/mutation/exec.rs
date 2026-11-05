@@ -79,16 +79,31 @@ pub fn past_limit(elapsed: Duration, used: Option<Duration>, limit: Duration) ->
 
 /// Test runners start processes of their own; stop all of them.
 pub fn kill_tree(child: &mut Child, job: Option<&cpu::Job>) {
+    let started = Instant::now();
     if let Some(job) = job {
         job.terminate();
     }
+    let terminated = started.elapsed();
     if cfg!(windows) {
         let _ = Command::new("taskkill")
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
             .output();
     }
+    let tree = started.elapsed();
     let _ = child.kill();
     let _ = child.wait();
+    let total = started.elapsed();
+    if total >= Duration::from_secs(1) {
+        debug!(
+            "stop",
+            "pid {}: stopping took {:.2} s (job {:.2} s, process tree {:.2} s, waiting for its end {:.2} s)",
+            child.id(),
+            total.as_secs_f64(),
+            terminated.as_secs_f64(),
+            (tree - terminated).as_secs_f64(),
+            (total - tree).as_secs_f64()
+        );
+    }
 }
 
 /// Processor time of a process and everything it starts: on Windows a job

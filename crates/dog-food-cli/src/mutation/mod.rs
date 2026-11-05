@@ -1115,7 +1115,7 @@ fn log_start(prepared: &Prepared, scope: &Scope, options: &Options, started: Ins
     log::open(&exec::runs_folder(&prepared.sandbox.dir).join("dgf-mutate.log"));
     debug!(
         "run",
-        "dgf {} {:?}: {} mutants in {} files, jobs {}, sandbox {}, prepared in {:.1} s",
+        "dgf {} {:?}: {} mutants in {} files, jobs {}{}, sandbox {}, prepared in {:.1} s",
         env!("CARGO_PKG_VERSION"),
         scope.kind,
         prepared
@@ -1125,6 +1125,11 @@ fn log_start(prepared: &Prepared, scope: &Scope, options: &Options, started: Ins
             .sum::<usize>(),
         prepared.files.len(),
         options.jobs,
+        if options.low_priority {
+            " at low priority"
+        } else {
+            ""
+        },
         prepared.sandbox.dir.display(),
         secs(started)
     );
