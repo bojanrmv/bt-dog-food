@@ -17,7 +17,7 @@ Each finding is a group of copies, ranked by the lines a shared version would sa
    ⟨1⟩ name: plan | seat
    ⟨2⟩ member: Price | Fee
    risk: CRAP 42 in Orders.Add (complexity 6, 0% covered)
-   unite: extract a shared function in this file, taking ⟨2⟩ members; ⟨1⟩ variables
+   unite: extract a shared function in this file (a static helper the types call), taking ⟨2⟩ members; ⟨1⟩ variables (for members pass the values, or a selector such as `x => x.Price`; values and variables become parameters)
    caution: the code after the first copy uses total: a shared version returns it
 ```
 
@@ -30,7 +30,7 @@ Each finding is a group of copies, ranked by the lines a shared version would sa
 | **Template** | the first copy, with `⟨n⟩` where the copies differ. `⟪…⟫` marks what not every copy has (near misses). Type 4 shows the canonical expression every copy computes. |
 | **Holes** | what differs, and what it becomes in a shared version: a *value* or *name* a parameter, a *member* a selector (`x => x.Price`), a *call* a function parameter, a *type* a generic parameter. A *local* is only renamed. |
 | **Differs** | near misses: what each copy adds, leaves out or has instead, with its line. |
-| **Same after** | type 4: the rules that made the methods equal (`loop that adds up → Sum`), and any condition they need ("equal when the total does not overflow int"). |
+| **Same after** | type 4: the rules that made the methods equal (`loop that adds up → Sum`). Any condition they need is a caution ("equal when the total does not overflow int"). |
 | **Confirmed** | type 4 with `--confirm`: the methods returned the same results on 1,000 generated inputs, or why they were not run. |
 | **Risk** | the riskiest copy's function: its cyclomatic complexity, and with `--coverage` its covered share and CRAP score. |
 | **As a method** | C#, from the C# engine: what the first copy takes and returns if extracted, from the compiler's data flow, and whether it needs `this`. |
@@ -42,7 +42,7 @@ Each finding is a group of copies, ranked by the lines a shared version would sa
 
 | Format | For |
 | --- | --- |
-| `table` (default) | reading in the terminal; `--top N` groups |
-| `agent` | AI assistants: every group, compact, with the template and advice |
-| `json` | other tools: everything, including each copy's code |
+| `table` (default) | reading in the terminal; `--top N` groups (20 by default) |
+| `agent` | AI assistants: compact, with the template and advice; `--top N` groups (20 by default, `--top 0` for all) |
+| `json` | other tools: everything, including each copy's code (cut after 150 lines) |
 | `html` | people: the [review dashboard](review.md) |

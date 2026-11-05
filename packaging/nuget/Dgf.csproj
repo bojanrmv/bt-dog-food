@@ -37,11 +37,15 @@
     <PackageId>dgf</PackageId>
     <Version Condition="'$(Version)' == ''">0.0.6</Version>
     <Authors>Bojan Pavlovic</Authors>
-    <Description>Measures complexity, duplication and how well tests catch changes, in C#, TypeScript, JavaScript and Rust. One fast native binary; the C# duplication engine included.</Description>
-    <PackageTags>complexity;crap;duplication;mutation-testing;code-quality;roslyn;static-analysis</PackageTags>
+    <Title>dog-food (dgf): code complexity, mutation testing and duplicate code</Title>
+    <Description>Code-health command-line tool for C#, .NET, TypeScript, JavaScript and Rust. Cyclomatic and cognitive complexity, CRAP scores from code coverage, mutation testing that shows what your unit tests miss, duplicate code and clone detection with how to unite it, and branch checks for pull requests. HTML dashboards, SARIF and CI gates. One fast native binary, no server or account.</Description>
+    <Copyright>Copyright (c) Bojan Pavlovic</Copyright>
+    <PackageTags>complexity;cyclomatic-complexity;cognitive-complexity;crap;code-metrics;code-quality;code-coverage;mutation-testing;unit-testing;test-quality;duplication;duplicate-code;clone-detection;copy-paste-detection;static-analysis;roslyn;csharp;dotnet;typescript;javascript;rust;ci;sarif;cli</PackageTags>
+    <PackageReleaseNotes>https://github.com/bojanrmv/bt-dog-food/releases</PackageReleaseNotes>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/bojanrmv/bt-dog-food</PackageProjectUrl>
     <RepositoryUrl>https://github.com/bojanrmv/bt-dog-food</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageOutputPath>nupkg</PackageOutputPath>
 

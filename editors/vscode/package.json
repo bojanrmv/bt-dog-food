@@ -29,7 +29,7 @@
         "dogFood.path": {
           "type": "string",
           "default": "dgf",
-          "description": "The dgf executable. Install it with `cargo install --path crates/dog-food-cli` from the dog-food repository."
+          "description": "The dgf executable. Install it with `dotnet tool install -g dgf`."
         },
         "dogFood.codeLens": {
           "type": "boolean",

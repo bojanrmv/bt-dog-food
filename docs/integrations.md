@@ -2,12 +2,12 @@
 
 ## VS Code
 
-`editors/vscode` is a small extension (plain JavaScript, no dependencies) that runs `dgf` on save:
+`editors/vscode` is a small extension (plain JavaScript, no dependencies) that runs `dgf` when a file is opened and saved:
 
 - **scores above each function**: `complexity 7 · cognitive 9 · warn`, plus coverage and CRAP when `dgf.toml` lists coverage reports;
 - **Problems panel** entries for functions above `warn` (warning) or `fail` (error), with the decision breakdown;
 - **status bar**: the most complex function in the open file;
-- **commands** (Ctrl+Shift+P, "dog-food"): open the workspace, changes or history report in the browser.
+- **commands** (Ctrl+Shift+P, "dog-food"): open the workspace, changes or history report in the browser, or re-analyze the current file.
 
 Install from this repository:
 
@@ -78,4 +78,4 @@ let report = analyze_file(std::path::Path::new("src/Orders/OrderService.cs"))?;
 | `Language::from_path(&Path)` | `Some(Language)` for `.cs`, `.ts`/`.tsx`/`.js`/`.jsx`/`.mts`/`.cts`/`.mjs`/`.cjs`, `.rs` |
 | `FunctionMetrics` | `name`, `kind`, `start_line`, `end_line`, `complexity`, `breakdown`, `cognitive`, `max_nesting`, `lines`, `parameters`, `ignored` |
 
-A file with syntax errors still returns results, with `has_errors` set. Discovery, settings, limits, coverage, git and reports live in the CLI crate.
+A file with syntax errors still returns results, with `has_errors` set. Discovery, settings, limits, git and reports live in the CLI crate; coverage reading is `dog_food_core::coverage`.

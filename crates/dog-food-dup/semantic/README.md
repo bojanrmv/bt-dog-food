@@ -30,7 +30,7 @@ dgf-dup-cs src --compare Orders.Total Orders.Sum   # two methods run on the same
    Most methods are left out, and many only at their last statement, so a syntax check ([Precheck.cs](Precheck.cs)) turns down before binding those that return nothing or hold a statement the engine does not run. The rest bind one at a time on every core, the biggest first.
 2. **Each method runs symbolically** ([Exec.cs](Exec.cs)), over Roslyn's operation tree, to the value it returns:
    - locals hold expressions, so they disappear (inlined);
-   - an `if` splits the run: each branch goes on with the rest of the body and knows the test's outcome, so early returns, nested `if`s, `?:` and `switch` end as the same decision tree;
+   - an `if` splits the run: each branch goes on with the rest of the body and knows the test's outcome, so early returns, nested `if`s, `?:` and `switch` expressions end as the same decision tree;
    - a local holding a value with effects (an `await`, a call to unknown code, a new object) is bound once (`let`) instead of copied to its uses, so one call stays one call.
 3. **Expressions are built in one normal form** ([Canon.cs](Canon.cs)):
    - booleans are decision trees over atomic tests, keeping C#'s evaluation order;
@@ -59,12 +59,12 @@ The corpus ([../tests/corpus/csharp](../tests/corpus/csharp/README.md)) holds ne
 
 A method is left out, not guessed at, when it uses something the engine does not model:
 - statements run only for their effect (a call, `await x;`, setting a property);
-- `try`/`catch` and `using`;
+- `try`/`catch`, `using`, `lock`, `switch` statements, `goto` and local functions;
 - `out var`, deconstruction, `yield`;
 - loops other than the folds, searches and flags above;
 - expressions past 3,000 nodes.
 
-Methods that return nothing (`void`) are not compared. `--explain` prints why each method was left out. On a 3,600-method ASP.NET Core backend, about 40% of methods reduce (most of the rest set state or await for effect), in about 30 seconds.
+Methods that return nothing (`void`, `Task`, `ValueTask`) are not compared. `--explain` prints why each method was left out. On a 3,600-method ASP.NET Core backend, about 40% of methods reduce (most of the rest set state or await for effect), in about 30 seconds.
 
 ## Repeated queries
 
@@ -76,7 +76,7 @@ With `--confirm` ([Confirm.cs](Confirm.cs)), each group is run.
 - **Compile.** The projects of the groups are compiled in memory, in parallel, with the SDK's source generators run (`[GeneratedRegex]`, `[LoggerMessage]`, JSON, options), and loaded into their own context.
 - **Inputs.** Every method of a group runs on the same 1,000 inputs, made from the parameter types and their nullability: numbers, strings, enums, dates, lists, records and classes, through their widest constructor and settable properties. Every fourth input is plain (lists of none or one, numbers 0, 1 and the methods' own constants), so a sum lands exactly on a threshold. Other inputs use the constants and the values either side of them, where `>=` and `>` part.
 - **Comparing.** Results are compared by value: decimals without trailing zeros, sequences element by element, objects by their public members, exceptions by type.
-- **Verdict.** An input that tells two methods apart disproves the group: it is left out of the report and listed under `disproved`. A group whose inputs mostly throw is not counted as confirmed.
+- **Verdict.** An input that tells two methods apart disproves the group: it is left out of the report and listed under `disproved`. A group with fewer than 10 of the 1,000 inputs returning a value is not counted as confirmed.
 - **What runs.** Only methods without effects. Calls into the project's own code are followed into the callee's canonical form, four deep. Constructors of its own types must only store what they are given. The framework's files, network, console, processes, threads and reflection, database reads, awaits, and the clock and `Guid.NewGuid` (which differ between runs) are not run, with the reason in the report.
 - **Instances.** An instance method runs on an object made without its constructor, with each field holding a value generated from its name, so `_rate` in one class and `rate` in another hold the same.
 

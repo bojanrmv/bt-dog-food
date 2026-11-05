@@ -28,12 +28,11 @@ Ranked from the research below. The first five are the next things to build.
 | 6 | Test smells in changed tests | high | M | Tests with no assertion, assertions only on not-null, swallowed exceptions, sleeps, skipped tests. AI-written tests often satisfy coverage this way. |
 | 7 | Named smells with fix hints | medium | S | Deep nesting, a complex condition, a "bumpy road" of several nested blocks, too many parameters, a "brain method". Each smell gets a rule id and a one-line fix, so the agent knows what to do and not just a number. |
 | 8 | Stable fingerprints | medium | S | Path + qualified name + a hash of the normalized body, in JSON, agent output and SARIF `partialFingerprints`, so results match across runs. |
-| 9 | Duplicate functions | medium | M | Functions with the same normalized syntax tree, and "new copy of X" in `dgf changes`. Copy-paste is the measured failure of AI-written code. |
-| 10 | Likely-equivalent survivors | medium | M | Flag survivors that probably cannot be killed, and let the agent propose a `dgf-disable` comment with its reason, for a person to approve. |
-| 11 | Change coupling | medium | M | In `dgf changes`: "B usually changes together with A, and this change does not touch it". |
-| 12 | Rust mutation runs | medium | M | Rust mutants are listed but not run; run them through `cargo test` with the same switches. |
-| 13 | A lean mutator level | low–medium | S | Fewer relational replacements: three of seven are enough to find the same tests, with 57% fewer mutants. |
-| 14 | LLM-proposed mutants | low for now | L | Mutants written by a model for the change at hand (Meta's ACH), checked by the same compile and reach steps. |
+| 9 | Likely-equivalent survivors | medium | M | Flag survivors that probably cannot be killed, and let the agent propose a `dgf-disable` comment with its reason, for a person to approve. |
+| 10 | Change coupling | medium | M | In `dgf changes`: "B usually changes together with A, and this change does not touch it". |
+| 11 | Rust mutation runs | medium | M | Rust mutants are listed but not run; run them through `cargo test` with the same switches. |
+| 12 | A lean mutator level | low–medium | S | Fewer relational replacements: three of seven are enough to find the same tests, with 57% fewer mutants. |
+| 13 | LLM-proposed mutants | low for now | L | Mutants written by a model for the change at hand (Meta's ACH), checked by the same compile and reach steps. |
 
 ### `dgf mcp`: proposed tools
 
@@ -60,7 +59,7 @@ Two resources: `dgf://config` (the settings in effect) and `dgf://report/latest`
 
 - **Process metrics.** Change history predicts defects better than code metrics alone (Rahman and Devanbu, ICSE 2013, https://2013.icse-conferences.org/content/how-and-why-process-metrics-are-better.html). Code health and defects: https://arxiv.org/abs/2203.04374 (a vendor study on 39 codebases).
 - **AI and complexity.** After teams adopted an AI editor, static-analysis warnings and code complexity rose and stayed up, and the rise explained the later slowdown (MSR 2026, https://arxiv.org/abs/2511.04427). Code health predicted whether an AI refactoring kept the code's meaning (FORGE 2026, by CodeScene's authors, https://arxiv.org/abs/2601.02200). Duplicated blocks in AI-era code grew eightfold in 2024 (GitClear, an industry report).
-- **Tools for agents.** Anthropic's guidance on tools for agents covers few tools, meaningful ids, a concise mode, paging, and errors that say what to change (https://www.anthropic.com/engineering/writing-tools-for-agents). Structured tool output and annotations are in the MCP specification (https://modelcontextprotocol.io/specification/2025-06-18/server/tools). Comparable servers exist for CodeScene, SonarQube, Semgrep, Codacy and DeepSource.
+- **Tools for agents.** Anthropic's guidance on tools for agents covers few tools, meaningful ids, a concise mode, paging, and errors that say what to change (https://www.anthropic.com/engineering/writing-tools-for-agents). Structured tool output and annotations are in the MCP specification (https://modelcontextprotocol.io/specification/2025-06-18/server/tools). Comparable servers exist for other code-quality tools.
 - **Mutation testing.**
   - Meta's ACH writes targeted mutants and tests that kill them; engineers accepted 73% of the tests (https://arxiv.org/abs/2501.12862).
   - Feeding survivors back into test generation works (MuTAP, https://arxiv.org/abs/2308.16557). At Google, showing survivors during code review led to more tests (https://arxiv.org/abs/2103.07189).

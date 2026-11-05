@@ -9,7 +9,7 @@ dotnet tool install -g dgf
 dgf --version
 ```
 
-This is the native `dgf` binary for your platform (Windows, Linux or macOS, x64 or arm64), with the C# duplication engine beside it: `dgf dup` runs it on C# code with nothing else installed. The command runs the binary directly, so it is as fast as one built from source.
+This is the native `dgf` binary for your platform (Windows, Linux or macOS, x64 or arm64), with the C# duplication engine beside it: `dgf dup` runs it on C# code, using the .NET 10 runtime that the .NET 10 SDK includes. With only a newer SDK, install the .NET 10 runtime too. The command runs the binary directly, so it is as fast as one built from source.
 
 ```powershell
 dotnet tool update -g dgf      # update
@@ -24,7 +24,7 @@ dotnet tool install dgf
 dotnet tool run dgf analyze    # or: dotnet dgf analyze
 ```
 
-Each [GitHub release](https://github.com/bojanrmv/bt-dog-food/releases) also has the binary and the engine as a download per platform, for machines without .NET.
+Each [GitHub release](https://github.com/bojanrmv/bt-dog-food/releases) also has the binary and the engine as a download per platform, for machines without .NET; there, `dgf dup` runs without its C# engine, which needs the .NET 10 runtime.
 
 ## From source
 

@@ -2,7 +2,7 @@
 
 [Duplication](README.md) › How the syntactic engine works
 
-Every step is exact on the syntax tree (tree-sitter), with no AI and no guessing. It runs on all cores and scans 2,000 files in about 2 seconds.
+Every step is exact on the syntax tree (tree-sitter), with no AI and no guessing. It runs on all cores and scans 2,000 files in a few seconds.
 
 ## 1. Statements become shapes
 
@@ -16,10 +16,10 @@ Each statement becomes its shape: keywords, operators and structure, with names 
 
 ## 3. Near misses (type 3)
 
-- Whole function bodies of at least 25 tokens are compared. Constructors are left out: they are mostly wiring.
+- Whole function bodies of 25 to 4,000 tokens and at least `--min-lines` lines are compared. Constructors are left out: they are mostly wiring.
 - Bodies sharing enough runs of 8 normalized tokens are candidates.
 - A candidate pair is aligned in two steps: statements by shape (a shortest edit script, Myers' algorithm), then tokens only inside statements that differ and are at least 70% alike.
-- A pair matching at least 80% of both bodies' tokens is a near miss. Connected pairs form a group around the body most like the others.
+- A pair whose matched tokens are at least 80% of the two bodies' tokens together (2 × matched / (a + b)) is a near miss. Connected pairs form a group around the body most like the others.
 
 ## 4. Reordered and mixed-in copies
 
@@ -36,9 +36,10 @@ A long expression inside a statement is a block of its own: a call chain such as
 
 - a copy inside a bigger copy, or overlapping another copy of its group;
 - a group that only wraps a group with more copies, or lies inside another group's copies of the same functions;
-- code that shares a shape but little else: more than two parameters per statement (mapping code, guard clauses on other fields);
+- code that shares a shape but little else: more than two parameters per statement (mapping code, guard clauses on other fields). Locals do not count, and repeated statements are kept: a table of what differs takes those;
 - statements that only configure what the function was given: calls on a parameter that assign nothing, such as EF Core's `builder.Property(...)` rows, `services.AddScoped<A, B>()` and `options.AddPolicy(...)`. These are registration tables, not copies to unite;
 - an exact copy that is most (70%) of a near-miss pair's bodies wins over the near miss, as extracting it is the cleaner refactor;
+- a group a shared version would save no lines on, after its signature and calls;
 - test code (unless `--tests`), migrations and generated files.
 
 The code is in [crates/dog-food-dup/src](../../crates/dog-food-dup/src): `find.rs` (seeds, groups, templates), `near.rs` (near misses), `reorder.rs` (reordered copies), `tokens.rs` (shapes and blocks).

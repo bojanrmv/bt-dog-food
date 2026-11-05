@@ -19,12 +19,22 @@
     <ToolCommandName>dgf-dup-cs</ToolCommandName>
     <PackageId>dgf-dup-cs</PackageId>
     <Version>0.2.1</Version>
-    <Description>Finds C# methods that do the same thing written differently, for dgf-dup.</Description>
+    <Title>dgf-dup-cs: semantic duplicate code detection for C#</Title>
+    <Authors>Bojan Pavlovic</Authors>
+    <Copyright>Copyright (c) Bojan Pavlovic</Copyright>
+    <Description>Finds C# methods that do the same thing written differently (a loop and its LINQ, if and switch) and repeated LINQ queries, with the Roslyn compiler. The C# engine of the dgf code-health tool, which already includes it: install this only with dgf built from source, or to run the engine directly.</Description>
+    <PackageTags>duplication;duplicate-code;clone-detection;semantic;code-quality;static-analysis;roslyn;csharp;dotnet;linq;dgf</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/bojanrmv/bt-dog-food</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/bojanrmv/bt-dog-food</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
     <PackageOutputPath>nupkg</PackageOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" />
+    <None Include="PACKAGE.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
 </Project>

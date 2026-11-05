@@ -27,9 +27,9 @@ dgf dup --decisions dup-decisions.json --format html -o dup.html   # reviewed gr
 dgf dup --changes --decisions dup-decisions.json --fail-on-copies  # a gate that only sees new copies
 ```
 
-Groups marked intentional or false positive are left out and counted. Groups to fix stay, marked `review: to-fix` in the agent format.
+Groups marked intentional or false positive are left out and counted. Groups to fix stay; in the agent format, copies are marked `review: to-fix` (repeated statements are not).
 
-A group's id comes from its kind and the functions its copies are in. It stays the same while the code moves around inside those functions, so decisions survive later scans.
+A group's id comes from its kind and type and the files and functions its copies are in. It stays the same while the code moves around inside those functions, so decisions survive later scans; moving a function to another file gives a new id, and its decision no longer applies.
 
 ## In a pull request
 

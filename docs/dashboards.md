@@ -1,6 +1,6 @@
 # Dashboards
 
-Every report command can write one self-contained HTML page with `--format html -o <file>`. Each page works offline, follows the light or dark theme, and has a searchable table under its charts. The screenshots below are of this repository and its test projects.
+Every report command can write one self-contained HTML page with `--format html -o <file>`. Each page works offline, follows the light or dark theme, and has its tables under its charts; the complexity, changes and duplication pages can search them. The screenshots below are of this repository and its test projects.
 
 | Page | Command | Question |
 | --- | --- | --- |
@@ -26,10 +26,10 @@ Every report command can write one self-contained HTML page with `--format html 
 ![Changes report: changed files and functions, and each changed function's score before and after](images/changes.png)
 
 - **Totals**: changed files and functions, new, worse, better, removed, the net score change, and the verdict.
-- **Before and after**: each changed function as a hollow dot (before) and a filled dot (after), against the limits.
-- **Changed functions**: the table, filtered by new, worse, better or the same.
+- **Before and after**: each function whose score moved (the 30 biggest) as a hollow dot (before) and a filled dot (after), against the limits.
+- **Changed functions**: the table, searchable and filtered by new, worse, better, same or removed.
 
-Only new or worse functions above the limit fail `dgf changes`.
+By default, only new or worse functions above the limit fail `dgf changes`.
 
 ## History
 

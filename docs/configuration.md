@@ -1,6 +1,6 @@
 # Configuration: `dgf.toml`
 
-`dgf` looks for `dgf.toml` in the current folder or a parent, the way cargo finds `Cargo.toml`. Paths in it are relative to the file. Every section is optional. Unknown keys are an error, so typos show up. `dgf init` writes the file with a comment on every setting.
+`dgf` looks for `dgf.toml` in the current folder or a parent, the way cargo finds `Cargo.toml`. Paths in it are relative to the file. Every section is optional. Unknown keys are an error, so typos show up. `dgf init` writes the file with the common settings explained.
 
 An option on the command line wins over `dgf.toml`, which wins over the default.
 
@@ -24,6 +24,7 @@ fail = 15
 base = "main"
 scope = "lines"           # or "files"
 fail_on = "new-or-worse"  # or "touched"
+warn = 8                  # dgf changes only, over [limits]
 fail = 10                 # dgf changes only: hold new code to more than old code
 
 [coverage]
@@ -47,7 +48,7 @@ thresholds = { high = 80, low = 60, break = 50 }
 | --- | --- |
 | limits | warn above 10, no fail limit |
 | CRAP | warn above 30 (only with coverage) |
-| excluded | `.gitignore` (even outside git) and generated files: `*.d.ts`, `*.g.cs`, `*.Designer.cs` |
+| excluded | `.gitignore` and `.ignore` (even outside git), hidden files and folders, and generated files: `*.d.ts`, `*.g.cs`, `*.Designer.cs` |
 | `changes` base | `main`, else `master` |
 
 ## In code

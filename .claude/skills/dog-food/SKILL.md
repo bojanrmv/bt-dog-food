@@ -1,11 +1,11 @@
 ---
 name: dog-food
-description: Measure and reduce function complexity with the dog-food CLI (`dgf`) for C#, TypeScript/JavaScript and Rust. Use when asked about code complexity, CRAP scores, refactoring hotspots, or whether a change made code harder to maintain; when a repo has a dgf.toml or .dgf/ folder; and before finishing a change in such a repo.
+description: Measure and reduce function complexity or duplication with the dog-food CLI (`dgf`) for C#, TypeScript/JavaScript and Rust. Use when asked about code complexity, copied code, CRAP scores, refactoring hotspots, or whether a change made code harder to maintain; when a repo has a dgf.toml or .dgf/ folder; and before finishing a change in such a repo.
 ---
 
 # dog-food (`dgf`)
 
-`dgf` scores every function from its syntax alone (it never builds or runs code):
+`dgf` scores every function from its syntax alone (scoring never builds or runs code):
 
 - **cyclomatic** = 1 + each `if`, loop, `case` label, `catch`, `?:`, `&&`, `||`, `??`, C# pattern `and`/`or`, match/switch-expression arm after the first. This is the number the limits apply to.
 - **cognitive** = branches and loops cost 1 + their nesting depth; `else`/`else if` and each run of `&&`/`||` add 1. Higher means harder to read.
@@ -25,7 +25,7 @@ Limits live in `dgf.toml` (`[limits] warn`, `fail`, per-path `[[limits.overrides
 | Complex and untested code | `dgf analyze --coverage <report or folder> --format agent` |
 | Trend over saved runs | `dgf history --format agent` |
 
-If `dgf` is not found in PowerShell, run `$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"`. Exit code 1 only means something is above `fail`; the output is still complete. Exit code 2 is a usage or `dgf.toml` error: read the message. With `--format agent` the last line says the same (`exit: N (meaning)`), and `warning:` lines under the first lines (base fallback, a dgf.toml that differs from the base branch's) change what the counts mean: read them before trusting the result. `dgf mutate --format agent` starts with a `scope:` block (the dgf.toml it follows and what its excludes left out, the base and how it was chosen, how far HEAD is behind it, and after `--run` the test projects that ran): check it first.
+If `dgf` is not found in PowerShell, run `$env:Path = "$env:USERPROFILE\.dotnet\tools;$env:USERPROFILE\.cargo\bin;$env:Path"`. Exit code 1 only means something is above `fail`; the output is still complete. Exit code 2 is a usage or `dgf.toml` error: read the message. With `--format agent` the last line says the same (`exit: N (meaning)`), and `warning:` lines under the first lines (base fallback, a dgf.toml that differs from the base branch's) change what the counts mean: read them before trusting the result. `dgf mutate --format agent` starts with a `scope:` block (the dgf.toml it follows and what its excludes left out, the base and how it was chosen, how far HEAD is behind it, and after `--run` the test projects that ran): check it first.
 
 ## Reading `--format agent` output
 
@@ -62,4 +62,5 @@ Rules:
 - `dgf analyze --save-history` saves a snapshot for `dgf history`.
 - `dgf mutate --changes --run --format agent` (C# with dotnet test; TypeScript/JavaScript with Vitest or Jest) tests whether the tests notice small deliberate bugs (mutants) in the functions this branch changed. Each `survivors` line is a change no test caught: `no_test_runs_this` means write a test that calls the function, `tests_still_pass` means add an assertion that would fail for that exact change (for example a boundary value for `<` -> `<=`). The `tests:` line under it names the tests that reach the mutant (put the assertion there) and `assert:` says what kind of assertion catches it; `boundary-risk` marks a date comparison, the off-by-one-day bug, which is never equivalent. After adding tests, `--rerun-survivors` tests just the survivors again. To see the last run in another format (html, json, mutation-report), add `--cached`: it reads the cache and tests nothing. `--neighbours` also mutates code next to the change: other functions holding a string key the changed functions use (a workflow input key, a header name); its survivors come under "next to your change", outside the score, for you to judge. It needs passing tests, takes seconds to minutes, and never touches the working tree. On a large solution, scope it like the tests you would run by hand: `--test-filter "Project.Tests:FullyQualifiedName~ClassTests"`, `--exclude-test-project "**/*.Acceptance.Tests.csproj"`, and `--max-minutes N` (exit code 4 means the budget ran out; run it again to continue). Results are cached per mutant in `.dgf/mutation-cache/`, so a rerun only tests what changed (`--no-cache` to force); `dgf analyze` then shows each function's mutation score. Do not hide a survivor with a `// dgf-disable-once <mutator>: reason` comment unless the user agrees it cannot matter; the reason is required and every report lists the comment.
 - `--format html -o file.html` (humans), `markdown` (PR comments), `json` (everything), `sarif` (code scanning).
+- `dgf dup --format agent` finds copied code, biggest wins first, and says how to unite it (all three languages; on C# also methods that do the same thing written differently, and repeated queries). `dgf dup --changes --fail-on-copies` fails a branch that adds a copy.
 - `dgf init` creates a commented `dgf.toml`.

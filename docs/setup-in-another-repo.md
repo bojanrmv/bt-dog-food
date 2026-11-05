@@ -1,6 +1,6 @@
 # Set up dog-food (`dgf`) in this repository
 
-You are setting up **dog-food**, a local CLI (`dgf`) that scores every function for cyclomatic and cognitive complexity, and with a coverage report also for CRAP (complex and untested). It reads **C#, TypeScript/JavaScript and Rust**. The steps below only read files: nothing is built, tested or changed. Source and docs: https://github.com/bojanrmv/bt-dog-food (start with `README.md`; every command is in `docs/commands.md`). Follow the steps in order and report back.
+You are setting up **dog-food**, a local CLI (`dgf`) that scores every function for cyclomatic and cognitive complexity, and with a coverage report also for CRAP (complex and untested). It reads **C#, TypeScript/JavaScript and Rust**. `dgf` itself only reads your code. The steps write only `dgf.toml`, the skill, reports and a history snapshot, and only step 5 runs anything: the project's own tests. Source and docs: https://github.com/bojanrmv/bt-dog-food (start with `README.md`; every command is in `docs/commands.md`). Follow the steps in order and report back.
 
 ## 1. Check `dgf` runs
 
@@ -8,7 +8,7 @@ You are setting up **dog-food**, a local CLI (`dgf`) that scores every function 
 dgf --version
 ```
 
-If it is not recognized: `dotnet tool install -g dgf` (needs the .NET 10 SDK), then open a new terminal; other ways are in https://github.com/bojanrmv/bt-dog-food/blob/main/docs/install.md. If the repository has no `.cs`, `.ts`, `.tsx`, `.js`, `.jsx` or `.rs` files, stop and say so.
+If it is not recognized: `dotnet tool install -g dgf` (needs the .NET 10 SDK), then open a new terminal; other ways are in https://github.com/bojanrmv/bt-dog-food/blob/main/docs/install.md. If the repository has no `.cs`, `.ts`, `.mts`, `.cts`, `.tsx`, `.js`, `.mjs`, `.cjs`, `.jsx` or `.rs` files, stop and say so.
 
 ## 2. Install the skill, then use `--format agent`
 

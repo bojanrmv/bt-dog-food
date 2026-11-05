@@ -1,12 +1,14 @@
 # Finding C# code that does the same thing: research and plan
 
 Status: phases 0-7 done.
-- **0.** The corpus and scorer, and precision on hand-labelled real code (dotnet/eShop: 97%).
+- **0.** The corpus and scorer, and precision on hand-labelled real code (dotnet/eShop: 100%).
 - **1.** The syntactic tool, with near misses and copies of long expressions inside statements.
 - **2-4.** The Roslyn engine `dgf-dup-cs`: projects compiled as they build, canonical expressions, decision trees, loop folds and LINQ, and exact extraction signatures from data flow.
 - **5.** Reordered and interleaved copies, from data flow on tokens, in every language.
 - **6.** Confirmation by running (`--confirm`, `--compare`).
 - **7.** `dgf duplication`, both engines at once, and ranking by complexity and CRAP.
+
+Sections 6-7 are the plan as written. As built, project files are read without MSBuild, methods run symbolically over the operation tree (no control-flow graph, SSA or e-graph), and `--confirm` compiles in memory rather than using the mutation sandbox.
 
 On the corpus: types 1-3, 14 of 15; type 4, 47 of 47; every group confirmed by running; no near miss called equal. Not done: Z3 for small pure functions, and WL hashing of dependence graphs (pairing by shape and data flow made it unnecessary at this size). See [the engine](../../crates/dog-food-dup/semantic/README.md) and [the user guide](../duplication/README.md).
 
@@ -172,7 +174,7 @@ So the plan starts with our own C# corpus, built the way mutation-based clone be
 
 Every phase reports precision, recall and run time on this corpus. A phase is done when it meets its targets.
 
-## 5. Review of `dgf-dup` as it stands
+## 5. Review of `dgf-dup` before phase 1
 
 What works:
 - It's fast: about 2,000 C# files in 1.6 s. The design of seeds, pairwise growth, classes and templates is sound.

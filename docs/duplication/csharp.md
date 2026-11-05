@@ -2,7 +2,7 @@
 
 [Duplication](README.md) › The C# engine
 
-`dgf-dup-cs` is a .NET tool built on the C# compiler (Roslyn). It finds methods that compute the same result even when the code looks different, reads every LINQ query ([repeated queries](queries.md)), and gives each syntactic C# copy an exact signature. It runs at the same time as the syntactic engine.
+`dgf-dup-cs` is a .NET tool built on the C# compiler (Roslyn). It finds methods that compute the same result even when the code looks different, reads every LINQ query on `IQueryable<T>` ([repeated queries](queries.md)), and gives the first copy of each syntactic C# group an exact signature. It runs at the same time as the syntactic engine.
 
 ```powershell
 dotnet tool install -g dgf-dup-cs   # only with dgf built from source: the dgf package includes it
@@ -31,7 +31,7 @@ Each method is run symbolically to the value it returns, and that value is writt
 | Written as | Becomes |
 | --- | --- |
 | locals | inlined; a value with effects (a call, an `await`) is bound once |
-| `if` with early returns, nested `if`s, `?:`, `switch` | one decision tree |
+| `if` with early returns, nested `if`s, `?:`, `switch` expressions | one decision tree |
 | `a > b`, `a >= b` | one polarity (`>=` only for total orders: integers, decimals, enums, dates) |
 | `for`, `foreach`, `while` over a list | what they compute: `Sum`, `Count`, `Any`, `First`, `Max`, `Where`/`Select`, a sum per key |
 | `+`, interpolation, `StringBuilder` | one concatenation |
@@ -39,7 +39,7 @@ Each method is run symbolically to the value it returns, and that value is writt
 
 Methods with the same expression are type 4. The finding lists the rules that made them equal, and any condition those need ("equal when the collection holds no null elements").
 
-It is sound first. A near miss is never called equal: `>=` vs `>`, `First` vs `FirstOrDefault`, a dropped null check, swapped arguments. A method it cannot model is left out, not guessed at: statements run only for their effect, `try`/`catch`, `yield`, other loops. `dgf-dup-cs src --explain -o NUL` prints every method's form, or why it was left out.
+It is sound first. A near miss is never called equal: `>=` vs `>`, `First` vs `FirstOrDefault`, a dropped null check, swapped arguments. A method it cannot model is left out, not guessed at: statements run only for their effect, `try`/`catch`, `switch` statements, `yield`, other loops. `dgf-dup-cs src --explain -o NUL` prints every method's form, or why it was left out.
 
 ## Projects compiled as they build
 
@@ -65,7 +65,7 @@ dgf-dup-cs src --compare Orders.Total Orders.Sum   # exit 0 agree, 1 differ, 2 n
 
 ## Exact extraction signatures
 
-For each syntactic C# copy, the compiler's data-flow analysis says what an extracted method would take and return: the values read inside that were set before (parameters), those set inside that are read after (returns), early `return`/`break`/`continue`, and whether it needs `this`.
+For the first copy of each syntactic C# group (not repeated statements), the compiler's data-flow analysis says what an extracted method would take and return: the values read inside that were set before (parameters), those set inside that are read after (returns), early `return`/`break`/`continue`, and whether it needs `this`.
 
 ```
 as a method (from the compiler): takes (IReadOnlyList<Line> lines, string customer), returns (string heading, decimal rounded), needs this (an instance method)

@@ -8,7 +8,6 @@ Wall clock including startup, file discovery, parsing, scoring and writing JSON.
 
 | Code | Files | Size | Functions | Time |
 | --- | ---: | ---: | ---: | ---: |
-| This repository | 33 | – | 648 | 49 ms |
 | npm (JavaScript, `node_modules/npm`) | 1,131 | 6.8 MB | 15,637 | 1.3 s |
 | Rust crates in `~/.cargo/registry/src` | 1,782 | 39.4 MB | 42,396 | 5.6 s |
 
@@ -37,6 +36,6 @@ The first measurement was 1.5 MB/s. Cognitive complexity asked every syntax node
 
 ## Not measured yet
 
-- A comparison with ESLint's `complexity` rule on the same TypeScript code.
+- A comparison with another complexity tool on the same TypeScript code.
 - Large C# code bases (Roslyn, ASP.NET Core).
 - Linux and macOS.

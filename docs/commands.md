@@ -1,6 +1,6 @@
 # Command reference
 
-Every `dgf` command, every option, and how they combine. `dgf <command> --help` prints the same options from the program itself.
+Every `dgf` command and option, and how they combine. `dgf <command> --help` prints the same options from the program itself.
 
 - [How options combine](#how-options-combine)
 - [`dgf analyze`](#dgf-analyze): score every function
@@ -8,6 +8,7 @@ Every `dgf` command, every option, and how they combine. `dgf <command> --help` 
 - [`dgf baseline`](#dgf-baseline): accept today's problems, fail only on new ones
 - [`dgf history`](#dgf-history): trends from saved runs
 - [`dgf mutate`](#dgf-mutate): mutation testing
+- [`dgf duplication`](#dgf-duplication): code that can be united
 - [`dgf init`](#dgf-init), [`dgf hook`](#dgf-hook), [`dgf skill`](#dgf-skill): setup
 - [Output formats](#output-formats), [exit codes](#exit-codes)
 
@@ -15,15 +16,15 @@ Every `dgf` command, every option, and how they combine. `dgf <command> --help` 
 
 - **Every option can be combined with every other option of the same command**, in any order. The exceptions are named under each command (for example, `--scope lines` for `mutate` only means something with `--changes`).
 - **Command line, then `dgf.toml`, then the default.** An option given on the command line wins over the same setting in `dgf.toml`, which wins over the built-in default. `--no-config` ignores `dgf.toml` entirely.
-- **Lists add up.** `--exclude` adds to the `exclude` list in `dgf.toml`, and can be repeated. `--warn` and `--fail` replace the limits from `dgf.toml` for this run.
+- **Lists add up.** `--exclude` adds to the `exclude` list in `dgf.toml`, and can be repeated. `--warn` and `--fail` replace the global limits from `dgf.toml` for this run; `[[limits.overrides]]` still apply to the paths they match (`--no-config` drops them).
 - **Paths** on the command line are relative to the current folder; paths in `dgf.toml` are relative to the file. `dgf` finds `dgf.toml` in the current folder or the nearest parent.
-- **Always skipped:** files ignored by `.gitignore` (also outside a git repository), and generated `*.d.ts`, `*.g.cs` and `*.Designer.cs` files.
+- **Always skipped:** generated `*.d.ts`, `*.g.cs` and `*.Designer.cs` files. When walking folders (`analyze`, `baseline`), also hidden files and folders, and files ignored by `.gitignore` or `.ignore`, also outside a git repository.
 - **Output:** every report command takes `--format <FORMAT>` and `-o, --output <FILE>`. Without `-o`, the report goes to the terminal; with it, to the file, and a one-line note to the terminal.
 - **Progress:** while a command works, the terminal shows each step, what it found and how long it took, with a clock on the step under way (`finding copies: 236 groups in 2039 files (3.1 s)`). It goes to stderr and only to a terminal, so piped, in CI or run by an agent, the output is the report alone. `DGF_PROGRESS=0` turns it off; `DGF_PROGRESS=1` also prints the finished steps when the output is not a terminal, for example in a CI log. `dgf mutate --run` reports its runs this way as well.
 
 ## Common options
 
-These appear on `analyze`, `changes`, `baseline` and `mutate` (`baseline` writes a file instead of a report, so it has no `--format` or `-o`).
+These appear on `analyze`, `changes`, `baseline` and `mutate` (`baseline` writes a file instead of a report, so it has no `--format` or `-o`). For `dgf changes`, `--warn` and `--fail` default to `[changes] warn` and `fail`, then `[limits]`.
 
 | Option | Meaning | Default |
 | --- | --- | --- |
@@ -108,7 +109,7 @@ dgf changes --format agent                          # what an AI assistant has t
 
 ## `dgf baseline`
 
-Records every function that is above the limits today in `.dgf/baseline.json`. Later `analyze` and `changes` runs report those functions as `ignored` until their score goes up, so only new problems fail. Commit the file.
+Records every function that is above the limits today in `.dgf/baseline.json`. Later `analyze` runs report those functions as `ignored` until their score goes up, so only new problems fail. `dgf changes` does not read the baseline: an accepted function keeps its real status there, and `--fail-on touched` can fail it. Commit the file.
 
 ```
 dgf baseline [OPTIONS] [PATHS]...
@@ -117,12 +118,12 @@ dgf baseline [OPTIONS] [PATHS]...
 | Option | Meaning | Default |
 | --- | --- | --- |
 | `[PATHS]...` | Files or folders to record | `.` |
-| `--file <FILE>` | Where to write the baseline | `.dgf/baseline.json` next to `dgf.toml` |
+| `--file <FILE>` | Where to write the baseline. `analyze` reads only `.dgf/baseline.json` next to `dgf.toml`, so a file written elsewhere is not applied | `.dgf/baseline.json` next to `dgf.toml` |
 | `--warn`, `--fail`, `--exclude`, `--no-config` | As in the [common options](#common-options) | |
 
 ```powershell
 dgf baseline                         # accept today's state
-dgf baseline --fail 15               # accept only what is above 15
+dgf baseline --warn 15               # accept only what is above 15 (a lower fail in dgf.toml still counts)
 dgf analyze                          # accepted functions show as "ignored"
 dgf analyze --no-baseline            # everything, as if there were no baseline
 ```
@@ -140,7 +141,7 @@ dgf history [OPTIONS]
 | Option | Meaning | Default |
 | --- | --- | --- |
 | `--dir <DIR>` | Folder with the snapshots | `[history] dir` in `dgf.toml`, else `.dgf/history` |
-| `--top <N>` | Movers listed in the table and Markdown; 0 = all | 20 |
+| `--top <N>` | Movers listed in the table, Markdown and agent output; 0 = all | `top` in `dgf.toml`, else 20 |
 | `--no-config`, `--format`, `-o` | As in the [common options](#common-options) | |
 
 Formats: `table`, `json`, `markdown`, `html`, `agent` (not `sarif`).
@@ -224,18 +225,37 @@ Turning single mutants off is done in code: `// dgf-disable-once <mutator>: <rea
 Code that can be united: copies, near misses, reordered or interleaved statements, long expressions copied into different statements, and C# that does the same thing written differently and repeated queries. `dgf dup` is short for it, and `dgf-dup` is the same tool on its own. It reads the coverage reports `dgf.toml` names, to give each group a CRAP score.
 
 ```powershell
-dgf dup                                   # the current folder: the groups that save most first
+dgf dup                                   # the current folder: the groups that save most first (riskiest first when dgf.toml names coverage)
 dgf dup --coverage TestResults            # with CRAP scores, the riskiest first (--rank saves|risk)
 dgf dup --confirm                         # C# rewrites, each confirmed by running it on generated inputs
 dgf dup --changes --fail-on-copies        # a PR gate: exit 1 when the branch adds a copy
 dgf dup --format html -o dup.html         # the review dashboard
 ```
 
-All of it is in [duplication/](duplication/README.md).
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `[PATHS]...` | Files or folders to scan | `.` |
+| `--min-tokens <N>`, `--min-lines <N>` | The fewest tokens and lines a copy has | 50, 5 |
+| `--tests` | Scan test code too | off |
+| `--top <N>` | Groups to show; 0 = all | 20 |
+| `--fail-above <PERCENT>` | Exit with code 1 when duplicated lines are above this share of all lines | none |
+| `--changes` | Only findings with a copy in what this branch changed | off |
+| `--base <BRANCH>` | With `--changes`: the branch to compare with | `main`, else `master` |
+| `--fail-on-copies` | With `--changes`: exit with code 1 when the branch added a copy | off |
+| `--no-semantic` | Do not run the C# engine | it runs when there is C# to scan, except with `--changes` |
+| `--semantic` | Require the C# engine, and fail if it cannot run | off |
+| `--semantic-engine <PATH>` | The C# engine to run; implies `--semantic` | see [the C# engine](duplication/csharp.md) |
+| `--confirm` | Run each group of methods said to do the same thing on generated inputs; implies `--semantic` | off |
+| `--decisions <FILE>` | Review decisions saved from the HTML report; groups marked intentional or a false positive are left out | none |
+| `--coverage <PATH>...` | Coverage reports; each group gets the CRAP score of its riskiest copy | `[coverage] paths` in `dgf.toml` |
+| `--rank <saves\|risk>` | How to order the groups | `risk` with coverage, else `saves` |
+| `--format <FORMAT>`, `-o, --output <FILE>` | `table`, `agent`, `json` or `html`, and where to write it | `table`, the terminal |
+
+All of it is explained in [duplication/](duplication/README.md).
 
 ## `dgf init`
 
-Writes a commented `dgf.toml` in the current folder with every setting explained. It refuses to overwrite an existing one.
+Writes a commented `dgf.toml` in the current folder with the common settings explained; `crap_warn`, `crap_fail` and `[changes] warn` are in [configuration](configuration.md). It refuses to overwrite an existing one.
 
 ```powershell
 dgf init
@@ -278,7 +298,7 @@ dgf skill show              # print it
 | Code | Meaning |
 | --- | --- |
 | 0 | Nothing above the `fail` limit (for `changes`: no new or worse function above it) |
-| 1 | Something is above the `fail` limit, or the mutation score is below `--fail-under`. The report is still complete. |
+| 1 | Something is above the `fail` limit, the mutation score is below `--fail-under`, or `dgf dup` crossed `--fail-above` or `--fail-on-copies`. The report is still complete. |
 | 2 | Usage or settings error: unknown option, invalid `dgf.toml`, not a git repository for `changes`, a format the command does not support |
-| 3 | A path does not exist or a file could not be written |
+| 3 | A path to scan or the history folder does not exist, or a report could not be written. A missing `--coverage` path exits with 2. |
 | 4 | `dgf mutate --max-minutes` ran out before every mutant was tested |

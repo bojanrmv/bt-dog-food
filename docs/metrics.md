@@ -18,7 +18,7 @@ The number of independent paths through a function (McCabe, 1976): **1 plus ever
 | Pattern `and` / `or` | +1 each | – | – |
 | Not counted | `?.`, `return`, `break`, `goto` | `?.` | `?`, `loop` |
 
-The `breakdown` in every report lists what was counted, for example `if ×2, case ×3, && ×1`.
+The `breakdown` in the JSON, Markdown, HTML and agent reports lists what was counted, for example `&& ×1, case ×3, if ×2`. The table and SARIF leave it out.
 
 ## Cognitive complexity (`cognitive`)
 

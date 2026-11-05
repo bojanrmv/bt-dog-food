@@ -33,7 +33,7 @@ git push origin v0.2.0
 ```
 
 3. In GitHub Actions, the `release` run builds, packs and tests (about 15 minutes), then waits at **publish**. Approve it (Review deployments → `nuget`).
-4. It pushes to nuget.org and creates the GitHub release with notes made from the commits since the last tag. Edit the notes there if they need it.
+4. It pushes to nuget.org and creates the GitHub release with GitHub's generated notes (merged pull requests and a compare link; commits made directly to main are not listed). Edit the notes there.
 5. Check it as a user would. nuget.org takes a few minutes to index a new version:
 
 ```powershell
@@ -43,7 +43,7 @@ dgf --version
 
 To try the build without publishing: Actions → release → **Run workflow**. It does everything but the publish step, and the packages are kept as the run's artifacts.
 
-To try the package on this machine before a release:
+To try the package on a Windows machine before a release:
 
 ```powershell
 ./scripts/pack-nuget.ps1
@@ -55,13 +55,13 @@ dotnet tool install -g dgf --add-source packaging/nuget/nupkg --version 0.2.0
 | Where | What |
 | --- | --- |
 | nuget.org `dgf` | the .NET tool: `dotnet tool install -g dgf`. A small package that points to one package per platform (`dgf.win-x64`, `dgf.linux-arm64`, …), so an install downloads only its own. |
-| nuget.org `dgf.<platform>` | the native `dgf` binary for that platform, and the C# engine in `engine/` |
+| nuget.org `dgf.<platform>` | the native `dgf` binary for that platform, the C# engine in `engine/`, and the test worker in `engine/mtp/` |
 | nuget.org `dgf-dup-cs` | the C# engine alone, for those who install `dgf` with cargo |
-| GitHub release | per platform, an archive with `dgf`, the C# engine in `engine/`, the README and the license |
+| GitHub release | per platform, an archive with `dgf`, the C# engine in `engine/` (with the test worker in `engine/mtp/`), the README and the license |
 
 Platforms: Windows, Linux and macOS, each on x64 and arm64. The Linux binaries are static, so they run on any distribution.
 
-The package does not wrap `dgf` in .NET: the tool's command is the native binary itself, so it starts and runs as fast as one built with cargo. It needs the .NET 10 runtime only for the C# engine of `dgf dup` and for mutation runs on C#. `dgf` finds the engine in `engine/` beside itself.
+The package does not wrap `dgf` in .NET: the tool's command is the native binary itself, so it starts and runs as fast as one built with cargo. Installing it needs the .NET 10 SDK. Running it needs nothing, except the .NET 10 runtime for the C# engine of `dgf dup`, and the .NET SDK your project uses for mutation runs on C#. `dgf` finds the engine in `engine/` beside itself.
 
 ## When a release is wrong
 

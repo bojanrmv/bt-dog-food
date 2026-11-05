@@ -53,7 +53,7 @@ Three tools, from blunt to precise:
    dgf baseline          # writes .dgf/baseline.json; commit it
    ```
 
-   Later runs mark those functions `ignored` as long as their score does not go up. When one gets worse, or a new function crosses a limit, it fails as usual. Re-run `dgf baseline` after paying debt down to tighten it. `--no-baseline` shows the full picture.
+   Later `dgf analyze` runs mark those functions `ignored` as long as their score does not go up. When one gets worse, or a new function crosses a limit, it fails as usual. Re-run `dgf baseline` after paying debt down to tighten it. `--no-baseline` shows the full picture.
 
 3. **`dgf-ignore`**: excuse one function, with a reason, right above it (attributes and decorators may sit in between):
 
@@ -78,7 +78,7 @@ dgf history                                      # runs and biggest movers
 dgf history --format html -o dgf-history.html    # trends page
 ```
 
-A snapshot holds the time, commit, branch, summary numbers and every function's score (a few KB). Commit `.dgf/history/` so history travels with the code, and save snapshots from one place, for example on `main` after each merge or on a schedule. The page shows trend lines (functions above the limits, highest and median score, function count, total score), the functions that got more complex or simpler since the first run, and every run.
+A snapshot holds the time, commit, branch, summary numbers and every function's score (tens of KB in a mid-sized repository). Commit `.dgf/history/` so history travels with the code, and save snapshots from one place, for example on `main` after each merge or on a schedule. The page shows trend lines (functions above the limits, highest and median score, function count, total score), the functions that got more complex or simpler since the first run, and every run.
 
 ## CI
 
