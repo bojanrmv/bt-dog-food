@@ -667,11 +667,14 @@ impl Dotnet {
     }
 
     fn refuse_quietly(&self, assembly: &str, why: &str) {
-        if let Ok(mut refused) = self.refused.lock() {
-            refused
-                .entry(assembly.to_string())
-                .or_insert_with(|| why.to_string());
+        let Ok(mut refused) = self.refused.lock() else {
+            return;
+        };
+        if refused.contains_key(assembly) {
+            return;
         }
+        refused.insert(assembly.to_string(), why.to_string());
+        tellln!("warning: {assembly} runs with `dotnet test` for every test run, which is far slower than dog-food's test worker: {why}");
     }
 
     fn warmup_of(&self, assembly: &str) -> Duration {
@@ -1022,7 +1025,7 @@ impl Engine for Dotnet {
         if self.workers.is_some() {
             if let Ok(refused) = self.refused.lock() {
                 notes.extend(refused.iter().map(|(project, why)| {
-                    format!("{project} ran with `dotnet test` for every test run, not in dog-food's test worker: {why}")
+                    format!("{project} ran with `dotnet test` for every test run, which is far slower than dog-food's test worker: {why}")
                 }));
             }
         }
@@ -1750,6 +1753,15 @@ fn worker_program() -> Result<PathBuf, String> {
 /// Builds dog-food's worker for Microsoft.Testing.Platform test applications
 /// once per version of its source.
 fn mtp_program() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+    if let Some(dll) = shipped_mtp(&exe) {
+        debug!(
+            "worker",
+            "the testing platform's worker ships with dgf: {}",
+            dll.display()
+        );
+        return Ok(dll);
+    }
     built(
         "mtp",
         "DgfMtp",
@@ -1757,6 +1769,17 @@ fn mtp_program() -> Result<PathBuf, String> {
         MTP_PROJECT,
         "dog-food's worker for Microsoft.Testing.Platform",
     )
+}
+
+/// The worker a release ships beside the binary `exe`, which then needs no
+/// build or NuGet feed on this machine; a binary built from source has none.
+/// The binary can be run through a link, so the folder it links to counts too.
+fn shipped_mtp(exe: &Path) -> Option<PathBuf> {
+    let beside = |dir: &Path| {
+        let dll = dir.join("engine").join("mtp").join("DgfMtp.dll");
+        dll.is_file().then_some(dll)
+    };
+    beside(exe.parent()?).or_else(|| beside(std::fs::canonicalize(exe).ok()?.parent()?))
 }
 
 /// Builds the C# project `name` (`source` in `assembly`.cs, `project` in
@@ -2072,6 +2095,20 @@ mod tests {
         // Not reached outside any test: only the tests that reach it.
         reach.outside.remove(&4);
         assert_eq!(fresh_order(4, &reach)["Ns.Tests"], ["Ns.B.one"]);
+    }
+
+    #[test]
+    fn a_worker_shipped_beside_the_binary_needs_no_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("dgf");
+        std::fs::write(&exe, "").unwrap();
+        assert_eq!(shipped_mtp(&exe), None);
+        let folder = dir.path().join("engine").join("mtp");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("DgfMtp.dll"), "").unwrap();
+        assert!(shipped_mtp(&exe)
+            .unwrap()
+            .ends_with("engine/mtp/DgfMtp.dll"));
     }
 
     #[test]

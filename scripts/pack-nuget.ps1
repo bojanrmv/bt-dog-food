@@ -24,6 +24,9 @@ Copy-Item (Join-Path $repo "target/release/dgf.exe") $native -ErrorAction Stop
 dotnet publish (Join-Path $repo "crates/dog-food-dup/semantic") -c Release -o (Join-Path $package "engine") -p:SatelliteResourceLanguages=en -p:UseAppHost=false
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
+dotnet publish (Join-Path $repo "crates/dog-food-cli/assets/mtp") -c Release -o (Join-Path $package "engine/mtp") -p:SatelliteResourceLanguages=en -p:UseAppHost=false
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
 dotnet pack $package -c Release "-p:Version=$version" "-p:ToolPackageRuntimeIdentifiers=$Rid"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 Get-ChildItem (Join-Path $package "nupkg") | Select-Object Name, Length
