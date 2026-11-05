@@ -26,6 +26,8 @@ if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
 dotnet publish (Join-Path $repo "crates/dog-food-cli/assets/mtp") -c Release -o (Join-Path $package "engine/mtp") -p:SatelliteResourceLanguages=en -p:UseAppHost=false
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
+dotnet publish (Join-Path $repo "crates/dog-food-cli/assets/worker") -c Release -o (Join-Path $package "engine/worker") -p:SatelliteResourceLanguages=en -p:UseAppHost=false
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
 dotnet pack $package -c Release "-p:Version=$version" "-p:ToolPackageRuntimeIdentifiers=$Rid"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }

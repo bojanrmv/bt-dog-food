@@ -90,10 +90,10 @@ jobs:
         run: >
           dotnet publish crates/dog-food-dup/semantic -c Release -o packaging/nuget/engine
           -p:UseAppHost=false -p:SatelliteResourceLanguages=en "-p:Version=$VERSION"
-      - name: The test worker for Microsoft.Testing.Platform, so users need no build or feed for it
-        run: >
-          dotnet publish crates/dog-food-cli/assets/mtp -c Release -o packaging/nuget/engine/mtp
-          -p:UseAppHost=false -p:SatelliteResourceLanguages=en
+      - name: The test workers, so users need no build or feed for them
+        run: |
+          dotnet publish crates/dog-food-cli/assets/mtp -c Release -o packaging/nuget/engine/mtp -p:UseAppHost=false -p:SatelliteResourceLanguages=en
+          dotnet publish crates/dog-food-cli/assets/worker -c Release -o packaging/nuget/engine/worker -p:UseAppHost=false -p:SatelliteResourceLanguages=en
       - name: Pack the dgf tool and dgf-dup-cs
         run: |
           dotnet pack packaging/nuget -c Release "-p:Version=$VERSION"

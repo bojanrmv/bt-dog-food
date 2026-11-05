@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::exec::{self, cpu};
@@ -29,27 +29,41 @@ pub struct Target {
 }
 
 impl Target {
-    /// `dll`, when a worker can serve it.
-    pub fn of(dll: &Path, mtp: bool) -> Option<Target> {
-        if mtp {
-            return dll.is_file().then(|| Target {
-                dll: dll.to_path_buf(),
-                mtp,
-            });
+    /// `dll`, or why a worker cannot serve it.
+    pub fn of(dll: &Path, mtp: bool) -> Result<Target, String> {
+        if !dll.is_file() {
+            return Err(format!("its build output is not there: {}", dll.display()));
         }
-        let folder = dll.parent()?;
-        let has_adapter = std::fs::read_dir(folder).ok()?.flatten().any(|e| {
-            let name = e.file_name().to_string_lossy().to_lowercase();
-            name.contains("testadapter") && name.ends_with(".dll")
-        });
-        (dll.is_file()
-            && dll.with_extension("runtimeconfig.json").is_file()
-            && dll.with_extension("deps.json").is_file()
-            && has_adapter)
-            .then(|| Target {
-                dll: dll.to_path_buf(),
-                mtp,
-            })
+        let target = Target {
+            dll: dll.to_path_buf(),
+            mtp,
+        };
+        if mtp {
+            return Ok(target);
+        }
+        for extension in ["runtimeconfig.json", "deps.json"] {
+            if !dll.with_extension(extension).is_file() {
+                return Err(format!(
+                    "its build output has no {extension}, so it is not a test project that runs on modern .NET: {}",
+                    dll.display()
+                ));
+            }
+        }
+        let folder = dll.parent().unwrap_or(Path::new("."));
+        let has_adapter = std::fs::read_dir(folder)
+            .map_err(|err| format!("{}: {err}", folder.display()))?
+            .flatten()
+            .any(|e| {
+                let name = e.file_name().to_string_lossy().to_lowercase();
+                name.contains("testadapter") && name.ends_with(".dll")
+            });
+        if !has_adapter {
+            return Err(
+                "it has no test adapter in its build output (xunit.runner.visualstudio, NUnit3TestAdapter, MSTest.TestAdapter), and is not a Microsoft.Testing.Platform application"
+                    .to_string(),
+            );
+        }
+        Ok(target)
     }
 }
 
@@ -186,7 +200,6 @@ impl Worker {
             .arg(&target.dll)
             // Tests run where the test host would run them: in their output folder.
             .current_dir(target.dll.parent().unwrap_or(Path::new(".")))
-            .env("DGF_WORKER", "1")
             .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
             .envs(env.iter().map(|(k, v)| (*k, v.as_str())))
             .stdin(Stdio::piped())
@@ -402,20 +415,20 @@ impl Worker {
 
 /// The idle workers of each test assembly.
 pub struct Pool {
-    program: PathBuf,
-    /// The worker for Microsoft.Testing.Platform test applications, built
-    /// when a test project needs it.
-    mtp: Mutex<Option<PathBuf>>,
+    /// The worker that loads a VSTest adapter, found when a test project needs it.
+    vstest: OnceLock<PathBuf>,
+    /// The worker for Microsoft.Testing.Platform test applications, likewise.
+    mtp: OnceLock<PathBuf>,
     logs: PathBuf,
     idle: Mutex<HashMap<PathBuf, Vec<Worker>>>,
     started: AtomicUsize,
 }
 
 impl Pool {
-    pub fn new(program: PathBuf, logs: PathBuf) -> Pool {
+    pub fn new(logs: PathBuf) -> Pool {
         Pool {
-            program,
-            mtp: Mutex::new(None),
+            vstest: OnceLock::new(),
+            mtp: OnceLock::new(),
             logs,
             idle: Mutex::new(HashMap::new()),
             started: AtomicUsize::new(0),
@@ -424,9 +437,12 @@ impl Pool {
 
     /// Uses `program` for Microsoft.Testing.Platform test applications.
     pub fn set_mtp(&self, program: PathBuf) {
-        if let Ok(mut mtp) = self.mtp.lock() {
-            *mtp = Some(program);
-        }
+        let _ = self.mtp.set(program);
+    }
+
+    /// Uses `program` for test projects with a VSTest adapter.
+    pub fn set_vstest(&self, program: PathBuf) {
+        let _ = self.vstest.set(program);
     }
 
     /// An idle worker for `target`, or a new one.
@@ -455,16 +471,9 @@ impl Pool {
         std::fs::create_dir_all(&self.logs).map_err(|err| err.to_string())?;
         let n = self.started.fetch_add(1, Ordering::Relaxed);
         let log = self.logs.join(format!("worker-{n}.log"));
-        let program = if target.mtp {
-            self.mtp
-                .lock()
-                .ok()
-                .and_then(|m| m.clone())
-                .ok_or("dog-food's worker for Microsoft.Testing.Platform was not built")?
-        } else {
-            self.program.clone()
-        };
-        Worker::start(&program, target, env, &log)
+        let program = if target.mtp { &self.mtp } else { &self.vstest };
+        let program = program.get().ok_or("dog-food's test worker is not there")?;
+        Worker::start(program, target, env, &log)
     }
 }
 
@@ -518,16 +527,16 @@ mod tests {
         std::fs::write(&dll, "").unwrap();
         std::fs::write(dir.path().join("Shop.Tests.runtimeconfig.json"), "{}").unwrap();
         std::fs::write(dir.path().join("Shop.Tests.deps.json"), "{}").unwrap();
-        assert!(Target::of(&dll, false).is_none(), "no adapter yet");
+        assert!(Target::of(&dll, false).is_err(), "no adapter yet");
         // A test application of the testing platform needs none.
-        assert!(Target::of(&dll, true).is_some());
+        assert!(Target::of(&dll, true).is_ok());
         std::fs::write(
             dir.path().join("xunit.runner.visualstudio.testadapter.dll"),
             "",
         )
         .unwrap();
-        assert!(Target::of(&dll, false).is_some());
+        assert!(Target::of(&dll, false).is_ok());
         std::fs::remove_file(dir.path().join("Shop.Tests.deps.json")).unwrap();
-        assert!(Target::of(&dll, false).is_none(), "no deps.json");
+        assert!(Target::of(&dll, false).is_err(), "no deps.json");
     }
 }

@@ -48,7 +48,7 @@ A mutant is **killed** when a test fails with it on, and **survived** when every
 
 ## What it needs
 
-- **C#:** test projects that reference `Microsoft.NET.Test.Sdk` (xUnit, NUnit, MSTest) and run on VSTest (`dotnet test` without Microsoft Testing Platform), and `dotnet` on the PATH. Which test projects run is described under [Settings](settings.md).
+- **C#:** test projects on .NET 6 or newer, with a VSTest adapter (xUnit, NUnit, MSTest) or as a Microsoft.Testing.Platform application (xUnit v3, the MSTest runner, TUnit), and `dotnet` on the PATH. .NET Framework test projects are not supported: the run stops and names them, and `--exclude-test-project` leaves them out. Which test projects run is described under [Settings](settings.md).
 - **TypeScript/JavaScript:** a `package.json` above the mutated files with `vitest` or `jest`, its `node_modules` installed, and Node 22.3 or newer. In an Angular workspace whose project uses `@angular/build:unit-test`, dgf runs `ng test <project>` instead, and type-checks the mutants with `tsc` against the project's `tsconfig.spec.json` first (Angular's builder rejects code that does not type-check, plain Vitest and Jest do not check types).
 - Tests that fail with no mutant active are left out with a note; the run stops when no test runs at all, or when half of them or more fail.
 - Rust functions are listed by `dgf mutate` but not run.

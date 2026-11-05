@@ -268,10 +268,6 @@ struct MutateArgs {
     /// With --run, give every mutant a test run of its own instead of packing several into one
     #[arg(long)]
     no_mix: bool,
-    /// With --run (C#), start `dotnet test` for every test run instead of
-    /// keeping dog-food's test worker running between runs
-    #[arg(long)]
-    no_worker: bool,
     /// With --changes: every mutant of a changed function (default), or only
     /// mutants on changed lines
     #[arg(long, value_enum)]
@@ -865,7 +861,6 @@ fn mutation_options(args: &MutateArgs, settings: &Settings) -> mutation::Options
         },
         rerun_survivors: args.rerun_survivors,
         no_mix: args.no_mix,
-        worker: !args.no_worker && config.worker.unwrap_or(true),
         cached_only: args.cached,
         low_priority: args.low_priority || config.low_priority,
         use_cache: !args.no_cache,
@@ -898,7 +893,7 @@ fn cache_dir(root: &Path, settings: &Settings) -> PathBuf {
     }
 }
 
-/// `dgf mutate --run`: C# (dotnet test) and TypeScript/JavaScript (Vitest, Jest).
+/// `dgf mutate --run`: C# (dog-food's test workers) and TypeScript/JavaScript (Vitest, Jest).
 fn run_mutants(
     mut targets: Vec<mutate::Target>,
     args: &MutateArgs,

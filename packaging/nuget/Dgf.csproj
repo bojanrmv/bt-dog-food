@@ -13,6 +13,7 @@
       native/<rid>/dgf[.exe]   the release build of dog-food-cli, per platform
       engine/                  dotnet publish of crates/dog-food-dup/semantic, no apphost
       engine/mtp/              dotnet publish of crates/dog-food-cli/assets/mtp, no apphost
+      engine/worker/           dotnet publish of crates/dog-food-cli/assets/worker, no apphost
   -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>

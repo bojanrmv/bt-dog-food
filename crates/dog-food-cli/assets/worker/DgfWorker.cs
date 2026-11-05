@@ -206,7 +206,7 @@ namespace DogFood.Worker
             });
         }
 
-        /// What dgf's run settings ask of every test run: one test at a time,
+        /// What every test run is asked for: one test at a time,
         /// so the running test is always known.
         internal static string RunSettings()
         {
@@ -678,8 +678,8 @@ namespace DogFood.Worker
         public string File;
     }
 
-    /// Tells the mutant switches which test runs (AppDomain data "DgfTest", as
-    /// dog-food's collector does), and keeps each test's result: all rows of a
+    /// Tells the mutant switches which test runs (AppDomain data "DgfTest"),
+    /// and keeps each test's result: all rows of a
     /// theory or test case source together, failed when any row failed.
     internal sealed class Recorder : IFrameworkHandle
     {

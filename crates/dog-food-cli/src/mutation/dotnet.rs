@@ -1,6 +1,6 @@
-//! The C# engine: `dotnet build`, and `dotnet test` with dog-food's
-//! in-process collector, so every test reports its name to the mutant
-//! switches and writes its own result.
+//! The C# engine: `dotnet build`, and dog-food's test workers, which keep a
+//! test project loaded between runs and tell the mutant switches which test
+//! is running.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
-use super::exec::{self, fresh_folder, lines_in, write_plan, Located};
+use super::exec::{self, fresh_folder, write_plan, Located};
 use super::projects::TestProject;
 use super::sandbox::FileMutants;
 use super::worker::{Pool, Reply, Report, Target, Worker};
@@ -21,23 +21,19 @@ use super::{
 };
 use crate::discover::absolute;
 
-const COLLECTOR_CS: &str = include_str!("../../assets/collector/DgfCollector.cs");
-const COLLECTOR_PROJECT: &str = include_str!("../../assets/collector/DgfCollector.csproj");
 const WORKER_CS: &str = include_str!("../../assets/worker/DgfWorker.cs");
 const WORKER_PROJECT: &str = include_str!("../../assets/worker/DgfWorker.csproj");
 const MTP_CS: &str = include_str!("../../assets/mtp/DgfMtp.cs");
 const MTP_PROJECT: &str = include_str!("../../assets/mtp/DgfMtp.csproj");
 /// Longest a build or the baseline test run may take.
 const HOUR: Duration = Duration::from_secs(3600);
-/// The subfolder of a run's folder where the collector writes test results.
-const RESULTS: &str = "results";
 /// Every test's time in a baseline, read by the next run to split its baseline evenly.
 const TIMES: &str = "baseline-times.tsv";
 
 #[derive(Clone)]
 struct Project {
     path: PathBuf,
-    /// The assembly its tests come from, which the collector reports.
+    /// The assembly its tests come from.
     assembly: String,
     /// The user's test filter for this project.
     filter: Option<String>,
@@ -46,7 +42,6 @@ struct Project {
 pub struct Dotnet {
     sandbox: PathBuf,
     projects: Vec<Project>,
-    collector: PathBuf,
     /// A solution with every test project, so one `dotnet build` builds
     /// shared projects once and the rest in parallel.
     tests: PathBuf,
@@ -61,15 +56,11 @@ pub struct Dotnet {
     mutated_restored: AtomicBool,
     /// Extra `dotnet build` arguments: `-m:N`, `-lowPriority`.
     build_args: Vec<String>,
-    /// dog-food's test workers, which keep a test project loaded between
-    /// runs; `None` when turned off or when the worker could not be built.
-    workers: Option<Pool>,
-    /// Test project (assembly) → what a worker serves, found after the
-    /// first build. A project not here runs with `dotnet test`.
-    targets: OnceLock<HashMap<String, Target>>,
-    /// Test projects a worker could not serve, and why: they run with
-    /// `dotnet test` from then on.
-    refused: Mutex<BTreeMap<String, String>>,
+    /// dog-food's test workers, which keep a test project loaded between runs.
+    workers: Pool,
+    /// Test project (assembly) → what a worker serves, found after the first
+    /// build; or why a test project cannot run.
+    targets: OnceLock<Result<HashMap<String, Target>, String>>,
     /// Test project → workers the kill check retired as polluted.
     retired: Mutex<HashMap<String, usize>>,
     /// Test project → how much longer a run takes in a new worker than in
@@ -99,7 +90,6 @@ impl Dotnet {
         chosen: &[TestProject],
         settings: u64,
         build_args: Vec<String>,
-        worker: bool,
         jobs: usize,
     ) -> Result<Dotnet, String> {
         let projects: Vec<Project> = chosen
@@ -124,22 +114,9 @@ impl Dotnet {
             &mutated_solution,
             &solution(sandbox, mutated.iter().map(PathBuf::as_path)),
         )?;
-        let mut notes = Vec::new();
-        let workers = match worker.then(worker_program) {
-            Some(Ok(program)) => Some(Pool::new(
-                program,
-                exec::runs_folder(sandbox).join("workers"),
-            )),
-            Some(Err(err)) => {
-                notes.push(format!("dog-food's test worker could not be built, so every test run started `dotnet test`: {err}"));
-                None
-            }
-            None => None,
-        };
         Ok(Dotnet {
             sandbox: sandbox.to_path_buf(),
             projects,
-            collector: collector()?,
             tests,
             mutated: mutated_solution,
             settings,
@@ -149,21 +126,19 @@ impl Dotnet {
             ),
             mutated_restored: AtomicBool::new(false),
             build_args,
-            workers,
+            workers: Pool::new(exec::runs_folder(sandbox).join("workers")),
             targets: OnceLock::new(),
-            refused: Mutex::new(BTreeMap::new()),
             retired: Mutex::new(HashMap::new()),
             warmup: Mutex::new(HashMap::new()),
             owners: owners(sandbox, files),
             jobs: jobs.max(1),
             last_times: Mutex::new(HashMap::new()),
-            notes: Mutex::new(notes),
+            notes: Mutex::new(Vec::new()),
         })
     }
 
     /// Runs the given projects (with a test filter each) for `ask` and
-    /// collects every test's result; side by side when `parallel`. A project
-    /// a worker serves runs there, the others with `dotnet test`.
+    /// collects every test's result; side by side when `parallel`.
     fn run(
         &self,
         runs: &[(&Project, Option<String>)],
@@ -174,18 +149,16 @@ impl Dotnet {
     ) -> Result<(TestRun, Results), String> {
         let one = |(index, (project, filter)): (usize, &(&Project, Option<String>))| {
             let started = Instant::now();
-            let ran = match self.target(project) {
-                Some(target) => self.in_worker(
-                    project,
-                    &target,
-                    filter.as_deref(),
-                    ask,
-                    limit,
-                    folder,
-                    index,
-                ),
-                None => self.in_command(project, filter.as_deref(), ask, limit, folder, index),
-            }?;
+            let target = self.target(project)?;
+            let ran = self.in_worker(
+                project,
+                &target,
+                filter.as_deref(),
+                ask,
+                limit,
+                folder,
+                index,
+            )?;
             Ok::<_, String>((ran, project.assembly.clone(), started.elapsed()))
         };
         let ran: Vec<Result<ProjectRun, String>> = if parallel {
@@ -208,53 +181,11 @@ impl Dotnet {
         Ok((status, results))
     }
 
-    /// One project's run with `dotnet test` and dog-food's collector.
-    fn in_command(
-        &self,
-        project: &Project,
-        filter: Option<&str>,
-        ask: Ask,
-        limit: Duration,
-        folder: &Path,
-        index: usize,
-    ) -> Result<(TestRun, Results), String> {
-        let mut command = self.test_command(project, filter, folder, index)?;
-        match ask {
-            Ask::Reach(reached) => command.env("DGF_REACH", reached),
-            Ask::Plan(_, plan) => command.env("DGF_PLAN", plan),
-            Ask::Fresh(mutant, _) => command.env("DGF_MUTANT", mutant.to_string()),
-        };
-        let started = Instant::now();
-        let status = exec::run(command, limit, &folder.join(exec::log_name(index)))?;
-        let mut results = if status == TestRun::TimedOut {
-            Results::default()
-        } else {
-            Results::read(&folder.join(format!("{RESULTS}-{index}")), &self.sandbox)
-        };
-        if let Ask::Plan(_, plan) = ask {
-            // The switches note the planned mutants that took effect next to the plan.
-            results.activation_known = true;
-            results.activated = activated_in(&plan.with_extension("txt.activated"));
-        }
-        let status = command_status(status, ask, &project.assembly, &results);
-        debug!(
-            "dotnet test",
-            "{} in {}: {status:?} in {:.1} s (limit {:.1} s), {} tests, their own time {:.1} s",
-            project.assembly,
-            tag_of(folder),
-            started.elapsed().as_secs_f64(),
-            limit.as_secs_f64(),
-            results.outcome.len(),
-            results.times.values().sum::<Duration>().as_secs_f64()
-        );
-        Ok((status, results))
-    }
-
     /// One project's run in a worker: a warm one from the pool, or a new
     /// one with the mutant on from the start for a mutant reached outside
     /// any test (static setup runs once per process). A worker that timed
-    /// out or crashed is stopped; one that cannot start leaves the project
-    /// to `dotnet test`.
+    /// out or crashed is stopped. One with the mutant on from the start that
+    /// cannot start was crashed by its mutant, as the baseline's started.
     #[allow(clippy::too_many_arguments)]
     fn in_worker(
         &self,
@@ -266,17 +197,23 @@ impl Dotnet {
         folder: &Path,
         index: usize,
     ) -> Result<(TestRun, Results), String> {
-        let pool = self.workers.as_ref().expect("a target needs workers");
-        let started = match ask {
-            Ask::Fresh(mutant, _) => pool.start(target, &[("DGF_MUTANT", mutant.to_string())]),
-            _ => pool.take(target),
-        };
-        let mut worker = match started {
-            Ok(worker) => worker,
-            Err(why) => {
-                self.refuse(project, why);
-                return self.in_command(project, filter, ask, limit, folder, index);
+        let pool = &self.workers;
+        let mut worker = match ask {
+            Ask::Fresh(mutant, _) => {
+                match pool.start(target, &[("DGF_MUTANT", mutant.to_string())]) {
+                    Ok(worker) => worker,
+                    Err(why) => {
+                        debug!("worker", "mutant {mutant} stopped a new worker: {why}");
+                        return Ok((TestRun::Crashed, Results::default()));
+                    }
+                }
             }
+            // A worker that would not start is tried once more: a machine
+            // short of memory or a build server shutting down can pass.
+            _ => pool
+                .take(target)
+                .or_else(|_| pool.take(target))
+                .map_err(|why| format!("{}: {why}", project.assembly))?,
         };
         if let (Ask::Reach(reached), true) = (ask, splittable(filter)) {
             return self.reach_split(
@@ -309,7 +246,7 @@ impl Dotnet {
         folder: &Path,
         index: usize,
     ) -> Result<(TestRun, Results), String> {
-        let pool = self.workers.as_ref().expect("a target needs workers");
+        let pool = &self.workers;
         let filter_file = folder.join(format!("filter-{index}.txt"));
         write_file(&filter_file, filter.unwrap_or(""))?;
         let ask = Ask::Reach(reached);
@@ -488,7 +425,7 @@ impl Dotnet {
         let warm: Vec<String> = self
             .projects
             .iter()
-            .filter(|p| self.target(p).is_some())
+            .filter(|p| self.target(p).is_ok())
             .map(|p| p.assembly.clone())
             .collect();
         let Ok(mut warmup) = self.warmup.lock() else {
@@ -504,13 +441,14 @@ impl Dotnet {
 
     /// A fresh worker stops (its statics hold the mutant); the others go back to the pool.
     fn release(&self, target: &Target, worker: Worker, fresh: bool) {
-        match self.workers.as_ref() {
-            Some(pool) if !fresh => pool.give(target, worker),
-            _ => worker.stop(),
+        if fresh {
+            worker.stop();
+        } else {
+            self.workers.give(target, worker);
         }
     }
 
-    /// The worker's report as the collector's results; `planned` runs
+    /// The worker's report as results; `planned` runs
     /// report which mutants took effect.
     fn results(&self, project: &Project, report: Report, planned: bool) -> Results {
         let sandbox = absolute(&self.sandbox);
@@ -536,72 +474,88 @@ impl Dotnet {
         results
     }
 
-    /// What a worker serves for `project`, unless it refused the project.
-    fn target(&self, project: &Project) -> Option<Target> {
-        if self
-            .refused
-            .lock()
-            .is_ok_and(|r| r.contains_key(&project.assembly))
-        {
-            return None;
-        }
-        self.targets().get(&project.assembly).cloned()
+    /// What a worker serves for `project`.
+    fn target(&self, project: &Project) -> Result<Target, String> {
+        self.targets()?
+            .get(&project.assembly)
+            .cloned()
+            .ok_or_else(|| format!("{}: no build output found", project.assembly))
     }
 
-    /// The test projects a worker serves: each project's built assembly
-    /// (MSBuild's TargetPath), once the first build made it. `reach` finds
-    /// them before its test runs start; plain threads, not the thread pool
-    /// the runs use, so no run waits on itself.
-    fn targets(&self) -> &HashMap<String, Target> {
-        self.targets.get_or_init(|| {
-            if self.workers.is_none() {
-                return HashMap::new();
-            }
-            let found: Vec<(String, Option<Target>)> = std::thread::scope(|scope| {
-                let lookups: Vec<_> = self
-                    .projects
-                    .iter()
-                    .map(|p| {
-                        scope.spawn(move || {
-                            let target = target_path(&p.path)
-                                .and_then(|(dll, mtp)| Target::of(&dll, mtp));
-                            if let Some(target) = target.as_ref().filter(|t| t.mtp) {
-                                xunit_one_at_a_time(&target.dll);
-                            }
-                            (p.assembly.clone(), target)
-                        })
-                    })
-                    .collect();
-                lookups.into_iter().filter_map(|l| l.join().ok()).collect()
-            });
-            let found = self.with_mtp_worker(found);
-            let mut targets = HashMap::new();
-            for (assembly, target) in found {
-                match target {
-                    Some(target) => {
-                        debug!(
-                            "targets",
-                            "{assembly}: {}{}",
-                            target.dll.display(),
-                            if target.mtp { " (testing platform)" } else { "" }
-                        );
-                        targets.insert(assembly, target);
-                    }
-                    None => {
-                        debug!("targets", "{assembly}: dotnet test");
-                        self.refuse_quietly(&assembly, "it has several target frameworks, no VSTest adapter, or its build output is not where MSBuild says")
-                    }
+    fn targets(&self) -> Result<&HashMap<String, Target>, String> {
+        self.targets
+            .get_or_init(|| self.find_targets())
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    /// The test projects' built assemblies, once the first build made them,
+    /// and the workers they need. `reach` finds them before its test runs
+    /// start; plain threads, not the thread pool the runs use, so no run
+    /// waits on itself.
+    fn find_targets(&self) -> Result<HashMap<String, Target>, String> {
+        let found: Vec<(String, Result<Found, String>)> = std::thread::scope(|scope| {
+            let lookups: Vec<_> = self
+                .projects
+                .iter()
+                .map(|p| scope.spawn(move || (p.assembly.clone(), find_target(&p.path))))
+                .collect();
+            lookups.into_iter().filter_map(|l| l.join().ok()).collect()
+        });
+        let refused: Vec<String> = found
+            .iter()
+            .filter_map(|(assembly, target)| {
+                target
+                    .as_ref()
+                    .err()
+                    .map(|why| format!("{assembly}: {why}"))
+            })
+            .collect();
+        if !refused.is_empty() {
+            return Err(format!(
+                "dog-food cannot run these test projects:\n  {}\nExclude them with --exclude-test-project.",
+                refused.join("\n  ")
+            ));
+        }
+        let mut targets = HashMap::new();
+        for (assembly, target) in found {
+            let found = target?;
+            debug!(
+                "targets",
+                "{assembly}: {}{}",
+                found.target.dll.display(),
+                if found.target.mtp {
+                    " (testing platform)"
+                } else {
+                    ""
+                }
+            );
+            if let Some(framework) = found.chosen {
+                if let Ok(mut notes) = self.notes.lock() {
+                    notes.push(format!(
+                        "{assembly} has several target frameworks: its tests ran on {framework}"
+                    ));
                 }
             }
-            targets
-        })
+            if found.target.mtp {
+                xunit_one_at_a_time(&found.target.dll);
+            }
+            targets.insert(assembly, found.target);
+        }
+        if targets.values().any(|t| t.mtp) {
+            self.workers.set_mtp(mtp_program()?);
+        }
+        if targets.values().any(|t| !t.mtp) {
+            self.workers.set_vstest(worker_program()?);
+        }
+        Ok(targets)
     }
 
     /// The runs whose test project can see `mutant`: its build output holds
     /// the mutant's assembly. A test project that does not reference that
     /// assembly cannot notice the mutant, however its tests run. When no
-    /// output holds an assembly of that name (another AssemblyName), or a
-    /// project runs with `dotnet test`, nothing is left out.
+    /// output holds an assembly of that name (another AssemblyName), nothing
+    /// is left out.
     fn seeing<'a>(
         &self,
         mutant: usize,
@@ -611,7 +565,7 @@ impl Dotnet {
             return runs;
         };
         let sees = |project: &Project| {
-            self.target(project).map(|t| {
+            self.target(project).ok().map(|t| {
                 t.dll
                     .parent()
                     .is_some_and(|dir| dir.join(format!("{owner}.dll")).is_file())
@@ -629,52 +583,10 @@ impl Dotnet {
         }
     }
 
-    /// Builds the worker for Microsoft.Testing.Platform test applications
-    /// when a test project is one; without it, those projects get no target.
-    fn with_mtp_worker(
-        &self,
-        found: Vec<(String, Option<Target>)>,
-    ) -> Vec<(String, Option<Target>)> {
-        let wanted = found.iter().any(|(_, t)| t.as_ref().is_some_and(|t| t.mtp));
-        let Some(pool) = self.workers.as_ref().filter(|_| wanted) else {
-            return found;
-        };
-        match mtp_program() {
-            Ok(program) => {
-                pool.set_mtp(program);
-                found
-            }
-            Err(err) => found
-                .into_iter()
-                .map(|(assembly, target)| match target {
-                    Some(t) if t.mtp => {
-                        self.refuse_quietly(&assembly, &err);
-                        (assembly, None)
-                    }
-                    other => (assembly, other),
-                })
-                .collect(),
-        }
-    }
-
     /// Workers per test project for the baseline: `--jobs` shared by the projects a worker serves.
     fn shards(&self) -> usize {
-        (self.jobs / self.targets().len().max(1)).max(1)
-    }
-
-    fn refuse(&self, project: &Project, why: String) {
-        self.refuse_quietly(&project.assembly, &why);
-    }
-
-    fn refuse_quietly(&self, assembly: &str, why: &str) {
-        let Ok(mut refused) = self.refused.lock() else {
-            return;
-        };
-        if refused.contains_key(assembly) {
-            return;
-        }
-        refused.insert(assembly.to_string(), why.to_string());
-        tellln!("warning: {assembly} runs with `dotnet test` for every test run, which is far slower than dog-food's test worker: {why}");
+        let projects = self.targets().map_or(1, HashMap::len);
+        (self.jobs / projects.max(1)).max(1)
     }
 
     fn warmup_of(&self, assembly: &str) -> Duration {
@@ -685,37 +597,8 @@ impl Dotnet {
             .unwrap_or(Duration::from_secs(30))
     }
 
-    fn test_command(
-        &self,
-        project: &Project,
-        filter: Option<&str>,
-        folder: &Path,
-        index: usize,
-    ) -> Result<Command, String> {
-        let settings = folder.join(format!("run-{index}.runsettings"));
-        std::fs::write(&settings, run_settings(&self.collector, filter))
-            .map_err(|err| format!("{}: {err}", settings.display()))?;
-        let results = folder.join(format!("{RESULTS}-{index}"));
-        std::fs::create_dir_all(&results).map_err(|err| err.to_string())?;
-        let mut command = dotnet(&[
-            "test",
-            &project.path.to_string_lossy(),
-            "--no-build",
-            "--nologo",
-            "-v",
-            "q",
-        ]);
-        command
-            .arg("--settings")
-            .arg(&settings)
-            .arg("--results-directory")
-            .arg(folder.join(format!("trx-{index}")))
-            .env("DGF_RESULTS", results);
-        Ok(command)
-    }
-
-    /// The projects that hold `tests`, each with a filter for its tests;
-    /// every project with the user's filter when `tests` is `None`.
+    /// The projects that hold `tests`; every project with the user's filter
+    /// when `tests` is `None`.
     fn runs_for<'a>(
         &'a self,
         tests: Option<&BTreeSet<String>>,
@@ -728,24 +611,19 @@ impl Dotnet {
                 .map(|p| (p, p.filter.clone()))
                 .collect();
         };
-        let mut by_assembly: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for test in tests {
-            let home = reach.home.get(test).map_or("", String::as_str);
-            by_assembly.entry(home).or_default().push(test);
-        }
+        let homes: BTreeSet<&str> = tests
+            .iter()
+            .map(|test| reach.home.get(test).map_or("", String::as_str))
+            .collect();
         self.projects
             .iter()
-            .filter_map(|p| {
-                by_assembly
-                    .get(p.assembly.as_str())
-                    .map(|names| (p, Some(filter(names))))
-            })
+            .filter(|p| homes.contains(p.assembly.as_str()))
+            .map(|p| (p, None))
             .collect()
     }
 
     /// Each test's source files: the one the test adapter reports, else every
-    /// file in the test projects that declares the test's class (xUnit does
-    /// not report files under `dotnet test`).
+    /// file in the test projects that declares the test's class.
     fn test_files(&self, results: &Results) -> HashMap<String, Vec<String>> {
         let classes = self.class_index();
         results
@@ -912,7 +790,7 @@ impl Engine for Dotnet {
         let reached = folder.join("reach");
         std::fs::create_dir_all(&reached).map_err(|err| err.to_string())?;
         let started = Instant::now();
-        self.targets();
+        self.targets()?;
         let runs = self.runs_for(None, &Reach::default());
         let (status, results) = self.run(
             &runs,
@@ -953,13 +831,10 @@ impl Engine for Dotnet {
         tag: &str,
     ) -> Result<PackRun, String> {
         let folder = fresh_folder(&self.sandbox, tag)?;
-        let plan = folder.join("plan.txt");
-        write_plan(&plan, &pack.plan)?;
         let tests: BTreeSet<String> = pack.plan.iter().map(|(t, _)| t.clone()).collect();
         let runs = self.runs_for(Some(&tests), reach);
         let grouped = by_project(&pack.plan, reach);
-        let (status, results) =
-            self.run(&runs, Ask::Plan(&grouped, &plan), limit, &folder, false)?;
+        let (status, results) = self.run(&runs, Ask::Plan(&grouped), limit, &folder, false)?;
         let results = results.into_test_results();
         // Nothing says which test was running: nothing to go on.
         if status == TestRun::TimedOut && results.running.is_empty() {
@@ -998,11 +873,8 @@ impl Engine for Dotnet {
             .flatten()
             .map(|t| (t.clone(), mutant))
             .collect();
-        let plan = folder.join("plan.txt");
-        write_plan(&plan, &entries)?;
         let grouped = by_project(&entries, reach);
-        let (status, results) =
-            self.run(&runs, Ask::Plan(&grouped, &plan), limit, &folder, false)?;
+        let (status, results) = self.run(&runs, Ask::Plan(&grouped), limit, &folder, false)?;
         Ok((status, results.into_test_results()))
     }
 
@@ -1021,15 +893,7 @@ impl Engine for Dotnet {
     }
 
     fn notes(&self) -> Vec<String> {
-        let mut notes = self.notes.lock().map(|n| n.clone()).unwrap_or_default();
-        if self.workers.is_some() {
-            if let Ok(refused) = self.refused.lock() {
-                notes.extend(refused.iter().map(|(project, why)| {
-                    format!("{project} ran with `dotnet test` for every test run, which is far slower than dog-food's test worker: {why}")
-                }));
-            }
-        }
-        notes
+        self.notes.lock().map(|n| n.clone()).unwrap_or_default()
     }
 }
 
@@ -1041,9 +905,8 @@ type ProjectRun = ((TestRun, Results), String, Duration);
 enum Ask<'a> {
     /// No mutant; record which mutants each test reaches in the folder.
     Reach(&'a Path),
-    /// Each planned test with its mutant: the plan by test project (for
-    /// workers) and as one file (for `dotnet test`).
-    Plan(&'a HashMap<String, Vec<(String, usize)>>, &'a Path),
+    /// Each planned test with its mutant, by test project.
+    Plan(&'a HashMap<String, Vec<(String, usize)>>),
     /// One mutant on from the start, in a new process: a mutant reached
     /// outside any test, or one a warm process cannot be trusted on. The
     /// tests to run, by test project, in order; a worker stops at the first
@@ -1068,28 +931,6 @@ fn owners(sandbox: &Path, files: &[FileMutants]) -> HashMap<usize, String> {
         }
     }
     owners
-}
-
-/// How a `dotnet test` run ended: it runs every planned test, so a failed
-/// run with one of `assembly`'s missing lost its host. (A worker says so
-/// itself.)
-fn command_status(status: TestRun, ask: Ask, assembly: &str, results: &Results) -> TestRun {
-    match ask {
-        Ask::Plan(grouped, _)
-            if status == TestRun::Failed && planned_missing(grouped.get(assembly), results) =>
-        {
-            TestRun::Crashed
-        }
-        _ => status,
-    }
-}
-
-/// Whether a planned test of this project did not report.
-fn planned_missing(planned: Option<&Vec<(String, usize)>>, results: &Results) -> bool {
-    planned.is_some_and(|plan| {
-        plan.iter()
-            .any(|(test, _)| !results.outcome.contains_key(test))
-    })
 }
 
 /// Whether the worker can match `filter` itself: none, or conditions on
@@ -1189,14 +1030,6 @@ fn write_times(path: &Path, reach: &Reach) {
     debug!("baseline", "every test's time: {}", path.display());
 }
 
-/// The tag of the run whose output goes to `folder`.
-fn tag_of(folder: &Path) -> String {
-    folder
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
 /// The worker request for `ask` in the run `folder`, with the files it names.
 fn request_for(
     ask: Ask,
@@ -1206,7 +1039,7 @@ fn request_for(
     index: usize,
     check: bool,
 ) -> Result<String, String> {
-    if let Ask::Plan(by_project, _) = ask {
+    if let Ask::Plan(by_project) = ask {
         let plan = folder.join(format!("plan-{index}.txt"));
         write_plan(
             &plan,
@@ -1346,39 +1179,141 @@ fn by_project(plan: &[(String, usize)], reach: &Reach) -> HashMap<String, Vec<(S
     grouped
 }
 
-/// The assembly a test project builds (MSBuild's TargetPath), and whether it
-/// is a Microsoft.Testing.Platform test application; `None` for a project
-/// with several target frameworks, which has no TargetPath.
-fn target_path(project: &Path) -> Option<(PathBuf, bool)> {
-    let output = dotnet(&[
+/// What a worker serves for a test project.
+struct Found {
+    target: Target,
+    /// The framework dog-food chose among the project's several.
+    chosen: Option<String>,
+}
+
+/// The built assembly of the test project at `project`, or why a worker
+/// cannot serve it. A project with several target frameworks has no assembly
+/// of its own: it runs on the newest one this machine can run.
+fn find_target(project: &Path) -> Result<Found, String> {
+    let first = msbuild_properties(project, None)?;
+    if !first.path.is_empty() {
+        return target_of(&first, None);
+    }
+    if first.frameworks.is_empty() {
+        return Err("MSBuild names no build output for it".to_string());
+    }
+    let framework = newest_runnable(&first.frameworks, &installed_runtimes())?;
+    let chosen = msbuild_properties(project, Some(&framework))?;
+    target_of(&chosen, Some(framework))
+}
+
+fn target_of(properties: &Properties, chosen: Option<String>) -> Result<Found, String> {
+    if version_of(&properties.framework).is_none() && properties.framework.starts_with("net4") {
+        return Err(format!(
+            "it targets .NET Framework ({}), which dog-food does not support",
+            properties.framework
+        ));
+    }
+    let target = Target::of(Path::new(&properties.path), properties.mtp)?;
+    Ok(Found { target, chosen })
+}
+
+/// What MSBuild says of a test project.
+struct Properties {
+    path: String,
+    framework: String,
+    frameworks: String,
+    mtp: bool,
+}
+
+fn msbuild_properties(project: &Path, framework: Option<&str>) -> Result<Properties, String> {
+    let project_path = project.to_string_lossy();
+    let mut args = vec![
         "msbuild",
-        &project.to_string_lossy(),
+        project_path.as_ref(),
         "-getProperty:TargetPath",
+        "-getProperty:TargetFramework",
+        "-getProperty:TargetFrameworks",
         "-getProperty:IsTestingPlatformApplication",
         "-nologo",
-    ])
-    .output()
-    .ok()?;
+    ];
+    let property = framework.map(|f| format!("-p:TargetFramework={f}"));
+    args.extend(property.as_deref());
+    let output = dotnet(&args)
+        .output()
+        .map_err(|err| format!("could not run dotnet: {err}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
-        return None;
+        return Err(format!("MSBuild could not read it: {}", text.trim()));
     }
-    target_properties(&String::from_utf8_lossy(&output.stdout))
+    parse_properties(&text).ok_or_else(|| format!("MSBuild said: {}", text.trim()))
 }
 
-/// MSBuild's `{"Properties": {"TargetPath": ..., "IsTestingPlatformApplication": ...}}`.
-fn target_properties(json: &str) -> Option<(PathBuf, bool)> {
+/// MSBuild's `{"Properties": {"TargetPath": ..., ...}}`.
+fn parse_properties(json: &str) -> Option<Properties> {
     let value: serde_json::Value = serde_json::from_str(json.trim()).ok()?;
-    let properties = &value["Properties"];
-    let path = properties["TargetPath"]
-        .as_str()
-        .filter(|p| !p.is_empty())?;
-    let mtp = properties["IsTestingPlatformApplication"]
-        .as_str()
-        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
-    Some((PathBuf::from(path), mtp))
+    let properties = value.get("Properties")?;
+    let text = |name: &str| properties[name].as_str().unwrap_or("").trim().to_string();
+    Some(Properties {
+        path: text("TargetPath"),
+        framework: text("TargetFramework"),
+        frameworks: text("TargetFrameworks"),
+        mtp: text("IsTestingPlatformApplication").eq_ignore_ascii_case("true"),
+    })
 }
 
-/// What the collector wrote: every test's result, its assembly and its file.
+/// The version of a modern .NET target framework: `net10.0`,
+/// `net8.0-windows`, `netcoreapp3.1`. .NET Framework (`net48`) and
+/// `netstandard2.0` have none.
+fn version_of(framework: &str) -> Option<(u32, u32)> {
+    let name = framework.split('-').next()?;
+    let number = name
+        .strip_prefix("netcoreapp")
+        .or_else(|| name.strip_prefix("net"))?;
+    let (major, minor) = number.split_once('.')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// The newest of the `;`-separated `frameworks` whose major version is
+/// among the `runtimes`, else the newest of them, whose worker says what is
+/// missing when it does not start.
+fn newest_runnable(frameworks: &str, runtimes: &[u32]) -> Result<String, String> {
+    let mut modern: Vec<((u32, u32), &str)> = frameworks
+        .split(';')
+        .map(str::trim)
+        .filter_map(|f| version_of(f).map(|v| (v, f)))
+        .collect();
+    modern.sort();
+    modern
+        .iter()
+        .rev()
+        .find(|(version, _)| runtimes.contains(&version.0))
+        .or(modern.last())
+        .map(|(_, framework)| framework.to_string())
+        .ok_or_else(|| {
+            format!(
+                "none of its target frameworks ({frameworks}) is modern .NET, which dog-food needs"
+            )
+        })
+}
+
+/// The major versions of the .NET runtimes this machine has.
+fn installed_runtimes() -> Vec<u32> {
+    let output = dotnet(&["--list-runtimes"]).output();
+    let text = output
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    runtimes_in(&text)
+}
+
+/// From lines "Microsoft.NETCore.App 10.0.13 [C:\\Program Files\\...]".
+fn runtimes_in(listing: &str) -> Vec<u32> {
+    listing
+        .lines()
+        .filter_map(|line| line.strip_prefix("Microsoft.NETCore.App "))
+        .filter_map(|rest| rest.split('.').next()?.parse().ok())
+        .collect()
+}
+
+// The assembly a test project builds (MSBuild's TargetPath), and whether it
+/// is a Microsoft.Testing.Platform test application; `None` for a project
+/// with several target frameworks, which has no TargetPath.
+/// What a run reported: every test's result, its assembly and its file.
 #[derive(Default)]
 struct Results {
     outcome: HashMap<String, bool>,
@@ -1387,7 +1322,7 @@ struct Results {
     files: HashMap<String, String>,
     /// Test → how long it ran (all rows of a theory together).
     times: HashMap<String, Duration>,
-    /// Test project (assembly) → how long its `dotnet test` took.
+    /// Test project (assembly) → how long its run took.
     walls: HashMap<String, Duration>,
     /// Failed tests that fail without their mutant too (the kill check).
     polluted: BTreeSet<String>,
@@ -1423,36 +1358,10 @@ impl Results {
         self.activation_known |= other.activation_known;
         self.walls.extend(other.walls);
     }
-
-    /// Lines "test<TAB>passed|failed<TAB>assembly path<TAB>source file<TAB>ms";
-    /// a test that ran several times (theory rows) fails if any row failed.
-    fn read(folder: &Path, sandbox: &Path) -> Results {
-        let mut results = Results::default();
-        let sandbox = absolute(sandbox);
-        for line in lines_in(folder) {
-            let mut parts = line.split('\t');
-            let (Some(test), Some(outcome)) = (parts.next(), parts.next()) else {
-                continue;
-            };
-            let entry = results.outcome.entry(test.to_string()).or_insert(true);
-            *entry = *entry && outcome == "passed";
-            if let Some(source) = parts.next() {
-                results.home.insert(test.to_string(), assembly_name(source));
-            }
-            let file = parts.next().and_then(|f| relative_file(&sandbox, f));
-            if let Some(file) = file {
-                results.files.insert(test.to_string(), file);
-            }
-            if let Some(ms) = parts.next().and_then(|ms| ms.trim().parse().ok()) {
-                *results.times.entry(test.to_string()).or_default() += Duration::from_millis(ms);
-            }
-        }
-        results
-    }
 }
 
-/// Per test project: its `dotnet test` time without its tests' time (host
-/// start, discovery, loading).
+/// Per test project: its run's time without its tests' time (host start,
+/// discovery, loading).
 fn startup(
     walls: &HashMap<String, Duration>,
     home: &HashMap<String, String>,
@@ -1509,13 +1418,6 @@ fn relative_file(sandbox: &Path, file: &str) -> Option<String> {
     let path = absolute(Path::new(file.trim()));
     let relative = path.strip_prefix(sandbox).ok()?;
     Some(relative.to_string_lossy().replace('\\', "/"))
-}
-
-fn assembly_name(source: &str) -> String {
-    Path::new(source)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default()
 }
 
 /// Lines "test<TAB>mutant<TAB>same|changed" from the switches that worked
@@ -1648,27 +1550,6 @@ fn give_to_class(reach: &mut Reach, test: &str, id: usize) {
     tests.extend(mates);
 }
 
-/// `FullyQualifiedName=A|FullyQualifiedName=B`. It goes into the run
-/// settings, so its length does not matter.
-fn filter(tests: &[&str]) -> String {
-    tests
-        .iter()
-        .map(|t| format!("FullyQualifiedName={}", escape(t)))
-        .collect::<Vec<_>>()
-        .join("|")
-}
-
-fn escape(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for c in name.chars() {
-        if matches!(c, '\\' | '(' | ')' | '&' | '|' | '=' | '!' | '~') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
 fn dotnet(args: &[&str]) -> Command {
     let mut command = Command::new("dotnet");
     command
@@ -1700,7 +1581,10 @@ fn solution<'a>(sandbox: &Path, projects: impl Iterator<Item = &'a Path>) -> Str
             .unwrap_or(path)
             .to_string_lossy()
             .replace('/', "\\");
-        let name = assembly_name(&path.to_string_lossy());
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let guid = guid(&relative);
         entries.push_str(&format!(
             "Project(\"{{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}}\") = \"{name}\", \"{relative}\", \"{guid}\"\r\nEndProject\r\n"
@@ -1728,19 +1612,18 @@ fn guid(text: &str) -> String {
     )
 }
 
-/// Builds dog-food's collector once per version of its source.
-fn collector() -> Result<PathBuf, String> {
-    built(
-        "collector",
-        "DgfCollector",
-        COLLECTOR_CS,
-        COLLECTOR_PROJECT,
-        "dog-food's test collector",
-    )
-}
-
-/// Builds dog-food's test worker once per version of its source.
+/// dog-food's test worker: the one a release ships, else built once per
+/// version of its source.
 fn worker_program() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+    if let Some(dll) = shipped(&exe, "worker", "DgfWorker.dll") {
+        debug!(
+            "worker",
+            "the test worker ships with dgf: {}",
+            dll.display()
+        );
+        return Ok(dll);
+    }
     built(
         "worker",
         "DgfWorker",
@@ -1750,11 +1633,11 @@ fn worker_program() -> Result<PathBuf, String> {
     )
 }
 
-/// Builds dog-food's worker for Microsoft.Testing.Platform test applications
-/// once per version of its source.
+/// dog-food's worker for Microsoft.Testing.Platform test applications: the
+/// one a release ships, else built once per version of its source.
 fn mtp_program() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|err| err.to_string())?;
-    if let Some(dll) = shipped_mtp(&exe) {
+    if let Some(dll) = shipped(&exe, "mtp", "DgfMtp.dll") {
         debug!(
             "worker",
             "the testing platform's worker ships with dgf: {}",
@@ -1771,12 +1654,12 @@ fn mtp_program() -> Result<PathBuf, String> {
     )
 }
 
-/// The worker a release ships beside the binary `exe`, which then needs no
+/// A worker a release ships beside the binary `exe`, which then needs no
 /// build or NuGet feed on this machine; a binary built from source has none.
 /// The binary can be run through a link, so the folder it links to counts too.
-fn shipped_mtp(exe: &Path) -> Option<PathBuf> {
+fn shipped(exe: &Path, folder: &str, file: &str) -> Option<PathBuf> {
     let beside = |dir: &Path| {
-        let dll = dir.join("engine").join("mtp").join("DgfMtp.dll");
+        let dll = dir.join("engine").join(folder).join(file);
         dll.is_file().then_some(dll)
     };
     beside(exe.parent()?).or_else(|| beside(std::fs::canonicalize(exe).ok()?.parent()?))
@@ -1838,48 +1721,6 @@ fn built(
     Ok(dll)
 }
 
-/// Loads the collector, runs tests one at a time inside each test process
-/// (so the running test is always known), and applies the test filter.
-fn run_settings(collector: &Path, filter: Option<&str>) -> String {
-    let filter = filter
-        .map(|f| format!("\n    <TestCaseFilter>{}</TestCaseFilter>", xml(f)))
-        .unwrap_or_default();
-    format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<RunSettings>
-  <RunConfiguration>
-    <DisableParallelization>true</DisableParallelization>{filter}
-  </RunConfiguration>
-  <InProcDataCollectionRunSettings>
-    <InProcDataCollectors>
-      <InProcDataCollector friendlyName="DgfCollector" uri="InProcDataCollector://dog-food/DgfCollector/1.0" assemblyQualifiedName="DogFood.Collector.DgfCollector, DgfCollector, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null" codebase="{}" />
-    </InProcDataCollectors>
-  </InProcDataCollectionRunSettings>
-  <xUnit>
-    <ParallelizeTestCollections>false</ParallelizeTestCollections>
-    <MaxParallelThreads>1</MaxParallelThreads>
-  </xUnit>
-  <NUnit>
-    <NumberOfTestWorkers>0</NumberOfTestWorkers>
-  </NUnit>
-  <MSTest>
-    <Parallelize>
-      <Workers>1</Workers>
-    </Parallelize>
-  </MSTest>
-</RunSettings>
-"#,
-        xml(&collector.to_string_lossy())
-    )
-}
-
-fn xml(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1910,28 +1751,6 @@ mod tests {
         assert!(!missing_reference(&[
             r"D:\s\A.cs(3,1): error CS0165: Use of unassigned local variable 'f'".to_string()
         ]));
-    }
-
-    #[test]
-    fn filters_escape_special_characters_and_have_no_length_limit() {
-        assert_eq!(
-            filter(&["A.B.C", "A.B.D(x)"]),
-            "FullyQualifiedName=A.B.C|FullyQualifiedName=A.B.D\\(x\\)"
-        );
-        let many: Vec<String> = (0..2000)
-            .map(|i| format!("Namespace.Class.Test{i}"))
-            .collect();
-        assert!(filter(&many.iter().map(String::as_str).collect::<Vec<_>>()).len() > 24_000);
-    }
-
-    #[test]
-    fn run_settings_carry_the_filter_as_xml() {
-        let text = run_settings(Path::new("C:/x/DgfCollector.dll"), Some("(A~x)&(B=y|C<z)"));
-        assert!(
-            text.contains("<TestCaseFilter>(A~x)&amp;(B=y|C&lt;z)</TestCaseFilter>"),
-            "{text}"
-        );
-        assert!(!run_settings(Path::new("x.dll"), None).contains("TestCaseFilter"));
     }
 
     #[test]
@@ -2001,27 +1820,6 @@ mod tests {
             "(FullyQualifiedName!~Slow)&FullyQualifiedName~A"
         )));
         assert!(!splittable(Some("Category=Unit")));
-    }
-
-    #[test]
-    fn msbuild_properties_give_the_test_assembly_and_whether_it_is_a_platform_app() {
-        let vstest = r#"{"Properties": {"TargetPath": "C:\\s\\bin\\Debug\\net10.0\\Shop.Tests.dll", "IsTestingPlatformApplication": ""}}"#;
-        assert_eq!(
-            target_properties(vstest),
-            Some((
-                PathBuf::from(r"C:\s\bin\Debug\net10.0\Shop.Tests.dll"),
-                false
-            ))
-        );
-        let mtp = r#"{"Properties": {"TargetPath": "/s/bin/Shop.Tests.dll", "IsTestingPlatformApplication": "true"}}"#;
-        assert_eq!(target_properties(mtp).map(|(_, mtp)| mtp), Some(true));
-        // Several target frameworks: no TargetPath.
-        assert_eq!(
-            target_properties(
-                r#"{"Properties": {"TargetPath": "", "IsTestingPlatformApplication": ""}}"#
-            ),
-            None
-        );
     }
 
     #[test]
@@ -2102,31 +1900,69 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("dgf");
         std::fs::write(&exe, "").unwrap();
-        assert_eq!(shipped_mtp(&exe), None);
-        let folder = dir.path().join("engine").join("mtp");
+        assert_eq!(shipped(&exe, "worker", "DgfWorker.dll"), None);
+        let folder = dir.path().join("engine").join("worker");
         std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(folder.join("DgfMtp.dll"), "").unwrap();
-        assert!(shipped_mtp(&exe)
+        std::fs::write(folder.join("DgfWorker.dll"), "").unwrap();
+        assert!(shipped(&exe, "worker", "DgfWorker.dll")
             .unwrap()
-            .ends_with("engine/mtp/DgfMtp.dll"));
+            .ends_with("engine/worker/DgfWorker.dll"));
     }
 
     #[test]
-    fn results_keep_the_worst_outcome_the_assembly_and_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let sandbox = absolute(dir.path());
-        let file = sandbox.join("tests").join("ShopTests.cs");
-        std::fs::write(
-            sandbox.join("r.txt"),
-            format!("T.a\tpassed\tC:/x/Shop.Tests.dll\t{0}\nT.a\tfailed\tC:/x/Shop.Tests.dll\t{0}\nT.b\tpassed\tC:/x/Shop.Tests.dll\t\n", file.display()),
+    fn modern_target_frameworks_have_a_version() {
+        assert_eq!(version_of("net10.0"), Some((10, 0)));
+        assert_eq!(version_of("net8.0-windows"), Some((8, 0)));
+        assert_eq!(version_of("netcoreapp3.1"), Some((3, 1)));
+        assert_eq!(version_of("net48"), None);
+        assert_eq!(version_of("net462"), None);
+        assert_eq!(version_of("netstandard2.0"), None);
+    }
+
+    #[test]
+    fn several_target_frameworks_run_on_the_newest_this_machine_has() {
+        let has = |frameworks: &str, runtimes: &[u32]| newest_runnable(frameworks, runtimes);
+        assert_eq!(has("net48;net8.0;net10.0", &[8, 10]).unwrap(), "net10.0");
+        assert_eq!(has("net8.0;net10.0", &[8]).unwrap(), "net8.0");
+        // None installed: the newest, whose worker then says what is missing.
+        assert_eq!(has("net8.0;net10.0", &[6]).unwrap(), "net10.0");
+        let refused = has("net48;net472", &[10]).unwrap_err();
+        assert!(refused.contains("net48;net472"), "{refused}");
+    }
+
+    #[test]
+    fn the_runtimes_listing_gives_major_versions() {
+        let listing = "Microsoft.AspNetCore.App 9.0.1 [C:\\x]\nMicrosoft.NETCore.App 8.0.2 [C:\\x]\nMicrosoft.NETCore.App 11.0.0-rc.2.26504.105 [C:\\x]\n";
+        assert_eq!(runtimes_in(listing), [8, 11]);
+    }
+
+    #[test]
+    fn msbuild_says_what_a_project_builds() {
+        let one = parse_properties(
+            r#"{"Properties":{"TargetPath":"C:\\t\\A.dll","TargetFramework":"net10.0","TargetFrameworks":"","IsTestingPlatformApplication":"true"}}"#,
         )
         .unwrap();
-        let results = Results::read(&sandbox, &sandbox);
-        assert!(!results.outcome["T.a"]);
-        assert!(results.outcome["T.b"]);
-        assert_eq!(results.home["T.a"], "Shop.Tests");
-        assert_eq!(results.files["T.a"], "tests/ShopTests.cs");
-        assert!(!results.files.contains_key("T.b"));
+        assert_eq!(one.path, "C:\\t\\A.dll");
+        assert!(one.mtp);
+        let several = parse_properties(
+            r#"{"Properties":{"TargetPath":"","TargetFramework":"","TargetFrameworks":"net8.0;net10.0","IsTestingPlatformApplication":""}}"#,
+        )
+        .unwrap();
+        assert_eq!(several.frameworks, "net8.0;net10.0");
+        assert!(!several.mtp);
+        assert!(parse_properties("not json").is_none());
+    }
+
+    #[test]
+    fn dotnet_framework_is_refused_by_name() {
+        let properties = Properties {
+            path: "x.dll".into(),
+            framework: "net48".into(),
+            frameworks: String::new(),
+            mtp: false,
+        };
+        let why = target_of(&properties, None).err().unwrap();
+        assert!(why.contains(".NET Framework"), "{why}");
     }
 
     #[test]

@@ -26,7 +26,7 @@ pub struct TestSelection {
 pub struct TestProject {
     /// Relative to the repository root.
     pub path: PathBuf,
-    /// The assembly its tests come from, which the collector reports.
+    /// The assembly its tests come from.
     pub assembly: String,
     /// `dotnet test` filter for its tests.
     pub filter: Option<String>,

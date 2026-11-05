@@ -31,7 +31,7 @@ mutation score 14% · 3 killed, 5 survived, 14 no tests, 0 timeout, 0 did not co
 | survived | every test that reaches it passed: a gap | not detected |
 | no tests | no test reaches this code | not detected |
 | did not compile | removed before testing | left out |
-| crashed the test run | the test host ended before the tests it was asked for reported (dog-food's worker says so itself; a `dotnet test` run that failed with a planned test missing counts too), or no test reported at all | left out |
+| crashed the test run | the test host ended before the tests it was asked for reported (dog-food's worker says so itself), or no test reported at all | left out |
 | ignored | a `dgf-disable` comment, `ignore_methods`, `skip_plain_constructors` or `[ExcludeFromCodeCoverage]`; never tested | left out |
 | not tested | `--max-minutes` ran out first | left out |
 

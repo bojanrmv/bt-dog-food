@@ -104,8 +104,6 @@ pub struct Options {
     pub rerun_survivors: bool,
     /// One mutant per test run.
     pub no_mix: bool,
-    /// C#: tests run in dog-food's test worker, which stays running.
-    pub worker: bool,
     /// Report the cached results only; test nothing (`--cached`).
     pub cached_only: bool,
 }
@@ -379,9 +377,7 @@ pub enum TestRun {
     Failed,
     TimedOut,
     /// The test host ended before every test it was asked for reported:
-    /// the results it did report are partial. A worker says so itself; a
-    /// `dotnet test` run says so when a planned test is missing from a
-    /// failed run.
+    /// the results it did report are partial.
     Crashed,
 }
 
@@ -1007,7 +1003,6 @@ fn prepare(
             &scope.tests,
             scope.build,
             build_args(options),
-            options.worker,
             options.jobs,
         )?),
         sandbox::Kind::Node => Box::new(node::NodeTests::prepare(&sandbox.dir, &files)?),
@@ -1120,7 +1115,7 @@ fn log_start(prepared: &Prepared, scope: &Scope, options: &Options, started: Ins
     log::open(&exec::runs_folder(&prepared.sandbox.dir).join("dgf-mutate.log"));
     debug!(
         "run",
-        "dgf {} {:?}: {} mutants in {} files, jobs {}, worker {}, sandbox {}, prepared in {:.1} s",
+        "dgf {} {:?}: {} mutants in {} files, jobs {}, sandbox {}, prepared in {:.1} s",
         env!("CARGO_PKG_VERSION"),
         scope.kind,
         prepared
@@ -1130,7 +1125,6 @@ fn log_start(prepared: &Prepared, scope: &Scope, options: &Options, started: Ins
             .sum::<usize>(),
         prepared.files.len(),
         options.jobs,
-        options.worker,
         prepared.sandbox.dir.display(),
         secs(started)
     );
@@ -1943,7 +1937,6 @@ mod tests {
             low_priority: false,
             rerun_survivors: false,
             no_mix: false,
-            worker: true,
             cached_only: false,
         }
     }

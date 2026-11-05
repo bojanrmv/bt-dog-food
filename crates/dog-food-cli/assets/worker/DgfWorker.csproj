@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <!-- Runs on the test project's runtime (its runtimeconfig), so the oldest supported one. -->
-    <TargetFramework>net8.0</TargetFramework>
+    <!-- Runs on the test project's runtime (its runtimeconfig), so the oldest it can meet: a newer one will not load on .NET 6 or 7. -->
+    <TargetFramework>net6.0</TargetFramework>
     <AssemblyName>DgfWorker</AssemblyName>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>

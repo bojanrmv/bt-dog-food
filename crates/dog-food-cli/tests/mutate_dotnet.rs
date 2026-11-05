@@ -238,8 +238,6 @@ fn mutation_runs_on_a_testing_platform_app() {
     let root = &repository_of(PLATFORM_SAMPLE, "dotnet-mtp-sample");
     let (code, report) = run(root, &["--no-cache"]);
     assert_eq!(code, 0, "{report}");
-    let notes = report["notes"].to_string();
-    assert!(!notes.contains("dotnet test"), "{notes}");
     assert_eq!(outcome(&report, "Calc.Add", 9, "+ -> -"), "killed");
     assert_eq!(outcome(&report, "Calc.IsAdult", 11, ">= -> >"), "killed");
     // The loop never ends with `distance += step`.
@@ -292,8 +290,6 @@ fn mutation_runs_in_sets_on_xunit_v3() {
     let root = &repository_of(XUNIT3_SAMPLE, "dotnet-xunit3-sample");
     let (code, report) = run(root, &["--no-cache"]);
     assert_eq!(code, 0, "{report}");
-    let notes = report["notes"].to_string();
-    assert!(!notes.contains("dotnet test"), "{notes}");
     assert_eq!(outcome(&report, "Calc.Add", 9, "+ -> -"), "killed");
     assert_eq!(outcome(&report, "Calc.IsAdult", 11, ">= -> >"), "killed");
     assert_eq!(outcome(&report, "Calc.Count", 18, "-= -> +="), "timeout");
@@ -594,9 +590,8 @@ fn mutation_runs_on_a_dotnet_solution() {
         "{mutant_lines:?}"
     );
 
-    // One mutant per test run, at low priority, with fewer build nodes, and
-    // `dotnet test` for every run instead of the worker: the same verdicts
-    // as packed runs in warm workers.
+    // One mutant per test run, at low priority, with fewer build nodes: the
+    // same verdicts as packed runs.
     let (_, alone) = run(
         root,
         &[
@@ -604,7 +599,6 @@ fn mutation_runs_on_a_dotnet_solution() {
             "--exclude-test-project",
             EXCLUDE_ACCEPTANCE,
             "--no-mix",
-            "--no-worker",
             "--low-priority",
             "--build-jobs",
             "2",
@@ -634,9 +628,12 @@ fn mutation_runs_on_a_dotnet_solution() {
     let tested =
         tally("killed") + tally("survived") + tally("timeout") + tally("runtimeError") - unchanged;
     let retries = alone["timings"]["retries"].as_u64().unwrap();
-    assert_eq!(
-        alone["timings"]["testRuns"].as_u64().unwrap(),
-        tested + retries,
+    // Catalog.Build's mutant is in setup that runs once per process: a worker
+    // that already ran it passes without the mutant taking effect, and the
+    // mutant runs once more in a fresh process.
+    let runs = alone["timings"]["testRuns"].as_u64().unwrap();
+    assert!(
+        (tested + retries..=tested + retries + 1).contains(&runs),
         "{alone}"
     );
 

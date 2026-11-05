@@ -8,7 +8,6 @@ Value is the expected gain for teams using dgf. Effort is S (a day or two), M (a
 
 | What | Value | Effort | Notes |
 | --- | --- | --- | --- |
-| Microsoft Testing Platform runner | high | L | Without it, dgf only runs tests through VSTest (`dotnet test` with a data collector). xUnit v3, MSTest and NUnit on MTP, and TUnit (which only runs on MTP), need it. An MTP runner can also keep the test host alive between runs. |
 | NUnit and MSTest end-to-end samples | high | S | Both run through VSTest like xUnit, and test names are escaped for filters (NUnit puts arguments in names), but only xUnit has an end-to-end test. |
 | Linux and macOS in CI | medium | S | The end-to-end tests only run on Windows today. Timeouts use CPU time through Windows job objects; elsewhere they fall back to wall time. |
 | A test host that stays up | medium | M | Each test run pays about 3 s to start; keeping the host (or Vitest) running saves about 12% on a large run. |

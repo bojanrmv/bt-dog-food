@@ -87,9 +87,6 @@ warn = 10
 # jobs = 3
 # build_jobs = 2
 # low_priority = true
-# C#: false starts `dotnet test` for every test run instead of keeping dog-food's
-# test worker running between runs.
-# worker = true
 # Score bands: high and low color the report; below break, dgf exits with code 1.
 # thresholds = { high = 80, low = 60, break = 50 }
 "#;
@@ -141,9 +138,6 @@ pub struct MutateConfig {
     pub build_jobs: Option<usize>,
     /// Run at below-normal priority.
     pub low_priority: bool,
-    /// C#: run tests in dog-food's test worker, which stays running between
-    /// test runs (default); `false` starts `dotnet test` for every run.
-    pub worker: Option<bool>,
 }
 
 /// Mutation score bands: `high` and `low` color

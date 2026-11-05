@@ -1,7 +1,7 @@
 // dog-food's test worker for Microsoft.Testing.Platform test applications
 // (xUnit v3, the MSTest runner, TUnit): it starts the test application once in
 // the platform's server mode and keeps it running, so every later test run
-// costs only its tests. The test application has no VSTest collector to say
+// costs only its tests. The test application has nothing to say from outside
 // which test runs, so a planned run asks for one test at a time and tells the
 // mutant switches the test and its mutant through a small control file
 // (DGF_CONTROL), which they read again when its first four bytes change.
