@@ -400,6 +400,10 @@ pub struct TestResults {
     /// test; `None` when the run cannot tell (a runner without the check).
     /// A planned pair not here ran the original code: its pass says nothing.
     pub activated: Option<BTreeSet<(String, usize)>>,
+    /// The run stopped at its time limit; these results are what it reported first.
+    pub timed_out: bool,
+    /// Tests that had started and not reported when it stopped.
+    pub running: BTreeSet<String>,
 }
 
 impl TestResults {
@@ -539,6 +543,10 @@ pub trait Engine: Sync {
         Vec::new()
     }
 }
+
+/// How often a mutant goes back in the packs after a run hit its time limit
+/// in another mutant's test, before it gets a solo run.
+const CUT_SHORT: u32 = 3;
 
 /// Most tests in one pack, so a run stays short enough to repeat.
 const PACK_TESTS: usize = 200;
@@ -1389,6 +1397,10 @@ struct Resolved {
     /// or their mutant never took effect in a planned test. For a solo run
     /// in a fresh process.
     fresh: Vec<usize>,
+    /// The run hit its time limit in another mutant's test before these
+    /// mutants' tests all ran, with the ones that did and passed: they go
+    /// back in the next round's packs.
+    cut_short: Vec<(usize, BTreeSet<String>)>,
 }
 
 /// Runs the reached mutants in packs, in rounds: most fail their quickest
@@ -1409,6 +1421,7 @@ fn packed(
     let mut solo = BTreeSet::new();
     let mut fresh = BTreeSet::new();
     let mut tried: HashMap<usize, BTreeSet<String>> = HashMap::new();
+    let mut cut: HashMap<usize, u32> = HashMap::new();
     let mut open = reached.to_vec();
     let mut count = 1;
     progress(&format!(
@@ -1437,6 +1450,18 @@ fn packed(
         solo.extend(resolved.fresh.iter().copied());
         fresh.extend(resolved.fresh);
         open = resolved.passed;
+        // Each timed-out pack gave up on the mutant whose test was running,
+        // so this ends; the limit is for a run that keeps stopping anyway.
+        for (id, ran) in resolved.cut_short {
+            let times = cut.entry(id).or_insert(0);
+            *times += 1;
+            if *times > CUT_SHORT {
+                solo.insert(id);
+            } else {
+                tried.entry(id).or_default().extend(ran);
+                open.push(id);
+            }
+        }
         count *= 2;
     }
     Ok(Packed {
@@ -1568,11 +1593,16 @@ fn run_packs(
                         - found.fresh.len(),
                     found.undecided.len(),
                     found.fresh.len(),
-                    if run.is_none() { " (timed out)" } else { "" }
+                    if run.as_ref().is_none_or(|r| r.timed_out) {
+                        " (timed out)"
+                    } else {
+                        ""
+                    }
                 );
                 resolved.passed.extend(found.passed);
                 resolved.undecided.extend(found.undecided);
                 resolved.fresh.extend(found.fresh);
+                resolved.cut_short.extend(found.cut_short);
             }
             Ok(Ran::Skipped) => debug!("packs", "p{index}: skipped, no time left"),
             Err(err) => {
@@ -1707,7 +1737,7 @@ impl<'a> Runner<'a> {
                     self.within_budget(
                         self.timeouts.limit(self.reach, Some(&tests)),
                         |limit| self.engine.pack(p, self.reach, limit, &format!("p{i}")),
-                        |run| run.is_none(),
+                        |run| run.as_ref().is_none_or(|r| r.timed_out),
                     )
                 })
                 .collect()
@@ -1865,7 +1895,16 @@ fn resolve(
         } else if !failed.is_empty() {
             found.fresh.push(id);
         } else if tests.iter().any(|t| !results.outcome.contains_key(t)) {
-            found.undecided.push(id);
+            if results.timed_out && !tests.iter().any(|t| results.running.contains(t)) {
+                let ran = tests
+                    .iter()
+                    .filter(|t| results.outcome.contains_key(*t) && results.activated(t, id))
+                    .cloned()
+                    .collect();
+                found.cut_short.push((id, ran));
+            } else {
+                found.undecided.push(id);
+            }
         } else if tests.iter().any(|t| !results.activated(t, id)) {
             found.fresh.push(id);
         } else {
@@ -1911,6 +1950,52 @@ mod tests {
 
     fn set(tests: &[&str]) -> BTreeSet<String> {
         tests.iter().map(|t| t.to_string()).collect()
+    }
+
+    /// A pack stopped at its time limit: the mutant whose test was running
+    /// gets a solo run, a mutant whose tests had not started goes back in
+    /// the packs with what it already passed, and what was decided stands.
+    #[test]
+    fn a_timed_out_pack_keeps_what_it_reported() {
+        let reach = reach(&[
+            (1, &["Passed", "Later"]),
+            (2, &["Hangs"]),
+            (3, &["Failed"]),
+            (4, &["Whole"]),
+        ]);
+        let mut pack = Pack::default();
+        for id in [1, 2, 3, 4] {
+            place(&mut pack, id, &reach.by_mutant[&id]);
+        }
+        let outcome = [("Passed", true), ("Failed", false), ("Whole", true)]
+            .map(|(test, passed)| (test.to_string(), passed));
+        let run = Some(TestResults {
+            timed_out: true,
+            running: set(&["Hangs"]),
+            ..TestResults::of(outcome.into())
+        });
+        let mut outcomes = HashMap::new();
+        let mut killers = HashMap::new();
+        let found = resolve(&pack, &reach, &run, &mut outcomes, &mut killers);
+        assert_eq!(found.undecided, [2]);
+        assert_eq!(found.passed, [4]);
+        assert_eq!(found.cut_short, [(1, set(&["Passed"]))]);
+        assert_eq!(outcomes[&3], Outcome::Killed);
+        assert!(found.fresh.is_empty());
+    }
+
+    /// With nothing said about what was running, nothing can be kept apart.
+    #[test]
+    fn a_timed_out_pack_that_names_no_running_test_decides_only_what_finished() {
+        let reach = reach(&[(1, &["A"]), (2, &["B"])]);
+        let mut pack = Pack::default();
+        for id in [1, 2] {
+            place(&mut pack, id, &reach.by_mutant[&id]);
+        }
+        let mut outcomes = HashMap::new();
+        let found = resolve(&pack, &reach, &None, &mut outcomes, &mut HashMap::new());
+        assert_eq!(found.undecided, [1, 2]);
+        assert!(found.cut_short.is_empty());
     }
 
     #[test]
@@ -2044,7 +2129,8 @@ mod tests {
             Resolved {
                 passed: vec![2],
                 undecided: vec![],
-                fresh: vec![1, 3]
+                fresh: vec![1, 3],
+                cut_short: vec![],
             }
         );
     }
@@ -2379,7 +2465,8 @@ mod tests {
             Resolved {
                 passed: vec![1],
                 undecided: vec![2],
-                fresh: vec![]
+                fresh: vec![],
+                cut_short: vec![],
             }
         );
         assert_eq!(

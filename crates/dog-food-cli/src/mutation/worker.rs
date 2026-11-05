@@ -71,15 +71,18 @@ pub struct Report {
     pub activated: BTreeSet<(String, usize)>,
     /// After a plan: failed tests that fail without their mutant too.
     pub polluted: BTreeSet<String>,
+    /// Tests that said they started and have reported no result.
+    pub running: BTreeSet<String>,
 }
 
 #[derive(Debug)]
 pub enum Reply {
     Done(Report),
-    /// Past the limit: the worker was stopped. `busy` when it kept a
-    /// processor busy all along, as an endless loop does.
+    /// Past the limit: the worker was stopped, with what it reported first.
+    /// `busy` when it kept a processor busy all along, as an endless loop does.
     TimedOut {
         busy: bool,
+        report: Report,
     },
     /// The worker ended before it finished (a mutant crashed it), with the
     /// tests it reported first.
@@ -292,8 +295,8 @@ impl Worker {
                 Err(RecvTimeoutError::Disconnected) => return Reply::Crashed(report),
                 Err(RecvTimeoutError::Timeout) => {}
             }
-            if let Some(stopped) = self.over(started, before, limit) {
-                return stopped;
+            if let Some(busy) = self.over(started, before, limit) {
+                return Reply::TimedOut { busy, report };
             }
         }
     }
@@ -305,17 +308,19 @@ impl Worker {
             report.activated.insert(pair);
         } else if let Some(test) = line.strip_prefix("polluted\t") {
             report.polluted.insert(test.trim().to_string());
-        } else {
-            report.rows.extend(row(line));
+        } else if let Some(test) = line.strip_prefix("running\t") {
+            report.running.insert(test.trim().to_string());
+        } else if let Some(row) = row(line) {
+            report.running.remove(&row.test);
+            report.rows.push(row);
         }
     }
 
-    /// `TimedOut` when the request is past its limit.
-    fn over(&self, started: Instant, before: Option<Duration>, limit: Duration) -> Option<Reply> {
+    /// When the request is past its limit: whether it kept a processor busy.
+    fn over(&self, started: Instant, before: Option<Duration>, limit: Duration) -> Option<bool> {
         let used = self.used_since(before);
-        exec::past_limit(started.elapsed(), used, limit).then(|| Reply::TimedOut {
-            busy: used.is_some_and(|used| used >= limit),
-        })
+        exec::past_limit(started.elapsed(), used, limit)
+            .then(|| used.is_some_and(|used| used >= limit))
     }
 
     fn used_since(&self, before: Option<Duration>) -> Option<Duration> {
@@ -335,8 +340,11 @@ impl Worker {
     ) {
         let (verdict, rows): (&str, &[Row]) = match reply {
             Reply::Done(report) => ("done", &report.rows),
-            Reply::TimedOut { busy: true } => ("timed out, busy all along", &[]),
-            Reply::TimedOut { busy: false } => ("timed out", &[]),
+            Reply::TimedOut { busy: true, report } => ("timed out, busy all along", &report.rows),
+            Reply::TimedOut {
+                busy: false,
+                report,
+            } => ("timed out", &report.rows),
             Reply::Crashed(report) => ("crashed", &report.rows),
         };
         debug!(

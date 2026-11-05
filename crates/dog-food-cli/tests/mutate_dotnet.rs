@@ -12,6 +12,8 @@ use serde_json::Value;
 const SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/e2e/dotnet");
 /// An MSTest project on Microsoft.Testing.Platform (the MSTest runner).
 const PLATFORM_SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/e2e/dotnet-mtp");
+/// An xUnit v3 project on Microsoft.Testing.Platform: many tests in one request.
+const XUNIT3_SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/e2e/dotnet-xunit3");
 const EXCLUDE_ACCEPTANCE: &str = "**/*.Acceptance.Tests.csproj";
 
 fn has_tools() -> bool {
@@ -263,6 +265,65 @@ fn mutation_runs_on_a_testing_platform_app() {
         "{report}"
     );
     // Built once, before the first test: the test reads the second step.
+    let build = report["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "Calc.Build")
+        .unwrap();
+    let outcomes: Vec<&str> = build["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, ["survived", "killed"], "{build}");
+}
+
+/// xUnit v3 says which test runs, so sets of tests go in one request: the
+/// same verdicts as one request per test, a hang and a dead test application
+/// included, whichever thread or nested class a test uses.
+#[test]
+fn mutation_runs_in_sets_on_xunit_v3() {
+    if !has_tools() {
+        eprintln!("skipped: needs git and a .NET 10 SDK (or DGF_SKIP_E2E is set)");
+        return;
+    }
+    let root = &repository_of(XUNIT3_SAMPLE, "dotnet-xunit3-sample");
+    let (code, report) = run(root, &["--no-cache"]);
+    assert_eq!(code, 0, "{report}");
+    let notes = report["notes"].to_string();
+    assert!(!notes.contains("dotnet test"), "{notes}");
+    assert_eq!(outcome(&report, "Calc.Add", 9, "+ -> -"), "killed");
+    assert_eq!(outcome(&report, "Calc.IsAdult", 11, ">= -> >"), "killed");
+    assert_eq!(outcome(&report, "Calc.Count", 18, "-= -> +="), "timeout");
+    assert_eq!(
+        outcome(&report, "Calc.Guarded", 28, "< -> <="),
+        "runtime-error",
+        "{report}"
+    );
+    assert_eq!(outcome(&report, "Calc.Doubled", 45, "* -> /"), "killed");
+    assert_eq!(
+        outcome(&report, "Calc.Scaled", 53, ">= -> >"),
+        "survived",
+        "{report}"
+    );
+    // Reached on another thread, from a nested class, and only in a class fixture.
+    assert_eq!(
+        outcome(&report, "Calc.Later", 64, "- -> +"),
+        "killed",
+        "{report}"
+    );
+    assert_eq!(
+        outcome(&report, "Calc.Half", 62, "/ -> *"),
+        "killed",
+        "{report}"
+    );
+    assert_eq!(
+        outcome(&report, "Calc.Fixed", 59, "+ -> -"),
+        "killed",
+        "{report}"
+    );
     let build = report["functions"]
         .as_array()
         .unwrap()

@@ -19,7 +19,9 @@
 //               from AppDomain data "DgfPlan" and "DgfReach" instead
 //   DGF_CONTROL a file dog-food's worker for Microsoft.Testing.Platform maps
 //               (it runs one test at a time): four bytes that change with each
-//               run, the text's length, then "test\nmutant id\nreach folder\nactivated file"
+//               run, the text's length, then "test\nmutant id\nreach folder\nactivated file\nplan";
+//               with a plan ("*" for none, else a file of "test<TAB>mutant id" lines) a set of tests
+//               runs in one request, and xUnit v3 says which of them is running
 // </auto-generated>
 #nullable disable
 #pragma warning disable
@@ -45,6 +47,8 @@ namespace DogFood.Mutation
         private static int controlMutant = -1;
         private static string controlReach;
         private static string controlActivated;
+        private static string controlPlanned;
+        private static System.Collections.Generic.Dictionary<string, int> controlPlan;
 
         public static bool Is(int id)
         {
@@ -76,7 +80,7 @@ namespace DogFood.Mutation
         private static void Activated(string test, int id)
         {
             var pair = test + "\t" + id;
-            if (InWorker)
+            if (InWorker && Control == null) // The testing platform's worker sets DGF_WORKER too, and reads the file.
             {
                 var set = System.AppDomain.CurrentDomain.GetData("DgfActivated") as System.Collections.Concurrent.ConcurrentDictionary<string, bool>;
                 if (set != null)
@@ -122,7 +126,10 @@ namespace DogFood.Mutation
         {
             if (Control != null)
             {
-                return controlMutant == id;
+                int inSet;
+                return controlPlanned != null
+                    ? controlPlan != null && controlPlan.TryGetValue(test, out inSet) && inSet == id
+                    : controlMutant == id;
             }
             var plan = InWorker
                 ? System.AppDomain.CurrentDomain.GetData("DgfPlan") as System.Collections.Generic.Dictionary<string, int>
@@ -217,6 +224,8 @@ namespace DogFood.Mutation
                 controlMutant = int.TryParse(Part(parts, 1) ?? "", out var mutant) ? mutant : -1;
                 controlReach = Part(parts, 2);
                 controlActivated = Part(parts, 3);
+                controlPlanned = Part(parts, 4);
+                controlPlan = controlPlanned != null && controlPlanned != "*" ? ReadPlanFile(controlPlanned) : null;
                 System.Threading.Volatile.Write(ref controlRun, run);
             }
         }
@@ -235,10 +244,73 @@ namespace DogFood.Mutation
             if (Control != null)
             {
                 ReadControl();
-                return controlTest;
+                return controlPlanned != null ? XunitName() : controlTest;
             }
             var name = NUnitTest != null ? NUnitTest() : null;
             return name ?? System.AppDomain.CurrentDomain.GetData("DgfTest") as string ?? "";
+        }
+
+        private static readonly System.Func<object> XunitCase = FindXunit();
+        [System.ThreadStatic]
+        private static object xunitLastCase;
+        [System.ThreadStatic]
+        private static string xunitLastName;
+
+        /// The test xUnit v3 is running on this thread or task, as the worker
+        /// names it (class and method); empty outside one (a fixture). Asked
+        /// on every hit of a switch: the name is kept while the test case is
+        /// the same.
+        private static string XunitName()
+        {
+            var running = XunitCase != null ? XunitCase() : null;
+            if (running == null)
+            {
+                return "";
+            }
+            if (!object.ReferenceEquals(running, xunitLastCase))
+            {
+                xunitLastName = Text(running, "TestClassName") + "." + Text(running, "TestMethodName");
+                xunitLastCase = running;
+            }
+            return xunitLastName;
+        }
+
+        private static string Text(object from, string name)
+        {
+            foreach (var type in System.Linq.Enumerable.Concat(new[] { from.GetType() }, from.GetType().GetInterfaces()))
+            {
+                var property = type.GetProperty(name);
+                if (property != null)
+                {
+                    return property.GetValue(from) as string ?? "";
+                }
+            }
+            return "";
+        }
+
+        /// xUnit v3's TestContext.Current.TestCase, compiled once; null when
+        /// the tests are not xUnit v3's.
+        private static System.Func<object> FindXunit()
+        {
+            try
+            {
+                var context = System.Type.GetType("Xunit.TestContext, xunit.v3.core", false);
+                var current = context == null ? null : context.GetProperty("Current");
+                // Current is declared as an interface, which holds TestCase too.
+                var testCase = current == null ? null : current.PropertyType.GetProperty("TestCase");
+                if (current == null || testCase == null)
+                {
+                    return null;
+                }
+                var body = System.Linq.Expressions.Expression.Convert(
+                    System.Linq.Expressions.Expression.Property(System.Linq.Expressions.Expression.Property(null, current), testCase),
+                    typeof(object));
+                return System.Linq.Expressions.Expression.Lambda<System.Func<object>>(body).Compile();
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         /// NUnit's TestContext.CurrentContext.Test: its FullName inside a test
@@ -454,7 +526,11 @@ namespace DogFood.Mutation
 
         private static System.Collections.Generic.Dictionary<string, int> ReadPlan()
         {
-            var path = System.Environment.GetEnvironmentVariable("DGF_PLAN");
+            return ReadPlanFile(System.Environment.GetEnvironmentVariable("DGF_PLAN"));
+        }
+
+        private static System.Collections.Generic.Dictionary<string, int> ReadPlanFile(string path)
+        {
             if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path))
             {
                 return null;

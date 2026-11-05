@@ -201,7 +201,8 @@ impl Dotnet {
             results.add(one_results);
             results.walls.insert(assembly, wall);
         }
-        if status == TestRun::TimedOut {
+        // What a planned run reported before it timed out still counts.
+        if status == TestRun::TimedOut && !matches!(ask, Ask::Plan(..)) {
             return Ok((status, Results::default()));
         }
         Ok((status, results))
@@ -277,7 +278,7 @@ impl Dotnet {
                 return self.in_command(project, filter, ask, limit, folder, index);
             }
         };
-        if let (Ask::Reach(reached), true) = (ask, !target.mtp && splittable(filter)) {
+        if let (Ask::Reach(reached), true) = (ask, splittable(filter)) {
             return self.reach_split(
                 project, target, worker, filter, reached, limit, folder, index,
             );
@@ -425,9 +426,18 @@ impl Dotnet {
                     self.results(project, report, matches!(ask, Ask::Plan(..))),
                 )
             }
-            Reply::TimedOut { .. } => {
+            Reply::TimedOut { report, .. } => {
                 worker.stop();
-                (TestRun::TimedOut, Results::default())
+                let planned = matches!(ask, Ask::Plan(..));
+                let running = report.running.clone();
+                let mut results = self.results(project, report, planned);
+                results.running = running;
+                if planned {
+                    // The worker never got to say which mutants took effect.
+                    results.activated =
+                        activated_in(&folder.join(format!("plan-{index}.txt.activated")));
+                }
+                (TestRun::TimedOut, results)
             }
             Reply::Crashed(report) => {
                 let _ = std::fs::copy(&worker.log, folder.join(exec::log_name(index)));
@@ -555,6 +565,9 @@ impl Dotnet {
                         scope.spawn(move || {
                             let target = target_path(&p.path)
                                 .and_then(|(dll, mtp)| Target::of(&dll, mtp));
+                            if let Some(target) = target.as_ref().filter(|t| t.mtp) {
+                                xunit_one_at_a_time(&target.dll);
+                            }
                             (p.assembly.clone(), target)
                         })
                     })
@@ -944,7 +957,15 @@ impl Engine for Dotnet {
         let grouped = by_project(&pack.plan, reach);
         let (status, results) =
             self.run(&runs, Ask::Plan(&grouped, &plan), limit, &folder, false)?;
-        Ok((status != TestRun::TimedOut).then_some(results.into_test_results()))
+        let results = results.into_test_results();
+        // Nothing says which test was running: nothing to go on.
+        if status == TestRun::TimedOut && results.running.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(TestResults {
+            timed_out: status == TestRun::TimedOut,
+            ..results
+        }))
     }
 
     fn solo(
@@ -1205,6 +1226,34 @@ fn request_for(
     })
 }
 
+/// Makes xUnit v3 run one test at a time in the sandbox's build output, where
+/// a worker's request holds many tests: the time limit and the kill check
+/// count on it, and `--jobs` already spreads the runs over the processors.
+/// Keeps the project's other runner settings. Other frameworks' requests hold
+/// one test.
+fn xunit_one_at_a_time(dll: &Path) {
+    let Some(folder) = dll
+        .parent()
+        .filter(|f| f.join("xunit.v3.core.dll").is_file())
+    else {
+        return;
+    };
+    let own = dll.with_extension("xunit.runner.json");
+    let file = if own.is_file() {
+        own
+    } else {
+        folder.join("xunit.runner.json")
+    };
+    let mut settings = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    settings["parallelizeTestCollections"] = serde_json::json!(false);
+    settings["maxParallelThreads"] = serde_json::json!(1);
+    let _ = std::fs::write(&file, settings.to_string());
+}
+
 /// The "test<TAB>mutant" lines the switches wrote next to a plan for the
 /// planned mutants that took effect.
 fn activated_in(file: &Path) -> BTreeSet<(String, usize)> {
@@ -1341,6 +1390,8 @@ struct Results {
     polluted: BTreeSet<String>,
     /// The (test, mutant) pairs whose planned mutant took effect.
     activated: BTreeSet<(String, usize)>,
+    /// Tests that had started and not reported when the run timed out.
+    running: BTreeSet<String>,
     /// Whether the run reported activation at all (a plan run does).
     activation_known: bool,
 }
@@ -1352,6 +1403,8 @@ impl Results {
             outcome: self.outcome,
             polluted: self.polluted,
             activated: self.activation_known.then_some(self.activated),
+            running: self.running,
+            ..TestResults::default()
         }
     }
 
@@ -1363,6 +1416,7 @@ impl Results {
         self.times.extend(other.times);
         self.polluted.extend(other.polluted);
         self.activated.extend(other.activated);
+        self.running.extend(other.running);
         self.activation_known |= other.activation_known;
         self.walls.extend(other.walls);
     }

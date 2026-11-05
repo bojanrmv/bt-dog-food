@@ -16,6 +16,10 @@ static LOG: Mutex<Option<Log>> = Mutex::new(None);
 
 /// Starts the log at `path`, replacing a previous run's.
 pub fn open(path: &Path) {
+    // A new sandbox's runs folder does not exist yet.
+    if let Some(folder) = path.parent() {
+        let _ = std::fs::create_dir_all(folder);
+    }
     let Ok(file) = std::fs::File::create(path) else {
         return;
     };

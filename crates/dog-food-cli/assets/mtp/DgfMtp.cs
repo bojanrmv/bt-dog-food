@@ -5,6 +5,9 @@
 // which test runs, so a planned run asks for one test at a time and tells the
 // mutant switches the test and its mutant through a small control file
 // (DGF_CONTROL), which they read again when its first four bytes change.
+// xUnit v3 says which test runs inside the test process, so there a whole set
+// of tests goes in one request, which costs far less than a request per test:
+// the control file then only names the plan.
 //
 // Same requests and replies as dog-food's VSTest worker:
 //   plan<TAB>file[<TAB>nocheck]   file of "test<TAB>mutant id" lines: run those tests, each with its mutant;
@@ -14,9 +17,13 @@
 //                                 failure (a test application started with one mutant on)
 //   tests<TAB>file[<TAB>folder]   file holding a test filter (empty: every test): run the matching tests;
 //                                 with a folder, record which mutants each test reaches there
+//   list<TAB>file                 the tests a filter keeps, as results
+//   names<TAB>file[<TAB>folder]   run the tests named in the file, one per line; a folder records reach
 //   quit
 // Replies: "ready<TAB>tests" (or "error<TAB>why"), then per request "result<TAB>test<TAB>passed|failed<TAB>ms<TAB>file"
-// lines and "done".
+// lines and "done". While a plan runs, "running<TAB>test" says a test started and a passed test's result
+// comes at once, so a run stopped at its time limit keeps what it reported; a failed test's result waits
+// for the kill check.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -57,7 +64,8 @@ namespace DogFood.Mtp
             client.TestNodesUpdated += (_, update) => nodes.Add(update.Changes);
             await client.InitializeAsync();
             await client.DiscoverTestsAsync();
-            var server = new Server(client, nodes, control, nodes.Discovered(), protocol);
+            var batch = File.Exists(Path.Combine(Path.GetDirectoryName(tests) ?? ".", "xunit.v3.core.dll"));
+            var server = new Server(client, nodes, control, nodes.Discovered(), protocol, batch);
             protocol.WriteLine("ready\t" + server.Count);
             protocol.Flush();
             string? line;
@@ -77,9 +85,12 @@ namespace DogFood.Mtp
         private readonly Control control;
         private readonly Dictionary<string, List<string>> byName;
         private readonly StreamWriter protocol;
+        /// The switches know the running test by themselves (xUnit v3).
+        private readonly bool batch;
 
-        public Server(IMtpServerClient client, Nodes nodes, Control control, Dictionary<string, List<string>> byName, StreamWriter protocol)
+        public Server(IMtpServerClient client, Nodes nodes, Control control, Dictionary<string, List<string>> byName, StreamWriter protocol, bool batch)
         {
+            this.batch = batch;
             this.client = client;
             this.nodes = nodes;
             this.control = control;
@@ -109,6 +120,7 @@ namespace DogFood.Mtp
                 // the results it has and no "done", so dgf sees a crash and
                 // starts a new one, instead of pooling this one as warm.
                 Console.Error.WriteLine("dgf mtp worker: " + error);
+                results.Add(nodes.Finished());
                 Reply(results, false);
                 Environment.Exit(2);
             }
@@ -121,11 +133,21 @@ namespace DogFood.Mtp
             var third = parts.Length > 2 ? parts[2] : null;
             if (parts[0] == "plan")
             {
-                await Plan(File.ReadAllLines(parts[1]), third != "nocheck", results);
+                await Plan(parts[1], third != "nocheck", results);
             }
             else if (parts[0] == "tests")
             {
-                await Tests(File.ReadAllText(parts[1]).Trim(), third, results);
+                var matches = Filter.Parse(File.ReadAllText(parts[1]).Trim());
+                await Tests(byName.Keys.Where(matches).ToList(), third, results);
+            }
+            else if (parts[0] == "names")
+            {
+                await Tests(File.ReadAllLines(parts[1]).Where(byName.ContainsKey).ToList(), third, results);
+            }
+            else if (parts[0] == "list")
+            {
+                var matches = Filter.Parse(File.ReadAllText(parts[1]).Trim());
+                results.Add(byName.Keys.Where(matches).Select(n => (n, true, 0L, "")));
             }
             else if (parts[0] == "kill")
             {
@@ -135,18 +157,46 @@ namespace DogFood.Mtp
 
         /// dgf lists each mutant's tests quickest first; once one fails, the
         /// mutant is killed and its other tests are skipped. The kill check:
-        /// a failed test runs again at once with no mutant, and one that
-        /// fails again was failed by state the test application carries, so
-        /// every failed test of this request is reported polluted. The
-        /// switches note each planned mutant that took effect in a file
-        /// named in the control file.
-        private async Task Plan(string[] rows, bool check, Results results)
+        /// a failed test runs again with no mutant, and one that fails again
+        /// was failed by state the test application carries, so every failed
+        /// test of this request is reported polluted. The switches note each
+        /// planned mutant that took effect in a file next to the plan, which
+        /// dgf reads itself when it stops a run at its time limit.
+        private async Task Plan(string file, bool check, Results results)
+        {
+            var rows = File.ReadAllLines(file).Select(Row).Where(r => r.Id >= 0 && byName.ContainsKey(r.Name)).ToList();
+            var activated = file + ".activated";
+            nodes.Started = name => Write("running\t" + name);
+            nodes.Passed = (name, ms, source) =>
+            {
+                results.Streamed.Add(name);
+                Write("result\t" + name + "\tpassed\t" + ms + "\t" + source);
+            };
+            var failed = new List<string>();
+            try
+            {
+                var polluted = batch
+                    ? await PlanInSets(file, rows, check, activated, failed, results)
+                    : await PlanOneByOne(rows, check, activated, failed, results);
+                if (polluted)
+                {
+                    results.Polluted.AddRange(failed);
+                }
+            }
+            finally
+            {
+                nodes.Started = null;
+                nodes.Passed = null;
+            }
+            TakeActivated(activated, results);
+        }
+
+        /// One request per test: the switches learn the test from the control file.
+        private async Task<bool> PlanOneByOne(List<(string Name, int Id)> rows, bool check, string activated, List<string> failed, Results results)
         {
             var killed = new HashSet<int>();
-            var failed = new List<string>();
             var polluted = false;
-            var activated = control.Path + ".activated";
-            foreach (var (name, id) in rows.Select(Row).Where(r => r.Id >= 0 && byName.ContainsKey(r.Name)))
+            foreach (var (name, id) in rows)
             {
                 if (killed.Contains(id) || await RunOne(name, id, null, activated, results))
                 {
@@ -154,13 +204,92 @@ namespace DogFood.Mtp
                 }
                 killed.Add(id);
                 failed.Add(name);
-                polluted |= check && !await RunOne(name, -1, null, null, new Results());
+                polluted |= check && !await Quietly(() => RunOne(name, -1, null, null, new Results()));
             }
-            if (polluted)
+            return polluted;
+        }
+
+        /// One request per set: each mutant's first test, then the second
+        /// test of each mutant still alive, and so on, so a killed mutant's
+        /// other tests are still skipped. The kill check runs after each set.
+        private async Task<bool> PlanInSets(string file, List<(string Name, int Id)> rows, bool check, string activated, List<string> failed, Results results)
+        {
+            var killed = new HashSet<int>();
+            var mutantOf = new Dictionary<string, int>();
+            var sets = new List<List<(string Name, int Id)>>();
+            var taken = new Dictionary<int, int>();
+            foreach (var row in rows)
             {
-                results.Polluted.AddRange(failed);
+                taken.TryGetValue(row.Id, out var turn);
+                taken[row.Id] = turn + 1;
+                while (sets.Count <= turn)
+                {
+                    sets.Add(new List<(string Name, int Id)>());
+                }
+                sets[turn].Add(row);
+                mutantOf[row.Name] = row.Id;
             }
-            TakeActivated(activated, results);
+            var polluted = false;
+            var setFile = file + ".set";
+            foreach (var set in sets)
+            {
+                var alive = set.Where(r => !killed.Contains(r.Id)).ToList();
+                if (alive.Count == 0)
+                {
+                    continue;
+                }
+                File.WriteAllLines(setFile, alive.Select(r => r.Name + "\t" + r.Id));
+                control.Set("", -1, null, activated, setFile);
+                var finished = await RunSet(alive.Select(r => r.Name), results);
+                var bad = finished.Where(r => !r.Passed).Select(r => r.Name).Distinct().Where(mutantOf.ContainsKey).ToList();
+                foreach (var name in bad)
+                {
+                    killed.Add(mutantOf[name]);
+                    failed.Add(name);
+                }
+                if (check && bad.Count > 0)
+                {
+                    control.Set("", -1, null, null, Control.NoPlan);
+                    polluted |= await Quietly(async () => (await RunSet(bad, new Results())).Any(r => !r.Passed));
+                }
+            }
+            return polluted;
+        }
+
+        /// Runs `run` with no "running" lines or streamed results.
+        private async Task<bool> Quietly(Func<Task<bool>> run)
+        {
+            var (started, passed) = (nodes.Started, nodes.Passed);
+            nodes.Started = null;
+            nodes.Passed = null;
+            try
+            {
+                return await run();
+            }
+            finally
+            {
+                nodes.Started = started;
+                nodes.Passed = passed;
+            }
+        }
+
+        /// Runs the named tests in one request; what they reported.
+        private async Task<List<(string Name, bool Passed, long Milliseconds, string File)>> RunSet(IEnumerable<string> names, Results results)
+        {
+            nodes.Start();
+            await client.RunTestsAsync(names.SelectMany(n => byName[n]).ToList());
+            var finished = nodes.Finished();
+            results.Add(finished);
+            return finished;
+        }
+
+        private void Write(string line)
+        {
+            lock (protocol)
+            {
+                protocol.WriteLine(line);
+                protocol.Flush();
+            }
         }
 
         /// The pairs the switches noted in `file`, which is then removed.
@@ -176,12 +305,18 @@ namespace DogFood.Mtp
 
         /// Runs the named tests in that order and stops at the first failure:
         /// in a test application started with one mutant on, one failing test
-        /// decides it.
+        /// decides it. No test needs its own request here, so the requests
+        /// grow: the likeliest killers come first, and a survivor's long list
+        /// costs few requests.
         private async Task Kill(string[] names, Results results)
         {
-            foreach (var name in names.Where(byName.ContainsKey))
+            var known = names.Where(byName.ContainsKey).ToList();
+            control.Set("", -1, null, null, null);
+            var size = 1;
+            for (var at = 0; at < known.Count; at += size, size = Math.Min(size * 2, 256))
             {
-                if (!await RunOne(name, -1, null, null, results))
+                var finished = await RunSet(known.Skip(at).Take(size), results);
+                if (finished.Any(r => !r.Passed))
                 {
                     return;
                 }
@@ -194,17 +329,14 @@ namespace DogFood.Mtp
             return tab > 0 && int.TryParse(row.Substring(tab + 1), out var id) ? (row.Substring(0, tab), id) : ("", -1);
         }
 
-        /// Which test reaches what is only known one test at a time.
-        private async Task Tests(string filter, string? reach, Results results)
+        /// Which test reaches what is known one test at a time, unless the
+        /// switches know the running test themselves.
+        private async Task Tests(List<string> chosen, string? reach, Results results)
         {
-            var matches = Filter.Parse(filter);
-            var chosen = byName.Keys.Where(matches).ToList();
-            if (reach == null)
+            if (reach == null || batch)
             {
-                control.Set("", -1, null, null);
-                nodes.Start();
-                await client.RunTestsAsync(chosen.SelectMany(n => byName[n]).ToList());
-                results.Add(nodes.Finished());
+                control.Set("", -1, reach, null, reach == null ? null : Control.NoPlan);
+                await RunSet(chosen, results);
                 return;
             }
             foreach (var name in chosen)
@@ -216,17 +348,17 @@ namespace DogFood.Mtp
         /// Runs one test (every row of it); whether it passed.
         private async Task<bool> RunOne(string name, int mutant, string? reach, string? activated, Results results)
         {
-            control.Set(name, mutant, reach, activated);
-            nodes.Start();
-            await client.RunTestsAsync(byName[name]);
-            var finished = nodes.Finished();
-            results.Add(finished);
-            return finished.All(r => r.Item2);
+            var clock = Stopwatch.StartNew();
+            control.Set(name, mutant, reach, activated, null);
+            var finished = await RunSet(new[] { name }, results);
+            // A request costs more than its test: a time limit built from this counts it.
+            results.AtLeast(name, clock.ElapsedMilliseconds);
+            return finished.All(r => r.Passed);
         }
 
         private void Reply(Results results, bool done)
         {
-            foreach (var result in results.All)
+            foreach (var result in results.All.Where(r => !results.Streamed.Contains(r.Name)))
             {
                 protocol.WriteLine("result\t" + result.Name + "\t" + (result.Passed ? "passed" : "failed") + "\t" + result.Milliseconds + "\t" + result.File);
             }
@@ -247,10 +379,13 @@ namespace DogFood.Mtp
     }
 
     /// The control file the switches read: four bytes that change with each
-    /// run, then "test\nmutant id\nreach folder" in UTF-8.
+    /// run, then "test\nmutant id\nreach folder\nactivated file\nplan" in UTF-8.
+    /// With a plan the switches ask xUnit which test runs: the plan is a file
+    /// of "test<TAB>mutant id" lines, or NoPlan for none.
     internal sealed class Control : IDisposable
     {
         private const int Size = 64 * 1024;
+        public const string NoPlan = "*";
         private readonly MemoryMappedFile file;
         private readonly MemoryMappedViewAccessor view;
         private int generation;
@@ -272,9 +407,9 @@ namespace DogFood.Mtp
             return new Control(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dgf-control-" + Guid.NewGuid().ToString("N") + ".bin"));
         }
 
-        public void Set(string test, int mutant, string? reach, string? activated)
+        public void Set(string test, int mutant, string? reach, string? activated, string? plan)
         {
-            var text = Encoding.UTF8.GetBytes(test + "\n" + mutant + "\n" + (reach ?? "") + "\n" + (activated ?? ""));
+            var text = Encoding.UTF8.GetBytes(test + "\n" + mutant + "\n" + (reach ?? "") + "\n" + (activated ?? "") + "\n" + (plan ?? ""));
             view.Write(4, text.Length);
             view.WriteArray(8, text, 0, Math.Min(text.Length, Size - 8));
             view.Write(0, ++generation);
@@ -311,7 +446,18 @@ namespace DogFood.Mtp
         public readonly List<string> Activated = new List<string>();
         /// Failed tests whose failure the kill check could not pin on their mutant.
         public readonly List<string> Polluted = new List<string>();
+        /// Tests whose result already went out while the request ran.
+        public readonly HashSet<string> Streamed = new HashSet<string>();
         private readonly Dictionary<string, Result> byName = new Dictionary<string, Result>();
+
+        /// `name` took at least `milliseconds`.
+        public void AtLeast(string name, long milliseconds)
+        {
+            if (byName.TryGetValue(name, out var result))
+            {
+                result.Milliseconds = Math.Max(result.Milliseconds, milliseconds);
+            }
+        }
 
         public void Add(IEnumerable<(string Name, bool Passed, long Milliseconds, string File)> rows)
         {
@@ -337,6 +483,12 @@ namespace DogFood.Mtp
         private readonly Dictionary<string, string> state = new Dictionary<string, string>();
         private readonly Dictionary<string, Stopwatch> clocks = new Dictionary<string, Stopwatch>();
         private readonly Dictionary<string, long> times = new Dictionary<string, long>();
+        private readonly Stopwatch since = Stopwatch.StartNew();
+        private Dictionary<string, List<string>> uidsOf = new Dictionary<string, List<string>>();
+
+        /// Told when a test starts, and when all of a test's rows passed.
+        public Action<string>? Started;
+        public Action<string, long, string>? Passed;
 
         public void Add(IReadOnlyList<MtpTestNodeUpdate> changes)
         {
@@ -359,11 +511,24 @@ namespace DogFood.Mtp
             if (execution == "in-progress")
             {
                 clocks[uid] = Stopwatch.StartNew();
+                Started?.Invoke(known[uid].Name);
             }
             else if (execution != "discovered")
             {
                 state[uid] = execution;
-                times[uid] = Duration(uid, change);
+                // Tests run one at a time, so what came since the last one
+                // ended (a class fixture, the request itself) is this test's.
+                times[uid] = Math.Max(Duration(uid, change), since.ElapsedMilliseconds);
+                since.Restart();
+                TellPassed(known[uid].Name);
+            }
+        }
+
+        private void TellPassed(string name)
+        {
+            if (Passed != null && uidsOf.TryGetValue(name, out var uids) && uids.All(u => state.TryGetValue(u, out var s) && s == "passed"))
+            {
+                Passed(name, uids.Sum(u => times[u]), known[uids[0]].File);
             }
         }
 
@@ -384,7 +549,8 @@ namespace DogFood.Mtp
         {
             lock (gate)
             {
-                return known.GroupBy(k => k.Value.Name).ToDictionary(g => g.Key, g => g.Select(k => k.Key).ToList());
+                uidsOf = known.GroupBy(k => k.Value.Name).ToDictionary(g => g.Key, g => g.Select(k => k.Key).ToList());
+                return uidsOf;
             }
         }
 
@@ -394,10 +560,11 @@ namespace DogFood.Mtp
             {
                 state.Clear();
                 times.Clear();
+                since.Restart();
             }
         }
 
-        public List<(string, bool, long, string)> Finished()
+        public List<(string Name, bool Passed, long Milliseconds, string File)> Finished()
         {
             lock (gate)
             {
