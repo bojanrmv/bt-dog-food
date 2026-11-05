@@ -329,21 +329,13 @@ fn class(c: Class) -> CloneClass {
     }
 }
 
-/// Adds the engine's classes to `report`, but not one whose copies are the
-/// same functions a class already has: that one says it with more detail.
+/// Adds the engine's classes to `report`, but not one a syntactic class
+/// already covers: that one says it with more detail.
 pub fn merge(report: &mut Report, classes: Vec<CloneClass>, root: &Path) {
-    let functions = |c: &CloneClass| {
-        let mut f: Vec<(String, Option<String>)> = c
-            .copies
-            .iter()
-            .map(|copy| (copy.file.clone(), copy.function.clone()))
-            .collect();
-        f.sort();
-        f
-    };
-    let known: std::collections::BTreeSet<_> = report.classes.iter().map(functions).collect();
+    let syntactic = report.classes.len();
     for mut class in classes {
-        if class.kind != "query" && known.contains(&functions(&class)) {
+        let known = &report.classes[..syntactic];
+        if class.kind != "query" && known.iter().any(|k| says_the_same(k, &class)) {
             continue;
         }
         for copy in &mut class.copies {
@@ -354,6 +346,21 @@ pub fn merge(report: &mut Report, classes: Vec<CloneClass>, root: &Path) {
     report.classes.sort_by_key(|c| std::cmp::Reverse(c.saves));
     report.index(root);
     report.duplicated_lines = duplicated(&report.classes);
+}
+
+/// Whether `known` already reports every method of `class`: then uniting
+/// its copies unites them too. A group with more methods says more than
+/// `known` does, so it stays, and so does one `known` covers only a small
+/// part of: that the whole methods are equal is news.
+fn says_the_same(known: &CloneClass, class: &CloneClass) -> bool {
+    class.copies.iter().all(|method| {
+        known.copies.iter().any(|copy| {
+            let shared = copy.end_line.min(method.end_line) + 1;
+            let shared = shared.saturating_sub(copy.start_line.max(method.start_line));
+            let lines = method.end_line + 1 - method.start_line;
+            copy.file == method.file && copy.function == method.function && shared * 2 >= lines
+        })
+    })
 }
 
 /// A copy's code (a query brings its own: only its lines, not the
@@ -373,6 +380,71 @@ fn fill(copy: &mut Copy, file_lines: &mut std::collections::BTreeMap<String, usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A class with a copy per (function, first line, last line) in one file.
+    fn group(copies: &[(&str, usize, usize)]) -> CloneClass {
+        class(Class {
+            kind: "copies".to_string(),
+            entity: None,
+            copies: copies
+                .iter()
+                .map(|&(function, start_line, end_line)| Place {
+                    file: "A.cs".to_string(),
+                    start_line,
+                    end_line,
+                    function: function.to_string(),
+                    code: None,
+                })
+                .collect(),
+            lines: 10,
+            template: String::new(),
+            saves: 10,
+            unite: String::new(),
+            cautions: Vec::new(),
+            rules: Vec::new(),
+            confirmation: None,
+        })
+    }
+
+    #[test]
+    fn a_rewrite_is_left_out_when_a_copy_already_covers_its_methods() {
+        let rewrite = group(&[("A", 1, 10), ("B", 21, 30)]);
+        let same = group(&[("A", 1, 10), ("B", 21, 30)]);
+        let more = group(&[("A", 1, 10), ("B", 21, 30), ("C", 41, 50)]);
+        assert!(says_the_same(&same, &rewrite));
+        assert!(says_the_same(&more, &rewrite));
+    }
+
+    #[test]
+    fn a_rewrite_stays_when_it_says_more_than_the_copy() {
+        let rewrite = group(&[("A", 1, 10), ("B", 21, 30), ("C", 41, 50)]);
+        let fewer = group(&[("A", 1, 10), ("B", 21, 30)]);
+        assert!(!says_the_same(&fewer, &rewrite));
+        // Only a small part of each method is a copy.
+        let rewrite = group(&[("A", 1, 10), ("B", 21, 30)]);
+        let small = group(&[("A", 1, 3), ("B", 21, 23)]);
+        assert!(!says_the_same(&small, &rewrite));
+        // The copy is in other methods.
+        let other = group(&[("X", 1, 10), ("Y", 21, 30)]);
+        assert!(!says_the_same(&other, &rewrite));
+    }
+
+    #[test]
+    fn merging_leaves_out_covered_rewrites_but_never_a_repeated_query() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("A.cs"), "class A { }\n").unwrap();
+        let mut report = crate::scan(&[], dir.path(), false, crate::Settings::default());
+        report.classes = vec![group(&[("A", 1, 10), ("B", 21, 30), ("C", 41, 50)])];
+        let covered = group(&[("A", 1, 10), ("B", 21, 30)]);
+        let new = group(&[("D", 61, 70), ("E", 81, 90)]);
+        let mut query = group(&[("A", 1, 10), ("B", 21, 30)]);
+        query.kind = "query";
+        merge(&mut report, vec![covered, new, query], dir.path());
+        let functions = |c: &CloneClass| c.copies[0].function.clone().unwrap();
+        assert_eq!(report.classes.len(), 3, "{:#?}", report.classes);
+        assert!(report.classes.iter().any(|c| functions(c) == "D"));
+        assert!(report.classes.iter().any(|c| c.kind == "query"));
+    }
 
     #[test]
     fn projects_without_restored_packages_are_named() {
