@@ -98,8 +98,8 @@ enum Command {
     /// Create a commented dgf.toml in the current folder
     Init,
     /// Duplicated code that can be united: copies, near misses, reordered
-    /// statements and, with --semantic, C# that does the same thing written
-    /// differently and repeated queries (the same as `dgf-dup`)
+    /// statements and C# that does the same thing written differently and
+    /// repeated queries (the same as `dgf-dup`)
     #[command(visible_alias = "dup")]
     Duplication(dog_food_dup::cli::Args),
 }

@@ -21,8 +21,8 @@ cargo run -p dog-food-dup --bin dgf-dup-bench -- --report r.json  # score any to
 
 | Run | Types 1-3 | Type 4 | Wrong "equal" claims |
 | --- | --- | --- | --- |
-| syntactic engine alone | 14 of 15 | 1 of 47 | 0 |
-| with `--semantic` | 14 of 15 | 47 of 47 | 0 |
+| syntactic engine alone (`--no-semantic`) | 14 of 15 | 1 of 47 | 0 |
+| with the C# engine | 14 of 15 | 47 of 47 | 0 |
 | with `--confirm` | | all 17 groups confirmed by running | every near miss it can run told apart |
 
 ## Precision: real code, labelled by hand
@@ -40,7 +40,7 @@ dgf-dup-bench --real crates/dog-food-dup/tests/corpus/real/eshop.json --report e
 
 ## Speed
 
-| Code | Syntactic | With `--semantic` |
+| Code | `--no-semantic` or `--changes` | With the C# engine |
 | --- | --- | --- |
 | this repository (84 files) | under 1 s | |
 | an ASP.NET Core backend (2,000 files, 25 projects) | about 3 s | about 25 s |

@@ -7,7 +7,7 @@
 dotnet pack crates/dog-food-dup/semantic -c Release
 dotnet tool install -g dgf-dup-cs --add-source crates/dog-food-dup/semantic/nupkg
 
-dgf-dup --semantic                       # both engines, one report (any format, --changes too)
+dgf-dup                                  # both engines, one report (any format; --changes needs --semantic)
 dgf-dup-cs src -o semantic.json          # the engine alone, dgf-dup's JSON
 dgf-dup-cs src --explain -o NUL          # every method's canonical form, or why it was left out
 dgf-dup-cs src --errors --timings -o NUL # the compile errors that leave methods out, and each stage's time
@@ -15,7 +15,7 @@ dgf-dup-cs src --confirm -o semantic.json   # run each group on generated inputs
 dgf-dup-cs src --compare Orders.Total Orders.Sum   # two methods run on the same inputs: 0 agree, 1 differ, 2 not run
 ```
 
-`dgf dup --semantic` runs the engine given with `--semantic-engine` (an executable or its `.dll`), else `DGF_DUP_CS`, else the one in `engine/` beside the `dgf` binary (the `dgf` NuGet package ships it there), else `dgf-dup-cs` from PATH. A class the syntactic engine already reports for the same functions is not repeated.
+`dgf dup` runs the engine given with `--semantic-engine` (an executable or its `.dll`), else `DGF_DUP_CS`, else the one in `engine/` beside the `dgf` binary (the `dgf` NuGet package ships it there), else `dgf-dup-cs` from PATH. A class the syntactic engine already reports for the same functions is not repeated.
 
 ## How it works
 
@@ -90,6 +90,6 @@ With `--regions`, after its report the engine reads `[{file, startLine, endLine}
 - the jumps out;
 - whether it needs `this`.
 
-`dgf-dup --semantic` sends its syntactic C# copies this way, so their advice gets an exact signature without a second compile.
+`dgf-dup` sends its syntactic C# copies this way, so their advice gets an exact signature without a second compile.
 
 Next ([the plan](../../../docs/research/csharp-semantic-duplication.md)): Z3 for small pure functions, where generated inputs could miss a case.

@@ -9,7 +9,7 @@ dotnet tool install -g dgf
 dgf --version
 ```
 
-This is the native `dgf` binary for your platform (Windows, Linux or macOS, x64 or arm64), with the C# duplication engine beside it: `dgf dup --semantic` works with nothing else installed. The command runs the binary directly, so it is as fast as one built from source.
+This is the native `dgf` binary for your platform (Windows, Linux or macOS, x64 or arm64), with the C# duplication engine beside it: `dgf dup` runs it on C# code with nothing else installed. The command runs the binary directly, so it is as fast as one built from source.
 
 ```powershell
 dotnet tool update -g dgf      # update
@@ -62,7 +62,7 @@ cargo install --path crates/dog-food-cli --locked
 | For | Install |
 | --- | --- |
 | `dgf-dup` on its own (the same as `dgf dup`) | `cargo install --git https://github.com/bojanrmv/bt-dog-food dog-food-dup --locked` |
-| `dgf dup --semantic` (C#), when built from source | the .NET 10 SDK, then `dotnet tool install -g dgf-dup-cs`: see [the C# engine](duplication/csharp.md) |
+| The C# engine of `dgf dup`, when built from source | the .NET 10 SDK, then `dotnet tool install -g dgf-dup-cs`: see [the C# engine](duplication/csharp.md) |
 | `dgf mutate --run` on C# | the .NET SDK (`dotnet`) |
 | `dgf mutate --run` on TypeScript and JavaScript | Node.js 22.3 or newer, with the project's `node_modules` |
 

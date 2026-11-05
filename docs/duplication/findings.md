@@ -33,7 +33,7 @@ Each finding is a group of copies, ranked by the lines a shared version would sa
 | **Same after** | type 4: the rules that made the methods equal (`loop that adds up → Sum`), and any condition they need ("equal when the total does not overflow int"). |
 | **Confirmed** | type 4 with `--confirm`: the methods returned the same results on 1,000 generated inputs, or why they were not run. |
 | **Risk** | the riskiest copy's function: its cyclomatic complexity, and with `--coverage` its covered share and CRAP score. |
-| **As a method** | C# with `--semantic`: what the first copy takes and returns if extracted, from the compiler's data flow, and whether it needs `this`. |
+| **As a method** | C#, from the C# engine: what the first copy takes and returns if extracted, from the compiler's data flow, and whether it needs `this`. |
 | **Unite** | what to do: keep one function, extract a private method, a shared function in the file, or a helper the files share. |
 | **Caution** | what makes uniting harder: values used after the copy (the helper returns them), `return`/`break`/`continue` inside it, statements between the parts of a mixed-in copy. |
 | **Saves** | lines removed by a shared version, after its signature and calls. |

@@ -24,7 +24,7 @@ Every finding comes with what to do: the shared template, what each copy fills i
 dgf dup                                   # the current folder, biggest wins first
 dgf dup src --top 10                      # the ten biggest
 dgf dup --format html -o dup.html         # the review dashboard
-dgf dup --semantic                        # add the C# engine (install it first: see below)
+dgf dup --no-semantic                     # without the C# engine: seconds, no .NET needed
 dgf dup --coverage TestResults            # rank by risk: the CRAP score of the riskiest copy
 dgf dup --changes --fail-on-copies        # a PR gate: exit 1 when the branch adds a copy
 ```
@@ -33,7 +33,7 @@ Test code and migrations are left out unless you pass `--tests`. Generated files
 
 ## Installing
 
-`dgf dup` comes with `dgf` ([install](../install.md)). Installed with `dotnet tool install -g dgf`, the C# engine for `--semantic` comes with it. With `dgf` built from source, install the engine on its own:
+`dgf dup` comes with `dgf` ([install](../install.md)). Installed with `dotnet tool install -g dgf`, the C# engine comes with it and runs whenever there is C# to scan. With `dgf` built from source, install the engine on its own (without it, the report notes what it could not find):
 
 ```powershell
 dotnet tool install -g dgf-dup-cs

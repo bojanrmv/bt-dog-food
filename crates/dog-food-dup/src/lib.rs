@@ -38,6 +38,9 @@ pub struct Report {
     /// With `--changes`: what the findings were limited to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// What limits this report, such as the C# engine not running.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
     pub files: usize,
     /// Lines of code in the files scanned (statements only).
     pub lines: usize,
@@ -221,6 +224,17 @@ pub fn scan(paths: &[PathBuf], root: &Path, tests: bool, settings: Settings) -> 
     scan_files(&files, root, tests, settings)
 }
 
+/// Whether [`scan`] would read any C# under `paths`.
+pub fn has_csharp(paths: &[PathBuf], tests: bool) -> bool {
+    let paths: Vec<PathBuf> = paths
+        .iter()
+        .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()))
+        .collect();
+    source_files(&paths).iter().any(|p| {
+        p.extension().is_some_and(|e| e.eq_ignore_ascii_case("cs")) && (tests || !is_test_code(p))
+    })
+}
+
 /// Scans exactly `files`; with `tests`, test modules inside them too.
 pub fn scan_files(files: &[PathBuf], root: &Path, tests: bool, settings: Settings) -> Report {
     let parsed: Vec<(tokens::Source, Vec<tokens::Block>)> = files
@@ -258,6 +272,7 @@ pub fn scan_files(files: &[PathBuf], root: &Path, tests: bool, settings: Setting
     let duplicated_lines = duplicated(&classes);
     let mut report = Report {
         scope: None,
+        notes: Vec::new(),
         files: sources.len(),
         lines,
         duplicated_lines,

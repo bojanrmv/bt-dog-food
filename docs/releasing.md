@@ -61,7 +61,7 @@ dotnet tool install -g dgf --add-source packaging/nuget/nupkg --version 0.2.0
 
 Platforms: Windows, Linux and macOS, each on x64 and arm64. The Linux binaries are static, so they run on any distribution.
 
-The package does not wrap `dgf` in .NET: the tool's command is the native binary itself, so it starts and runs as fast as one built with cargo. It needs the .NET 10 runtime only for the C# engine (`dgf dup --semantic`) and for mutation runs on C#. `dgf` finds the engine in `engine/` beside itself.
+The package does not wrap `dgf` in .NET: the tool's command is the native binary itself, so it starts and runs as fast as one built with cargo. It needs the .NET 10 runtime only for the C# engine of `dgf dup` and for mutation runs on C#. `dgf` finds the engine in `engine/` beside itself.
 
 ## When a release is wrong
 

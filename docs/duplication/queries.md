@@ -2,7 +2,7 @@
 
 [Duplication](README.md) › Repeated queries
 
-With `--semantic`, every LINQ query on `IQueryable<T>` (an EF Core `DbSet<T>`, or a query built on one) is read on its own, knowing which entity `T`, which table, it queries. Its filter is reduced to one form:
+With the C# engine, every LINQ query on `IQueryable<T>` (an EF Core `DbSet<T>`, or a query built on one) is read on its own, knowing which entity `T`, which table, it queries. Its filter is reduced to one form:
 
 - lambda parameter names do not matter;
 - `Where(a).Where(b)` is `Where(a && b)`, in any order, as SQL `AND` does not care;

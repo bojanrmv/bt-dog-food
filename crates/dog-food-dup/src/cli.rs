@@ -51,17 +51,24 @@ pub struct Args {
     /// With --changes: exit with code 1 when the branch added any copy
     #[arg(long, requires = "changes")]
     fail_on_copies: bool,
-    /// Also find C# methods that do the same thing written differently (a
-    /// loop and its LINQ, `if` and `?:`), with the C# engine dgf-dup-cs
+    /// Require the C# engine dgf-dup-cs, and fail if it cannot run. It finds
+    /// C# methods that do the same thing written differently (a loop and its
+    /// LINQ, `if` and `?:`) and repeated queries. Without this flag it runs
+    /// anyway when there is C# to scan, except with --changes, and a report
+    /// note says so if it cannot
     #[arg(long)]
     semantic: bool,
-    /// The C# engine to run: an executable, or its .dll [default: DGF_DUP_CS, else dgf-dup-cs on PATH]
-    #[arg(long, value_name = "PATH", requires = "semantic")]
+    /// Do not run the C# engine
+    #[arg(long, conflicts_with_all = ["semantic", "semantic_engine", "confirm"])]
+    no_semantic: bool,
+    /// The C# engine to run: an executable, or its .dll; implies --semantic
+    /// [default: DGF_DUP_CS, else dgf-dup-cs on PATH]
+    #[arg(long, value_name = "PATH")]
     semantic_engine: Option<PathBuf>,
-    /// With --semantic: run each group of methods said to do the same thing
-    /// on generated inputs, and leave out any an input tells apart (methods
-    /// with effects, awaits or database reads are not run)
-    #[arg(long, requires = "semantic")]
+    /// Run each group of methods said to do the same thing on generated
+    /// inputs, and leave out any an input tells apart (methods with effects,
+    /// awaits or database reads are not run); implies --semantic
+    #[arg(long)]
     confirm: bool,
     /// Review decisions saved from the HTML report: groups marked intentional
     /// or a false positive are left out, so gates only see unreviewed ones
@@ -76,6 +83,33 @@ pub struct Args {
     /// [default: risk with --coverage, else saves]
     #[arg(long, value_enum)]
     rank: Option<Rank>,
+}
+
+/// Whether the C# engine runs, and what it means if it cannot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Engine {
+    Off,
+    /// It runs by default: if it cannot, the report says so and carries on.
+    WhenAvailable,
+    /// It was asked for: if it cannot, the run fails.
+    Required,
+}
+
+/// `has_csharp` is only asked when the answer depends on it: it walks the files.
+fn engine_mode(args: &Args, has_csharp: impl FnOnce() -> bool) -> Engine {
+    if args.no_semantic {
+        return Engine::Off;
+    }
+    if args.asks_for_engine() {
+        return Engine::Required;
+    }
+    // --changes scans the merge base too, so the engine would run twice: a
+    // PR gate stays fast unless it asks for the engine.
+    if !args.changes && has_csharp() {
+        Engine::WhenAvailable
+    } else {
+        Engine::Off
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
@@ -97,6 +131,10 @@ enum Format {
 }
 
 impl Args {
+    fn asks_for_engine(&self) -> bool {
+        self.semantic || self.confirm || self.semantic_engine.is_some()
+    }
+
     pub fn has_coverage(&self) -> bool {
         !self.coverage.is_empty()
     }
@@ -133,15 +171,18 @@ fn run(args: &Args) -> Result<ExitCode, (u8, String)> {
     let changes = changes(args)?;
     let (paths, root) = scope(args, changes.as_ref());
     // The C# engine runs in its own process, alongside the syntactic scan.
-    let engine = start_semantic(args, &paths, &root)?;
+    let mode = engine_mode(args, || crate::has_csharp(&paths, args.tests));
+    let mut notes = Vec::new();
+    let engine = tolerate(mode, start_semantic(args, mode, &paths, &root), &mut notes)?.flatten();
     progress::step("finding copies");
     let mut found = scan(&paths, &root, args.tests, settings);
+    found.notes = notes;
     progress::done(format!(
         "{} groups in {} files",
         found.classes.len(),
         found.files
     ));
-    semantic_step(args, &mut found, engine, &root)?;
+    semantic_step(args, mode, &mut found, engine, (&paths, &root))?;
     if let Some(path) = &args.decisions {
         found.apply(crate::decisions::load(path).map_err(|e| (2, e))?);
     }
@@ -150,7 +191,7 @@ fn run(args: &Args) -> Result<ExitCode, (u8, String)> {
             "the same scan of the merge base {}, to leave out what was there",
             changes.commit
         ));
-        let at_base = at_base(changes, args, &paths, settings)?;
+        let at_base = at_base(changes, args, mode, &paths, settings)?;
         progress::done(format!("{} groups", at_base.len()));
         found.keep_changed(changes, Some(&at_base));
     }
@@ -172,6 +213,7 @@ fn run(args: &Args) -> Result<ExitCode, (u8, String)> {
 fn at_base(
     changes: &Changes,
     args: &Args,
+    mode: Engine,
     paths: &[PathBuf],
     settings: Settings,
 ) -> Result<std::collections::BTreeSet<String>, (u8, String)> {
@@ -187,9 +229,9 @@ fn at_base(
                 Some(dir.join(p.strip_prefix(&changes.root).ok()?))
             })
             .collect();
-        let engine = start_semantic(args, &base_paths, &dir)?;
+        let engine = start_semantic(args, mode, &base_paths, &dir).map_err(|e| (2, e))?;
         let mut found = scan(&base_paths, &dir, args.tests, settings);
-        add_semantic(&mut found, engine, &dir)?;
+        add_semantic(&mut found, engine, &dir).map_err(|e| (2, e))?;
         Ok(found.classes.into_iter().map(|c| c.id).collect())
     })();
     let _ = std::fs::remove_dir_all(&dir);
@@ -199,9 +241,10 @@ fn at_base(
 /// Waits for the C# engine, as a step of its own: it usually takes longest.
 fn semantic_step(
     args: &Args,
+    mode: Engine,
     found: &mut Report,
     engine: Option<std::process::Child>,
-    root: &std::path::Path,
+    (paths, root): (&[PathBuf], &std::path::Path),
 ) -> Result<(), (u8, String)> {
     if engine.is_none() {
         return Ok(());
@@ -212,7 +255,14 @@ fn semantic_step(
         "C# engine: the same behaviour written differently, repeated queries"
     });
     let before = found.classes.len();
-    add_semantic(found, engine, root)?;
+    let added = add_semantic(found, engine, root);
+    if tolerate(mode, added, &mut found.notes)?.is_none() {
+        progress::done("skipped");
+        return Ok(());
+    }
+    found
+        .notes
+        .extend(semantic::restore_note(paths, args.tests));
     progress::done(format!(
         "{} more groups",
         found.classes.len().saturating_sub(before)
@@ -226,13 +276,30 @@ fn add_semantic(
     found: &mut Report,
     engine: Option<std::process::Child>,
     root: &std::path::Path,
-) -> Result<(), (u8, String)> {
+) -> Result<(), String> {
     let Some(engine) = engine else {
         return Ok(());
     };
-    let classes = semantic::finish_with(engine, found).map_err(|e| (2, e))?;
+    let classes = semantic::finish_with(engine, found)?;
     semantic::merge(found, classes, root);
     Ok(())
+}
+
+/// What the engine's `result` means in this `mode`: an error when it was
+/// asked for; otherwise a note in the report, and nothing to go on with.
+fn tolerate<T>(
+    mode: Engine,
+    result: Result<T, String>,
+    notes: &mut Vec<String>,
+) -> Result<Option<T>, (u8, String)> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if mode == Engine::Required => Err((2, err)),
+        Err(err) => {
+            notes.push(semantic::skipped_note(&err));
+            Ok(None)
+        }
+    }
 }
 
 /// Each group's risk; ordered by it with `--rank risk` (the default with coverage).
@@ -254,13 +321,14 @@ fn assess(found: &mut Report, args: &Args, root: &std::path::Path) -> Result<(),
     Ok(())
 }
 
-/// With --semantic, the C# engine started on the scanned paths.
+/// The C# engine started on the scanned paths, unless `mode` has it off.
 fn start_semantic(
     args: &Args,
+    mode: Engine,
     paths: &[PathBuf],
     root: &std::path::Path,
-) -> Result<Option<std::process::Child>, (u8, String)> {
-    if !args.semantic {
+) -> Result<Option<std::process::Child>, String> {
+    if mode == Engine::Off {
         return Ok(None);
     }
     let engine = semantic::command(args.semantic_engine.as_deref());
@@ -269,9 +337,7 @@ fn start_semantic(
         confirm: args.confirm,
         regions: true,
     };
-    semantic::start(engine, paths, root, ask)
-        .map(Some)
-        .map_err(|e| (2, e))
+    semantic::start(engine, paths, root, ask).map(Some)
 }
 
 fn changes(args: &Args) -> Result<Option<Changes>, (u8, String)> {
@@ -317,4 +383,58 @@ fn write(text: &str, output: Option<&std::path::Path>) -> Result<(), (u8, String
         .map_err(|err| (3, format!("could not write {}: {err}", path.display())))?;
     eprintln!("Wrote the report to {}", path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mode(command: &[&str], has_csharp: bool) -> Engine {
+        let line = std::iter::once("dgf-dup").chain(command.iter().copied());
+        engine_mode(&Args::parse_from(line), || has_csharp)
+    }
+
+    #[test]
+    fn the_engine_runs_when_there_is_csharp_and_may_be_missing() {
+        assert_eq!(mode(&[], true), Engine::WhenAvailable);
+        assert_eq!(mode(&[], false), Engine::Off);
+    }
+
+    #[test]
+    fn asking_for_the_engine_in_any_way_requires_it() {
+        for command in [
+            &["--semantic"][..],
+            &["--confirm"],
+            &["--semantic-engine", "x.dll"],
+            &["--semantic", "--changes"],
+        ] {
+            assert_eq!(mode(command, false), Engine::Required, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn a_branch_check_and_no_semantic_leave_the_engine_off() {
+        assert_eq!(mode(&["--changes"], true), Engine::Off);
+        assert_eq!(mode(&["--no-semantic"], true), Engine::Off);
+    }
+
+    #[test]
+    fn no_semantic_cannot_be_combined_with_asking_for_the_engine() {
+        for flag in ["--semantic", "--confirm"] {
+            assert!(Args::try_parse_from(["dgf-dup", "--no-semantic", flag]).is_err());
+        }
+    }
+
+    #[test]
+    fn a_failure_is_an_error_only_when_the_engine_was_asked_for() {
+        let failed = || Err::<(), _>("no engine".to_string());
+        let mut notes = Vec::new();
+        assert!(tolerate(Engine::Required, failed(), &mut notes).is_err());
+        assert!(notes.is_empty());
+        assert_eq!(
+            tolerate(Engine::WhenAvailable, failed(), &mut notes),
+            Ok(None)
+        );
+        assert!(notes[0].contains("no engine"), "{notes:?}");
+    }
 }

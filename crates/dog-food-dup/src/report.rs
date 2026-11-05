@@ -181,6 +181,7 @@ pub fn agent(report: &Report, top: usize) -> String {
     if let Some(scope) = &report.scope {
         let _ = writeln!(out, "scope: {scope}");
     }
+    out.push_str(&notes(report));
     out.push_str(&suppressed(report));
     out.push_str("each class: its type (1 the same code, 2 renamed, 3 near miss: ⟪…⟫ marks what not every copy has), copies (file:lines function, `(changed)` when the branch changed it), the template with ⟨n⟩ holes, what each hole is, what each near-miss copy adds, leaves out or has instead, and how to unite them\n");
     for (n, class) in report.classes.iter().take(shown(report, top)).enumerate() {
@@ -344,6 +345,15 @@ pub fn json(report: &Report) -> String {
     serde_json::to_string_pretty(report).expect("the report serializes") + "\n"
 }
 
+/// What limits the report, a line each.
+fn notes(report: &Report) -> String {
+    report
+        .notes
+        .iter()
+        .map(|n| format!("note: {n}\n"))
+        .collect()
+}
+
 /// Classes left out by review decisions, when any were.
 fn suppressed(report: &Report) -> String {
     if report.suppressed == 0 {
@@ -362,6 +372,7 @@ fn summary(report: &Report) -> String {
         .map(|s| format!("{s}\n"))
         .unwrap_or_default();
     scope
+        + &notes(report)
         + &suppressed(report)
         + &format!(
             "{} clone classes, {} duplicated lines ({:.1}% of {} statement lines in {} files)\n",

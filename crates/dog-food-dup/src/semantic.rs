@@ -162,6 +162,47 @@ pub fn start(
         })
 }
 
+/// The report's note when the engine ran by default and could not: what is
+/// missing from the report, and why.
+pub fn skipped_note(err: &str) -> String {
+    let reason = err.lines().next().unwrap_or(err);
+    format!(
+        "the C# engine did not run, so this report has no C# rewrites (type 4) or repeated queries: {reason} (--no-semantic leaves it out and hides this note)"
+    )
+}
+
+/// The report's note when C# projects under `paths` have no
+/// `obj/project.assets.json`: the engine then compiles them without their
+/// packages, and leaves out the methods that do not bind.
+pub fn restore_note(paths: &[PathBuf], tests: bool) -> Option<String> {
+    let projects: Vec<PathBuf> = paths
+        .iter()
+        .flat_map(|path| ignore::WalkBuilder::new(path).require_git(false).build())
+        .flatten()
+        .map(|entry| entry.into_path())
+        .filter(|p| p.extension().is_some_and(|e| e == "csproj"))
+        .filter(|p| tests || !crate::is_test_code(p))
+        .collect();
+    let unrestored: Vec<String> = projects
+        .iter()
+        .filter(|p| !p.with_file_name("obj/project.assets.json").is_file())
+        .filter_map(|p| Some(p.file_stem()?.to_string_lossy().into_owned()))
+        .collect();
+    let (first, rest) = unrestored.split_at_checked(3).unwrap_or((&unrestored, &[]));
+    let more = match rest.len() {
+        0 => String::new(),
+        n => format!(", {n} more"),
+    };
+    (!unrestored.is_empty()).then(|| {
+        format!(
+            "{} of {} C# projects are not restored ({}{more}), so the C# engine may leave out methods that use their packages: run `dotnet restore`",
+            unrestored.len(),
+            projects.len(),
+            first.join(", ")
+        )
+    })
+}
+
 /// Waits for an engine started with [`start`] and reads its classes.
 pub fn finish(engine: Child) -> Result<Vec<CloneClass>, String> {
     Ok(read(wait(engine)?)?.0)
@@ -332,6 +373,42 @@ fn fill(copy: &mut Copy, file_lines: &mut std::collections::BTreeMap<String, usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projects_without_restored_packages_are_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = |name: &str, restored: bool| {
+            let folder = dir.path().join(name);
+            std::fs::create_dir_all(folder.join("obj")).unwrap();
+            std::fs::write(folder.join(format!("{name}.csproj")), "").unwrap();
+            if restored {
+                std::fs::write(folder.join("obj/project.assets.json"), "{}").unwrap();
+            }
+        };
+        project("Shop", true);
+        let paths = [dir.path().to_path_buf()];
+        assert_eq!(restore_note(&paths, false), None);
+
+        project("Orders", false);
+        let note = restore_note(&paths, false).unwrap();
+        assert!(note.starts_with("1 of 2 C# projects"), "{note}");
+        assert!(note.contains("(Orders)"), "{note}");
+
+        for name in ["A", "B", "C"] {
+            project(name, false);
+        }
+        let note = restore_note(&paths, false).unwrap();
+        assert!(note.starts_with("4 of 5 C# projects"), "{note}");
+        assert!(note.contains("1 more"), "{note}");
+    }
+
+    #[test]
+    fn a_skipped_engine_note_says_what_is_missing_and_why_in_one_line() {
+        let note = skipped_note("the C# engine failed: boom\n   at a stack frame");
+        assert!(note.contains("no C# rewrites"), "{note}");
+        assert!(note.contains("boom"), "{note}");
+        assert!(!note.contains("stack frame"), "{note}");
+    }
 
     #[test]
     fn the_engine_shipped_beside_the_binary_is_found() {

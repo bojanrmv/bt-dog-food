@@ -267,7 +267,8 @@ const state = { search: "", kinds: new Set(), status: "open", project: "", pair:
 
 // ---- header and numbers ---------------------------------------------------------------
 document.getElementById("scope").textContent =
-  (DATA.scope ? DATA.scope + " · " : "") + `${fmt(DATA.files)} files scanned`;
+  (DATA.scope ? DATA.scope + " · " : "") + `${fmt(DATA.files)} files scanned` +
+  (DATA.notes || []).map((n) => " · " + n).join("");
 function renderNumbers() {
   const reviewed = classes.filter((c) => statusOf(c)).length;
   const toFix = classes.filter((c) => statusOf(c) === "to-fix");

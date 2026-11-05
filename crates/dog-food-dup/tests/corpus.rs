@@ -289,6 +289,24 @@ fn methods_are_only_run_when_they_have_no_effects() {
     );
 }
 
+#[test]
+fn the_csharp_engine_runs_without_being_asked() {
+    if !has_dotnet10() {
+        eprintln!("skipped: needs a .NET 10 SDK");
+        return;
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_dgf-dup"))
+        .args(["Cases", "--tests", "--format", "agent", "--top", "0"])
+        .current_dir(CORPUS)
+        .env("DGF_DUP_CS", engine())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(text.contains("type 4"), "{text}");
+    assert!(!text.contains("did not run"), "{text}");
+}
+
 const REGIONS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/regions");
 
 #[test]

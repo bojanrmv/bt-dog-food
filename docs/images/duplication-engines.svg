@@ -32,7 +32,7 @@
   <text class="text" x="206" y="186">• statements repeated in a row</text>
 
   <rect class="sem" x="190" y="224" width="430" height="170" rx="10"/>
-  <text class="head" x="206" y="248" fill="#b45309">C# ENGINE (--semantic) · ROSLYN · RUNS ALONGSIDE</text>
+  <text class="head" x="206" y="248" fill="#b45309">C# ENGINE · ROSLYN · RUNS ALONGSIDE</text>
   <text class="text" x="206" y="274">• each method reduced to one canonical expression:</text>
   <text class="text" x="222" y="292">loops and LINQ, if / ?: / switch, early returns</text>
   <text class="text" x="206" y="312">• the same behaviour written differently (type 4)</text>
