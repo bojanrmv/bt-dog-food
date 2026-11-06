@@ -20,7 +20,7 @@ skip_plain_constructors = true   # constructors that only store their arguments 
 thresholds = { high = 80, low = 60, break = 50 }       # below break: exit code 1
 timeout_factor = 1.5                                   # a test run hangs after (startup + its tests) x 1.5
 timeout_ms = 5000                                      # ... + 5 s
-jobs = 3                                               # test runs at once, and baseline shards (default: cores - 1)
+jobs = 3                                               # test runs and baseline workers at once, across all test projects (default: cores - 1)
 build_jobs = 2                                         # dotnet build -m:2
 low_priority = true                                    # builds and tests below normal priority
 ```

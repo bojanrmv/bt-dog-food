@@ -2,11 +2,11 @@
 //! test project loaded between runs and tell the mutant switches which test
 //! is running.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -58,6 +58,8 @@ pub struct Dotnet {
     build_args: Vec<String>,
     /// dog-food's test workers, which keep a test project loaded between runs.
     workers: Pool,
+    /// The baseline's `--jobs` places, across all test projects.
+    slots: Slots,
     /// Test project (assembly) → what a worker serves, found after the first
     /// build; or why a test project cannot run.
     targets: OnceLock<Result<HashMap<String, Target>, String>>,
@@ -127,6 +129,7 @@ impl Dotnet {
             mutated_restored: AtomicBool::new(false),
             build_args,
             workers: Pool::new(exec::runs_folder(sandbox).join("workers")),
+            slots: Slots::new(jobs.max(1)),
             targets: OnceLock::new(),
             retired: Mutex::new(HashMap::new()),
             warmup: Mutex::new(HashMap::new()),
@@ -232,8 +235,9 @@ impl Dotnet {
         Ok(self.finish(project, target, worker, reply, fresh, ask, folder, index))
     }
 
-    /// Splits the baseline of `project` by test class across workers, one per
-    /// share of `--jobs`, started side by side; they stay warm for the mutants.
+    /// Runs the baseline of `project` in batches of whole test classes, in as
+    /// many workers as its tests are worth while a slot is free: a slot a small
+    /// project has finished with goes to a big one. They stay warm for the mutants.
     #[allow(clippy::too_many_arguments)]
     fn reach_split(
         &self,
@@ -246,7 +250,6 @@ impl Dotnet {
         folder: &Path,
         index: usize,
     ) -> Result<(TestRun, Results), String> {
-        let pool = &self.workers;
         let filter_file = folder.join(format!("filter-{index}.txt"));
         write_file(&filter_file, filter.unwrap_or(""))?;
         let ask = Ask::Reach(reached);
@@ -262,74 +265,122 @@ impl Dotnet {
             .lock()
             .map(|t| t.clone())
             .unwrap_or_default();
-        let groups = split_by_class(&listed, self.shards(), &times);
+        let workers = baseline_workers(&listed, &times, self.jobs);
+        let batches = split_by_class(&listed, workers * BATCHES_PER_WORKER, &times);
         debug!(
             "baseline",
-            "{}: {} tests in {} shards of {:?} tests (jobs {}, {} tests timed last run)",
+            "{}: {} tests, up to {workers} workers (jobs {}), {} batches, {} tests timed last run",
             project.assembly,
             listed.len(),
-            groups.len(),
-            groups.iter().map(Vec::len).collect::<Vec<_>>(),
             self.jobs,
+            batches.len(),
             times.len()
         );
-        if groups.len() < 2 {
+        if workers < 2 || batches.len() < 2 {
+            let _slot = self.slots.hold();
             let request = format!("tests\t{}\t{}", filter_file.display(), reached.display());
             let reply = first.request(&request, limit);
             return Ok(self.finish(project, target, first, reply, false, ask, folder, index));
         }
-        let mut first = Some(first);
-        let ran: Vec<Result<(TestRun, Results, Duration), String>> = std::thread::scope(|scope| {
-            let shards: Vec<_> = groups
-                .into_iter()
-                .enumerate()
-                .map(|(shard, names)| {
-                    let worker = first.take();
-                    scope.spawn(move || {
-                        let started = Instant::now();
-                        let mut worker = match worker {
-                            Some(worker) => worker,
-                            None => pool.take(target)?,
-                        };
-                        let file = folder.join(format!("names-{index}-{shard}.txt"));
-                        write_file(&file, &names.join("\n"))?;
-                        let request = format!("names\t{}\t{}", file.display(), reached.display());
-                        let reply = worker.request(&request, limit);
-                        let (status, results) =
-                            self.finish(project, target, worker, reply, false, ask, folder, index);
-                        Ok((status, results, started.elapsed()))
-                    })
-                })
+        let shared = BaselineShare {
+            project,
+            target,
+            ask,
+            reached,
+            limit,
+            folder,
+            index,
+            batches: Mutex::new(batches.into_iter().enumerate().collect()),
+            first: Mutex::new(Some(first)),
+            stopped: AtomicBool::new(false),
+        };
+        let ran: Vec<Result<WorkerShare, String>> = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..workers)
+                .map(|_| scope.spawn(|| self.baseline_worker(&shared)))
                 .collect();
-            shards
+            threads
                 .into_iter()
-                .map(|s| {
-                    s.join()
+                .map(|t| {
+                    t.join()
                         .unwrap_or_else(|_| Err("a test worker thread failed".into()))
                 })
                 .collect()
         });
+        if let Some(worker) = shared.first.lock().ok().and_then(|mut f| f.take()) {
+            self.release(target, worker, false);
+        }
         let mut status = TestRun::Passed;
         let mut results = Results::default();
         let mut warmup = Duration::ZERO;
-        for (shard, ran) in ran.into_iter().enumerate() {
-            let (one, shard_results, wall) = ran?;
-            status = worst(status, one);
-            let tests: Duration = shard_results.times.values().sum();
+        for (number, ran) in ran.into_iter().enumerate() {
+            let share = ran?;
+            status = worst(status, share.status);
+            let tests: Duration = share.results.times.values().sum();
             debug!(
                 "baseline",
-                "{} shard {shard}: {one:?} in {:.1} s, its tests {:.1} s",
+                "{} worker {number}: {:?}, {} batches in {:.1} s, its tests {:.1} s",
                 project.assembly,
-                wall.as_secs_f64(),
+                share.status,
+                share.batches,
+                share.wall.as_secs_f64(),
                 tests.as_secs_f64()
             );
-            warmup = warmup.max(wall.saturating_sub(tests));
-            results.add(shard_results);
+            warmup = warmup.max(share.wall.saturating_sub(tests));
+            results.add(share.results);
         }
         if let Ok(mut known) = self.warmup.lock() {
             known.insert(project.assembly.clone(), warmup);
         }
         Ok((status, results))
+    }
+
+    /// One worker's part of a baseline: once one of the run's slots is free,
+    /// runs batches of `shared` until none is left. It starts no worker when
+    /// the others finished them first, and stops when a worker timed out or crashed.
+    fn baseline_worker(&self, shared: &BaselineShare) -> Result<WorkerShare, String> {
+        let _slot = self.slots.hold();
+        let started = Instant::now();
+        let mut share = WorkerShare {
+            status: TestRun::Passed,
+            results: Results::default(),
+            batches: 0,
+            wall: Duration::ZERO,
+        };
+        while !shared.stopped.load(Ordering::Relaxed) {
+            let Some((number, names)) = shared.batches.lock().ok().and_then(|mut b| b.pop_front())
+            else {
+                break;
+            };
+            let warm = shared.first.lock().ok().and_then(|mut f| f.take());
+            let mut worker = match warm {
+                Some(worker) => worker,
+                None => self.workers.take(shared.target)?,
+            };
+            let file = shared
+                .folder
+                .join(format!("names-{}-{number}.txt", shared.index));
+            write_file(&file, &names.join("\n"))?;
+            let request = format!("names\t{}\t{}", file.display(), shared.reached.display());
+            let reply = worker.request(&request, shared.limit);
+            let (status, results) = self.finish(
+                shared.project,
+                shared.target,
+                worker,
+                reply,
+                false,
+                shared.ask,
+                shared.folder,
+                shared.index,
+            );
+            share.status = worst(share.status, status);
+            share.results.add(results);
+            share.batches += 1;
+            if matches!(status, TestRun::TimedOut | TestRun::Crashed) {
+                shared.stopped.store(true, Ordering::Relaxed);
+            }
+        }
+        share.wall = started.elapsed();
+        Ok(share)
     }
 
     /// A worker's reply as a run's status and results; a worker that timed
@@ -583,12 +634,6 @@ impl Dotnet {
         }
     }
 
-    /// Workers per test project for the baseline: `--jobs` shared by the projects a worker serves.
-    fn shards(&self) -> usize {
-        let projects = self.targets().map_or(1, HashMap::len);
-        (self.jobs / projects.max(1)).max(1)
-    }
-
     fn warmup_of(&self, assembly: &str) -> Duration {
         self.warmup
             .lock()
@@ -677,12 +722,30 @@ impl Dotnet {
         let mut command = dotnet(&args);
         command.args(&self.build_args);
         command.arg(target);
-        let Some((passed, text)) =
-            exec::output(command, budget.limit(HOUR)).map_err(|e| BuildError::Errors(vec![e]))?
-        else {
+        let started = Instant::now();
+        let output =
+            exec::output(command, budget.limit(HOUR)).map_err(|e| BuildError::Errors(vec![e]))?;
+        let took = started.elapsed().as_secs_f64();
+        let Some((passed, text)) = output else {
+            debug!(
+                "build",
+                "{} out of time after {took:.1} s",
+                target.display()
+            );
             return Err(BuildError::OutOfTime);
         };
         if passed {
+            debug!(
+                "build",
+                "{} built in {took:.1} s{}{}",
+                target.display(),
+                if restore { ", with a restore" } else { "" },
+                if alone {
+                    ", without its references"
+                } else {
+                    ""
+                }
+            );
             return Ok(());
         }
         let found: Vec<String> = text
@@ -690,6 +753,20 @@ impl Dotnet {
             .filter(|l| l.contains(": error "))
             .map(str::to_string)
             .collect();
+        debug!(
+            "build",
+            "{} failed in {took:.1} s{}: {} errors",
+            target.display(),
+            if alone {
+                ", without its references"
+            } else {
+                ""
+            },
+            found.len()
+        );
+        for error in found.iter().take(20) {
+            debug!("build", "{error}");
+        }
         Err(BuildError::Errors(if found.is_empty() {
             vec![text]
         } else {
@@ -943,6 +1020,88 @@ fn splittable(filter: Option<&str>) -> bool {
             term.is_empty() || matches!(name, "FullyQualifiedName" | "DisplayName")
         })
     })
+}
+
+/// How long a test project's tests must take to earn another baseline worker.
+const WORTH_A_WORKER: Duration = Duration::from_secs(20);
+
+/// Batches per baseline worker: enough that one slow batch leaves the others
+/// to the workers that are free, few enough that requests cost nothing.
+const BATCHES_PER_WORKER: usize = 4;
+
+/// How many workers `tests` are worth in a baseline, at most `jobs`: by their
+/// time in the last baseline, 50 ms each when they have none.
+fn baseline_workers(tests: &[String], times: &HashMap<String, Duration>, jobs: usize) -> usize {
+    let cost: Duration = tests
+        .iter()
+        .map(|test| {
+            times
+                .get(test)
+                .copied()
+                .unwrap_or(Duration::ZERO)
+                .max(Duration::from_millis(50))
+        })
+        .sum();
+    let worth = (cost.as_secs_f64() / WORTH_A_WORKER.as_secs_f64()).ceil() as usize;
+    worth.clamp(1, jobs.max(1))
+}
+
+/// The places to run a baseline in, `--jobs` of them across all test projects.
+struct Slots {
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+impl Slots {
+    fn new(count: usize) -> Slots {
+        Slots {
+            free: Mutex::new(count),
+            freed: Condvar::new(),
+        }
+    }
+
+    /// Waits for a free slot; it is free again when the result is dropped.
+    fn hold(&self) -> Slot<'_> {
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        while *free == 0 {
+            free = self.freed.wait(free).unwrap_or_else(|e| e.into_inner());
+        }
+        *free -= 1;
+        Slot(self)
+    }
+}
+
+struct Slot<'a>(&'a Slots);
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        *self.0.free.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.0.freed.notify_one();
+    }
+}
+
+/// What a test project's baseline workers share.
+struct BaselineShare<'a> {
+    project: &'a Project,
+    target: &'a Target,
+    ask: Ask<'a>,
+    reached: &'a Path,
+    limit: Duration,
+    folder: &'a Path,
+    index: usize,
+    /// The batches no worker took yet, with their numbers.
+    batches: Mutex<VecDeque<(usize, Vec<String>)>>,
+    /// The warm worker that listed the tests, for whichever gets a slot first.
+    first: Mutex<Option<Worker>>,
+    stopped: AtomicBool,
+}
+
+/// What one baseline worker did.
+struct WorkerShare {
+    status: TestRun,
+    results: Results,
+    batches: usize,
+    wall: Duration,
 }
 
 /// `tests` in at most `shards` groups of whole test classes (a class's
@@ -1724,6 +1883,53 @@ fn built(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_earns_workers_by_its_tests_time_up_to_the_jobs() {
+        let tests: Vec<String> = (0..1841).map(|i| format!("A.B.T{i}")).collect();
+        let none = HashMap::new();
+        assert_eq!(baseline_workers(&tests, &none, 3), 3, "92 s by default");
+        assert_eq!(
+            baseline_workers(&tests[..198], &none, 3),
+            1,
+            "10 s by default"
+        );
+        assert_eq!(
+            baseline_workers(&tests, &none, 2),
+            2,
+            "no more than the jobs"
+        );
+        assert_eq!(baseline_workers(&[], &none, 3), 1);
+        let timed: HashMap<String, Duration> = tests[..198]
+            .iter()
+            .map(|t| (t.clone(), Duration::from_secs(1)))
+            .collect();
+        assert_eq!(
+            baseline_workers(&tests[..198], &timed, 16),
+            10,
+            "by last time"
+        );
+    }
+
+    #[test]
+    fn slots_let_no_more_than_their_count_run_and_free_up_when_dropped() {
+        let slots = Slots::new(2);
+        let running = std::sync::atomic::AtomicUsize::new(0);
+        let most = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..6 {
+                scope.spawn(|| {
+                    let _slot = slots.hold();
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    most.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(20));
+                    running.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        assert_eq!(most.load(Ordering::SeqCst), 2);
+        assert_eq!(*slots.free.lock().unwrap(), 2);
+    }
 
     #[test]
     fn only_compiler_errors_show_the_restore_worked() {

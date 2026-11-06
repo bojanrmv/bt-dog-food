@@ -22,6 +22,25 @@ const START: Duration = Duration::from_secs(600);
 /// with no word at all means its process is frozen or starved of processor.
 const SILENCE: Duration = Duration::from_secs(15);
 
+/// Runtime settings for test runs, unless the environment sets them: tests
+/// allocate a lot and live briefly, so a bigger first GC generation saves
+/// thousands of collections; a background collector and profile-guided
+/// recompiling cost more than a short run gets back.
+const RUNTIME: [(&str, &str); 3] = [
+    ("DOTNET_GCgen0size", "0x4000000"),
+    ("DOTNET_gcConcurrent", "0"),
+    ("DOTNET_TieredPGO", "0"),
+];
+
+/// The settings of `RUNTIME` that `set` says are not set yet.
+fn runtime_settings(set: impl Fn(&str) -> bool) -> Vec<(&'static str, &'static str)> {
+    RUNTIME
+        .iter()
+        .filter(|(name, _)| !set(name))
+        .copied()
+        .collect()
+}
+
 /// A test project a worker can serve: its test assembly, with the runtime
 /// and dependency files the build wrote next to it, and a VSTest adapter;
 /// or a Microsoft.Testing.Platform test application (`mtp`), which runs in
@@ -259,6 +278,7 @@ impl Worker {
             // Tests run where the test host would run them: in their output folder.
             .current_dir(target.dll.parent().unwrap_or(Path::new(".")))
             .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+            .envs(runtime_settings(|name| std::env::var_os(name).is_some()))
             .envs(env.iter().map(|(k, v)| (*k, v.as_str())))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -585,6 +605,14 @@ impl Drop for Pool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_environment_wins_over_the_runtime_settings() {
+        assert_eq!(runtime_settings(|_| false).len(), 3);
+        let left = runtime_settings(|name| name == "DOTNET_TieredPGO");
+        assert_eq!(left.len(), 2);
+        assert!(left.iter().all(|(name, _)| *name != "DOTNET_TieredPGO"));
+    }
 
     #[test]
     fn a_heartbeat_says_which_test_runs_or_that_none_does() {
