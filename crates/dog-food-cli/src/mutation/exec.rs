@@ -477,7 +477,9 @@ fn is_flow_error(error: &str) -> bool {
 
 /// The mutant on `line` breaks the build; several there are suspects (one
 /// `Count` -> `Sum` does not make the `==` next to it wrong); with none,
-/// every mutant of the innermost chosen function around the line is a suspect.
+/// every mutant of the whole function around the line is a suspect: a mutant
+/// can change a type (`a ?? b` to a nullable `a` in an anonymous object) and
+/// the error shows where a lambda further down uses it.
 fn locate_line(file: &FileMutants, line: usize, located: &mut Located) {
     let on_line: Vec<usize> = file
         .mutants
@@ -496,19 +498,39 @@ fn locate_line(file: &FileMutants, line: usize, located: &mut Located) {
             return;
         }
     }
-    function_suspects(file, line, located);
+    let outermost = around(file, line).last().copied();
+    match outermost {
+        Some((start, end)) => suspects_in(file, start, end, located),
+        None => suspects_in(file, 0, usize::MAX, located),
+    }
 }
 
-/// Every mutant of the innermost chosen function around `line`.
+/// Every mutant of the innermost chosen function around `line` that has any,
+/// or else of the whole file: an error there has a cause among them.
 fn function_suspects(file: &FileMutants, line: usize, located: &mut Located) {
-    let Some(&(start, end)) = file
+    let before = located.suspects.len();
+    for (start, end) in around(file, line) {
+        suspects_in(file, start, end, located);
+        if located.suspects.len() > before {
+            return;
+        }
+    }
+    suspects_in(file, 0, usize::MAX, located);
+}
+
+/// The chosen functions around `line`, innermost first.
+fn around(file: &FileMutants, line: usize) -> Vec<(usize, usize)> {
+    let mut functions: Vec<(usize, usize)> = file
         .functions
         .iter()
+        .copied()
         .filter(|(start, end)| (*start..=*end).contains(&line))
-        .min_by_key(|(start, end)| end - start)
-    else {
-        return;
-    };
+        .collect();
+    functions.sort_by_key(|(start, end)| end - start);
+    functions
+}
+
+fn suspects_in(file: &FileMutants, start: usize, end: usize, located: &mut Located) {
     located.suspects.extend(
         file.mutants
             .iter()
@@ -664,6 +686,60 @@ four
             crash_reason(dir.path()).as_deref(),
             Some("two | three | four")
         );
+    }
+
+    #[test]
+    fn an_error_in_a_lambda_can_be_caused_by_a_mutant_outside_it() {
+        let source = "class C {\n  int F(int? a) {\n    var o = new { T = a ?? 1 };\n    return Run(() =>\n      Use(o.T));\n  }\n}\n";
+        let mutants =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp).unwrap();
+        assert!(mutants.iter().any(|m| m.line == 3));
+        let outside = mutants.iter().filter(|m| m.line == 3).count();
+        let file = FileMutants {
+            relative: PathBuf::from("C.cs"),
+            source: source.into(),
+            mutants,
+            functions: vec![(2, 6), (4, 5)],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let located = locate(
+            dir.path(),
+            dir.path(),
+            std::slice::from_ref(&file),
+            &["C.cs(5,11): error CS1503: Argument 1: cannot convert".to_string()],
+        );
+        let on_three = file
+            .mutants
+            .iter()
+            .filter(|m| located.suspects.contains(&m.id) && m.line == 3);
+        assert_eq!(on_three.count(), outside, "{located:?}");
+    }
+
+    #[test]
+    fn a_flow_error_in_a_function_with_no_mutants_widens_to_what_has_them() {
+        let source = "class C {\n  int F(bool a) {\n    if (a) { }\n    return 1;\n  }\n  int G() {\n    int x;\n    return x;\n  }\n}\n";
+        let mutants: Vec<_> =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp)
+                .unwrap()
+                .into_iter()
+                .filter(|m| m.line < 6)
+                .collect();
+        assert!(!mutants.is_empty());
+        let count = mutants.len();
+        let file = FileMutants {
+            relative: PathBuf::from("C.cs"),
+            source: source.into(),
+            mutants,
+            functions: vec![(2, 5), (6, 9)],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let located = locate(
+            dir.path(),
+            dir.path(),
+            std::slice::from_ref(&file),
+            &["C.cs(8,12): error CS0165: Use of unassigned local variable 'x'".to_string()],
+        );
+        assert_eq!(located.suspects.len(), count);
     }
 
     #[test]

@@ -113,7 +113,7 @@ impl Rebuild {
     ) -> Result<(), String> {
         let located = engine.locate(files, errors);
         if located.is_empty() {
-            return Err(build_error(errors));
+            return self.take_all_out(files, errors);
         }
         self.round = Round::Mutated;
         if !located.broken.is_empty() {
@@ -136,6 +136,28 @@ impl Rebuild {
         for group in &self.trying {
             put_back(files, group);
         }
+        Ok(())
+    }
+
+    /// An error nothing ties to a mutant: every mutant comes out, once. If the
+    /// sandbox then builds, a mutant caused it and they go back by function, to
+    /// find which. If it does not, the code does not compile without mutants.
+    fn take_all_out(&mut self, files: &mut [FileMutants], errors: &[String]) -> Result<(), String> {
+        let all: HashSet<usize> = files
+            .iter()
+            .flat_map(|f| f.mutants.iter().map(|m| m.id))
+            .collect();
+        if all.is_empty() {
+            return Err(build_error(errors));
+        }
+        progress(&format!(
+            "a compiler error names none of the {} mutants in the build; taking them all out to see whether they caused it",
+            all.len()
+        ));
+        let held = take_out(files, &all);
+        self.waiting.extend(by_function(files, held));
+        self.trying.clear();
+        self.round = Round::Mutated;
         Ok(())
     }
 
@@ -209,13 +231,15 @@ fn function_of(files: &[FileMutants], group: &Held) -> (usize, usize) {
         .map_or((0, 0), |(index, m)| function_at(files, *index, m.line))
 }
 
-/// The innermost chosen function around `line` of file `index`.
+/// The outermost chosen function around `line` of file `index`, with the
+/// lambdas in it: a mutant outside a lambda can break the code inside it, so
+/// they count as one, and an innocent lambda is not blamed on its own.
 fn function_at(files: &[FileMutants], index: usize, line: usize) -> (usize, usize) {
     let start = files[index]
         .functions
         .iter()
         .filter(|(start, end)| (*start..=*end).contains(&line))
-        .min_by_key(|(start, end)| end - start)
+        .max_by_key(|(start, end)| end - start)
         .map_or(0, |(start, _)| *start);
     (index, start)
 }
@@ -386,6 +410,71 @@ mod tests {
         fn test_projects(&self) -> Vec<String> {
             Vec::new()
         }
+    }
+
+    /// Ties no compiler error to any mutant.
+    struct Nowhere;
+
+    impl Engine for Nowhere {
+        fn build(&self, _: Round, _: Budget) -> Result<(), BuildError> {
+            unreachable!()
+        }
+        fn locate(&self, _: &[FileMutants], _: &[String]) -> Located {
+            Located::default()
+        }
+        fn reach(&self, _: Budget) -> Result<Option<Reach>, String> {
+            unreachable!()
+        }
+        fn pack(&self, _: &Pack, _: &Reach, _: Duration, _: &str) -> Result<PackRun, String> {
+            unreachable!()
+        }
+        fn solo(
+            &self,
+            _: usize,
+            _: &Reach,
+            _: bool,
+            _: Duration,
+            _: &str,
+        ) -> Result<SoloRun, String> {
+            unreachable!()
+        }
+        fn test_projects(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn an_error_tied_to_no_mutant_takes_them_all_out_before_giving_up() {
+        let source = "class C {\n  bool F(int a) {\n    return a > 1;\n  }\n}\n";
+        let mutants =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp).unwrap();
+        let count = mutants.len();
+        assert!(count > 0);
+        let mut files = vec![FileMutants {
+            relative: PathBuf::from("C.cs"),
+            source: source.into(),
+            mutants,
+            functions: vec![(2, 4)],
+        }];
+        let mut state = Rebuild {
+            round: Round::All,
+            waiting: Vec::new(),
+            trying: Vec::new(),
+        };
+        let mut outcomes = HashMap::new();
+        let errors = vec!["Other.cs(1,1): error CS1503: nothing to do with a mutant".to_string()];
+        state
+            .failed(&Nowhere, &mut files, &errors, &mut outcomes)
+            .expect("the mutants may have caused it");
+        assert!(files[0].mutants.is_empty(), "all out for one clean build");
+        assert!(outcomes.is_empty(), "nobody is blamed yet");
+        assert_eq!(state.waiting.iter().map(Vec::len).sum::<usize>(), count);
+        // Still failing with none in: the code itself does not compile.
+        let again = state.failed(&Nowhere, &mut files, &errors, &mut outcomes);
+        assert!(again.unwrap_err().contains("does not build"));
+        // Or it builds, and they go back to find which.
+        assert!(!state.passed(&mut files));
+        assert_eq!(files[0].mutants.len(), count);
     }
 
     #[test]
