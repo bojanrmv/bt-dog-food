@@ -367,6 +367,16 @@ public class Mutators
         return 0;
     }
 
+    public string? CoalescedChains(Dictionary<string, string>? a, string? b)
+    {
+        // mutant: linq First -> FirstOrDefault
+        // mutant: nullcoalescing b?.Trim() ?? a?.Keys.First() -> a?.Keys.First()
+        // mutant: nullcoalescing b?.Trim() ?? a?.Keys.First() -> a?.Keys.First() ?? b?.Trim()
+        // mutant: nullcoalescing b?.Trim() ?? a?.Keys.First() -> b?.Trim()
+        // mutant: stringmethod b?.Trim() -> ""
+        return b?.Trim() ?? a?.Keys.First();
+    }
+
     // Patterns where some mutants cannot compile: only those mutants are left
     // out, the rest of the function is mutated.
     public string Guarded(Dictionary<string, string> metadata)

@@ -366,7 +366,9 @@ fn declarator_value(declarator: Node) -> Option<Node> {
         .filter(|v| Some(*v) != declarator.child_by_field_name("name"))
 }
 
-/// `a ?? b`: `b`, and `b ?? a` and `a` when `b` may be null.
+/// `a ?? b`: `b`, and `b ?? a` and `a` when `b` may be null. The grammar reads
+/// `a ?? b?.c.d()` as `(a ?? b)?.c.d()`: the mutant goes around all of it, and
+/// the right side brings the rest of its chain along.
 fn coalesce<'t>(node: Node<'t>, src: &[u8], push: &mut dyn FnMut(Found<'t>)) {
     let (Some(left), Some(right)) = (
         node.child_by_field_name("left"),
@@ -374,7 +376,10 @@ fn coalesce<'t>(node: Node<'t>, src: &[u8], push: &mut dyn FnMut(Found<'t>)) {
     ) else {
         return;
     };
-    let (left_text, right_text) = (text(left, src), text(right, src));
+    let whole = misread_chain(node);
+    let left_text = text(left, src);
+    let right_text = String::from_utf8_lossy(&src[right.start_byte()..whole.end_byte()]);
+    let right_text = right_text.as_ref();
     // `x ?? y` with `x` an `int?`: `y` is an `int`, so `y ?? x` and `x`
     // alone do not compile.
     let never_null = never_null(right, src) || is_nullable_value(left, src);
@@ -382,15 +387,37 @@ fn coalesce<'t>(node: Node<'t>, src: &[u8], push: &mut dyn FnMut(Found<'t>)) {
         if !never_null {
             push(Found::new(
                 "nullcoalescing",
-                node,
+                whole,
                 format!("{right_text} ?? {left_text}"),
             ));
         }
-        push(Found::new("nullcoalescing", node, right_text));
+        push(Found::new("nullcoalescing", whole, right_text));
     }
     if !never_null || right.kind() == "collection_expression" {
-        push(Found::new("nullcoalescing", node, left_text));
+        push(Found::new("nullcoalescing", whole, left_text));
     }
+}
+
+/// The `?.` chain the grammar hung on `node`, or `node` when there is none.
+fn misread_chain(node: Node) -> Node {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        let field = match parent.kind() {
+            "conditional_access_expression" => "condition",
+            "member_access_expression" => "expression",
+            "invocation_expression" => "function",
+            "element_access_expression" => "expression",
+            _ => break,
+        };
+        if parent.child_by_field_name(field) != Some(current) {
+            break;
+        }
+        current = parent;
+    }
+    if current.kind() == "binary_expression" {
+        return node;
+    }
+    current
 }
 
 const VALUE_TYPES: &[&str] = &[

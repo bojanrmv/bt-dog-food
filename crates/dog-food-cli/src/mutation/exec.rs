@@ -498,15 +498,12 @@ fn locate_line(file: &FileMutants, line: usize, located: &mut Located) {
             return;
         }
     }
-    let outermost = around(file, line).last().copied();
-    match outermost {
-        Some((start, end)) => suspects_in(file, start, end, located),
-        None => suspects_in(file, 0, usize::MAX, located),
+    if let Some(&(start, end)) = around(file, line).last() {
+        suspects_in(file, start, end, located);
     }
 }
 
-/// Every mutant of the innermost chosen function around `line` that has any,
-/// or else of the whole file: an error there has a cause among them.
+/// Every mutant of the innermost chosen function around `line` that has any.
 fn function_suspects(file: &FileMutants, line: usize, located: &mut Located) {
     let before = located.suspects.len();
     for (start, end) in around(file, line) {
@@ -515,10 +512,11 @@ fn function_suspects(file: &FileMutants, line: usize, located: &mut Located) {
             return;
         }
     }
-    suspects_in(file, 0, usize::MAX, located);
 }
 
-/// The chosen functions around `line`, innermost first.
+/// The chosen functions around `line`, innermost first. A line in none of them
+/// is a signature (a missing return is reported on the method's name, above its
+/// body): it belongs to the first function below it.
 fn around(file: &FileMutants, line: usize) -> Vec<(usize, usize)> {
     let mut functions: Vec<(usize, usize)> = file
         .functions
@@ -527,6 +525,15 @@ fn around(file: &FileMutants, line: usize) -> Vec<(usize, usize)> {
         .filter(|(start, end)| (*start..=*end).contains(&line))
         .collect();
     functions.sort_by_key(|(start, end)| end - start);
+    if functions.is_empty() {
+        functions.extend(
+            file.functions
+                .iter()
+                .copied()
+                .filter(|(start, _)| *start > line)
+                .min_by_key(|(start, _)| *start),
+        );
+    }
     functions
 }
 
@@ -716,30 +723,62 @@ four
     }
 
     #[test]
-    fn a_flow_error_in_a_function_with_no_mutants_widens_to_what_has_them() {
-        let source = "class C {\n  int F(bool a) {\n    if (a) { }\n    return 1;\n  }\n  int G() {\n    int x;\n    return x;\n  }\n}\n";
-        let mutants: Vec<_> =
-            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp)
-                .unwrap()
-                .into_iter()
-                .filter(|m| m.line < 6)
-                .collect();
-        assert!(!mutants.is_empty());
-        let count = mutants.len();
+    fn an_error_on_a_signature_blames_the_function_below_it_and_no_other() {
+        let source = "class C {\n  int F(\n    bool a)\n  {\n    if (a) return 1;\n  }\n  bool G(int b)\n  {\n    return b > 1;\n  }\n}\n";
+        let mutants =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp).unwrap();
+        let in_f: HashSet<usize> = mutants
+            .iter()
+            .filter(|m| m.line < 7)
+            .map(|m| m.id)
+            .collect();
+        assert!(!in_f.is_empty() && in_f.len() < mutants.len());
         let file = FileMutants {
             relative: PathBuf::from("C.cs"),
             source: source.into(),
             mutants,
-            functions: vec![(2, 5), (6, 9)],
+            functions: vec![(4, 6), (8, 10)],
         };
         let dir = tempfile::tempdir().unwrap();
         let located = locate(
             dir.path(),
             dir.path(),
             std::slice::from_ref(&file),
-            &["C.cs(8,12): error CS0165: Use of unassigned local variable 'x'".to_string()],
+            &[
+                "C.cs(2,7): error CS0161: 'C.F(bool)': not all code paths return a value"
+                    .to_string(),
+            ],
         );
-        assert_eq!(located.suspects.len(), count);
+        assert_eq!(located.suspects, in_f);
+    }
+
+    #[test]
+    fn an_error_in_a_function_with_no_mutants_blames_no_other_function() {
+        let source = "class C {\n  bool F(int a) {\n    return a > 1;\n  }\n  int G() {\n    int x;\n    return x;\n  }\n}\n";
+        let mutants: Vec<_> =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp)
+                .unwrap()
+                .into_iter()
+                .filter(|m| m.line < 5)
+                .collect();
+        assert!(!mutants.is_empty());
+        let file = FileMutants {
+            relative: PathBuf::from("C.cs"),
+            source: source.into(),
+            mutants,
+            functions: vec![(2, 4), (5, 8)],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let located = locate(
+            dir.path(),
+            dir.path(),
+            std::slice::from_ref(&file),
+            &["C.cs(7,12): error CS0165: Use of unassigned local variable 'x'".to_string()],
+        );
+        assert!(
+            located.is_empty(),
+            "the search takes them all out instead: {located:?}"
+        );
     }
 
     #[test]
