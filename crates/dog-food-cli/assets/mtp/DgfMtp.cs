@@ -134,28 +134,37 @@ namespace DogFood.Mtp
 
         private async Task Serve(string[] parts, Results results)
         {
-            var third = parts.Length > 2 ? parts[2] : null;
             if (parts[0] == "plan")
             {
-                await Plan(parts[1], third != "nocheck", results);
+                await Plan(parts[1], parts.ElementAtOrDefault(2) != "nocheck", results);
             }
-            else if (parts[0] == "tests")
+            else if (parts[0] == "kill")
+            {
+                await Kill(File.ReadAllLines(parts[1]), results);
+            }
+            else
+            {
+                await ServeNamed(parts, results);
+            }
+        }
+
+        /// The requests that name tests by a filter or a list.
+        private async Task ServeNamed(string[] parts, Results results)
+        {
+            var reached = parts.ElementAtOrDefault(2);
+            if (parts[0] == "tests")
             {
                 var matches = Filter.Parse(File.ReadAllText(parts[1]).Trim());
-                await Tests(byName.Keys.Where(matches).ToList(), third, results);
+                await Tests(byName.Keys.Where(matches).ToList(), reached, results);
             }
             else if (parts[0] == "names")
             {
-                await Tests(File.ReadAllLines(parts[1]).Where(byName.ContainsKey).ToList(), third, results);
+                await Tests(File.ReadAllLines(parts[1]).Where(byName.ContainsKey).ToList(), reached, results);
             }
             else if (parts[0] == "list")
             {
                 var matches = Filter.Parse(File.ReadAllText(parts[1]).Trim());
                 results.Add(byName.Keys.Where(matches).Select(n => (n, true, 0L, "")));
-            }
-            else if (parts[0] == "kill")
-            {
-                await Kill(File.ReadAllLines(parts[1]), results);
             }
         }
 
@@ -219,7 +228,25 @@ namespace DogFood.Mtp
         private async Task<bool> PlanInSets(string file, List<(string Name, int Id)> rows, bool check, string activated, List<string> failed, Results results)
         {
             var killed = new HashSet<int>();
-            var mutantOf = new Dictionary<string, int>();
+            var mutantOf = rows.GroupBy(r => r.Name).ToDictionary(g => g.Key, g => g.Last().Id);
+            var polluted = false;
+            var setFile = file + ".set";
+            foreach (var set in Turns(rows))
+            {
+                var alive = set.Where(r => !killed.Contains(r.Id)).ToList();
+                if (alive.Count > 0)
+                {
+                    File.WriteAllLines(setFile, alive.Select(r => r.Name + "\t" + r.Id));
+                    control.Set("", -1, null, activated, setFile);
+                    polluted |= await RunTurn(alive, mutantOf, killed, check, failed, results);
+                }
+            }
+            return polluted;
+        }
+
+        /// Each mutant's first test, then each mutant's second test, and so on.
+        private static List<List<(string Name, int Id)>> Turns(List<(string Name, int Id)> rows)
+        {
             var sets = new List<List<(string Name, int Id)>>();
             var taken = new Dictionary<int, int>();
             foreach (var row in rows)
@@ -231,33 +258,26 @@ namespace DogFood.Mtp
                     sets.Add(new List<(string Name, int Id)>());
                 }
                 sets[turn].Add(row);
-                mutantOf[row.Name] = row.Id;
             }
-            var polluted = false;
-            var setFile = file + ".set";
-            foreach (var set in sets)
+            return sets;
+        }
+
+        /// Runs one set and notes what it killed; whether the kill check found pollution.
+        private async Task<bool> RunTurn(List<(string Name, int Id)> alive, Dictionary<string, int> mutantOf, HashSet<int> killed, bool check, List<string> failed, Results results)
+        {
+            var finished = await RunSet(alive.Select(r => r.Name), results);
+            var bad = finished.Where(r => !r.Passed).Select(r => r.Name).Distinct().Where(mutantOf.ContainsKey).ToList();
+            foreach (var name in bad)
             {
-                var alive = set.Where(r => !killed.Contains(r.Id)).ToList();
-                if (alive.Count == 0)
-                {
-                    continue;
-                }
-                File.WriteAllLines(setFile, alive.Select(r => r.Name + "\t" + r.Id));
-                control.Set("", -1, null, activated, setFile);
-                var finished = await RunSet(alive.Select(r => r.Name), results);
-                var bad = finished.Where(r => !r.Passed).Select(r => r.Name).Distinct().Where(mutantOf.ContainsKey).ToList();
-                foreach (var name in bad)
-                {
-                    killed.Add(mutantOf[name]);
-                    failed.Add(name);
-                }
-                if (check && bad.Count > 0)
-                {
-                    control.Set("", -1, null, null, Control.NoPlan);
-                    polluted |= await Quietly(async () => (await RunSet(bad, new Results())).Any(r => !r.Passed));
-                }
+                killed.Add(mutantOf[name]);
+                failed.Add(name);
             }
-            return polluted;
+            if (!check || bad.Count == 0)
+            {
+                return false;
+            }
+            control.Set("", -1, null, null, Control.NoPlan);
+            return await Quietly(async () => (await RunSet(bad, new Results())).Any(r => !r.Passed));
         }
 
         /// Runs `run` with no "running" lines or streamed results.

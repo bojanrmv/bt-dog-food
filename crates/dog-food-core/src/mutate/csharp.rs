@@ -398,26 +398,27 @@ fn coalesce<'t>(node: Node<'t>, src: &[u8], push: &mut dyn FnMut(Found<'t>)) {
     }
 }
 
+/// The field of each chain link that holds the rest of the chain.
+const CHAIN_LINKS: &[(&str, &str)] = &[
+    ("conditional_access_expression", "condition"),
+    ("member_access_expression", "expression"),
+    ("invocation_expression", "function"),
+    ("element_access_expression", "expression"),
+];
+
 /// The `?.` chain the grammar hung on `node`, or `node` when there is none.
 fn misread_chain(node: Node) -> Node {
     let mut current = node;
-    while let Some(parent) = current.parent() {
-        let field = match parent.kind() {
-            "conditional_access_expression" => "condition",
-            "member_access_expression" => "expression",
-            "invocation_expression" => "function",
-            "element_access_expression" => "expression",
-            _ => break,
-        };
-        if parent.child_by_field_name(field) != Some(current) {
-            break;
-        }
+    while let Some(parent) = current.parent().filter(|p| is_link_of(*p, current)) {
         current = parent;
     }
-    if current.kind() == "binary_expression" {
-        return node;
-    }
     current
+}
+
+fn is_link_of(parent: Node, child: Node) -> bool {
+    CHAIN_LINKS.iter().any(|(kind, field)| {
+        parent.kind() == *kind && parent.child_by_field_name(field) == Some(child)
+    })
 }
 
 const VALUE_TYPES: &[&str] = &[

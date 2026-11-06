@@ -89,14 +89,7 @@ impl NodeTests {
             .take_while(|dir| dir.starts_with(sandbox))
             .find_map(|dir| runner_of(dir).map(|r| (dir.to_path_buf(), r)))
             .ok_or("no package.json with vitest or jest above the mutated files")?;
-        let mut angular: Vec<AngularProject> = Vec::new();
-        for file in files {
-            if let Some(project) = angular_project(&package, &sandbox.join(&file.relative)) {
-                if !angular.iter().any(|p| p.name == project.name) {
-                    angular.push(project);
-                }
-            }
-        }
+        let angular = angular_projects(&package, sandbox, files);
         let runner = if angular.is_empty() {
             runner
         } else {
@@ -104,14 +97,7 @@ impl NodeTests {
         };
         let script = script_for(&package, runner)
             .ok_or("the test runner is not installed (run npm install in the repository)")?;
-        let warm = match runner {
-            Runner::Jest => HashMap::new(),
-            Runner::Vitest => HashMap::from([(String::new(), Mutex::new(Slot::NotStarted))]),
-            Runner::Angular => angular
-                .iter()
-                .map(|p| (p.name.clone(), Mutex::new(Slot::NotStarted)))
-                .collect(),
-        };
+        let warm = warm_slots(runner, &angular);
         Ok(NodeTests {
             package,
             runner,
@@ -211,8 +197,7 @@ impl NodeTests {
     ) -> Option<TestRun> {
         let name = project.map_or("", |p| p.name.as_str());
         let mut slot = self.warm.get(name)?.lock().ok()?;
-        let started = Instant::now();
-        match &mut *slot {
+        match &*slot {
             Slot::Cold => None,
             Slot::NotStarted if !run.files.is_empty() => None,
             Slot::NotStarted => {
@@ -222,28 +207,7 @@ impl NodeTests {
                 }
                 status
             }
-            Slot::Running(warm) => {
-                let ran = warm.run(run, limit);
-                debug!(
-                    "warm",
-                    "{name}: {} test files in {:.1} s: {ran:?}",
-                    run.files.len(),
-                    started.elapsed().as_secs_f64()
-                );
-                match ran {
-                    Ok(status) => {
-                        if warm.stuck {
-                            *slot = Slot::Cold;
-                        }
-                        Some(status)
-                    }
-                    Err(reason) => {
-                        debug!("warm", "{name}: no longer kept alive: {reason}");
-                        *slot = Slot::Cold;
-                        None
-                    }
-                }
-            }
+            Slot::Running(_) => run_warm(&mut slot, name, run, limit),
         }
     }
 
@@ -381,6 +345,54 @@ impl NodeTests {
             .collect()
     }
 
+    /// What the run without mutants, which took `wall`, says about reach.
+    fn reach_of(
+        &self,
+        report: Report,
+        flaky: BTreeSet<String>,
+        wall: Duration,
+        reached: &Path,
+    ) -> Reach {
+        // Each name is stored twice (Vitest's and Jest's spelling).
+        let tests: Duration = report.times.values().sum::<Duration>() / 2;
+        let mut per_file = wall.saturating_sub(tests);
+        if self.all_warm() {
+            per_file = per_file.min(WARM_MOST_STARTUP);
+        }
+        let startup = report
+            .home
+            .values()
+            .map(|file| (file.clone(), per_file))
+            .collect();
+        let package = self
+            .package
+            .strip_prefix(&self.sandbox)
+            .unwrap_or(Path::new(""));
+        let mut reach = Reach {
+            failing: failing_tests(&report.outcome),
+            flaky,
+            files: report
+                .home
+                .iter()
+                .map(|(test, file)| {
+                    (
+                        test.clone(),
+                        vec![package.join(file).to_string_lossy().replace('\\', "/")],
+                    )
+                })
+                .collect(),
+            home: report.home,
+            times: report.times,
+            startup,
+            duration: wall,
+            ..Reach::default()
+        };
+        for line in lines_in(reached) {
+            add_reach(&mut reach, &line, &self.package);
+        }
+        reach
+    }
+
     /// Runs the test files of the tests that failed with no mutant once more,
     /// still recording reach: tests that pass now count as passing (a test
     /// that fails only now and then would otherwise take every mutant only it
@@ -510,6 +522,73 @@ impl NodeTests {
     }
 }
 
+/// The Angular projects holding `files`, each once.
+fn angular_projects(package: &Path, sandbox: &Path, files: &[FileMutants]) -> Vec<AngularProject> {
+    let mut angular: Vec<AngularProject> = Vec::new();
+    for project in files
+        .iter()
+        .filter_map(|file| angular_project(package, &sandbox.join(&file.relative)))
+    {
+        if !angular.iter().any(|p| p.name == project.name) {
+            angular.push(project);
+        }
+    }
+    angular
+}
+
+/// A place for each test runner to keep alive; Jest has none.
+fn warm_slots(runner: Runner, angular: &[AngularProject]) -> HashMap<String, Mutex<Slot>> {
+    match runner {
+        Runner::Jest => HashMap::new(),
+        Runner::Vitest => HashMap::from([(String::new(), Mutex::new(Slot::NotStarted))]),
+        Runner::Angular => angular
+            .iter()
+            .map(|p| (p.name.clone(), Mutex::new(Slot::NotStarted)))
+            .collect(),
+    }
+}
+
+/// Does a run in the runner in `slot`; `None` when it has gone, and the run
+/// has to start one of its own.
+fn run_warm(slot: &mut Slot, name: &str, run: &WarmRun, limit: Duration) -> Option<TestRun> {
+    let Slot::Running(warm) = slot else {
+        return None;
+    };
+    let started = Instant::now();
+    let ran = warm.run(run, limit);
+    debug!(
+        "warm",
+        "{name}: {} test files in {:.1} s: {ran:?}",
+        run.files.len(),
+        started.elapsed().as_secs_f64()
+    );
+    let stuck = warm.stuck;
+    match ran {
+        Ok(status) => {
+            if stuck {
+                *slot = Slot::Cold;
+            }
+            Some(status)
+        }
+        Err(reason) => {
+            debug!("warm", "{name}: no longer kept alive: {reason}");
+            *slot = Slot::Cold;
+            None
+        }
+    }
+}
+
+/// An error when no test ran because a test file failed to load.
+fn nothing_ran(report: &Report, folder: &Path) -> Result<(), String> {
+    match &report.first_failure {
+        Some(failure) if report.outcome.is_empty() => Err(format!(
+            "no test ran without mutants; the first test file that failed: {failure} (all results: {})",
+            folder.join("report.json").display()
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// What a pack's run shows. A test that failed although its mutant never took
 /// effect in it failed by what an earlier test left behind (a mock's queued
 /// value, say), and a pass there says nothing: the shared logic gives both
@@ -572,55 +651,15 @@ impl Engine for NodeTests {
         if status == TestRun::TimedOut && budget.spent() {
             return Ok(None);
         }
-        if report.outcome.is_empty() {
-            if let Some(failure) = &report.first_failure {
-                return Err(format!(
-                    "no test ran without mutants; the first test file that failed: {failure} (all results: {})",
-                    folder.join("report.json").display()
-                ));
-            }
-        }
+        nothing_ran(&report, &folder)?;
         let flaky = self.run_failing_again(&mut report, &env, budget, &folder);
         check_baseline(status, &report.outcome, Some(&folder))?;
-        let wall = started.elapsed();
-        // Each name is stored twice (Vitest's and Jest's spelling).
-        let tests: Duration = report.times.values().sum::<Duration>() / 2;
-        let mut per_file = wall.saturating_sub(tests);
-        if self.all_warm() {
-            per_file = per_file.min(WARM_MOST_STARTUP);
-        }
-        let startup = report
-            .home
-            .values()
-            .map(|file| (file.clone(), per_file))
-            .collect();
-        let package = self
-            .package
-            .strip_prefix(&self.sandbox)
-            .unwrap_or(Path::new(""));
-        let mut reach = Reach {
-            failing: failing_tests(&report.outcome),
+        Ok(Some(self.reach_of(
+            report,
             flaky,
-            files: report
-                .home
-                .iter()
-                .map(|(test, file)| {
-                    (
-                        test.clone(),
-                        vec![package.join(file).to_string_lossy().replace('\\', "/")],
-                    )
-                })
-                .collect(),
-            home: report.home,
-            times: report.times,
-            startup,
-            duration: wall,
-            ..Reach::default()
-        };
-        for line in lines_in(&reached) {
-            add_reach(&mut reach, &line, &self.package);
-        }
-        Ok(Some(reach))
+            started.elapsed(),
+            &reached,
+        )))
     }
 
     fn pack(

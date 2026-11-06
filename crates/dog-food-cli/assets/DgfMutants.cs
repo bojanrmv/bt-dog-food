@@ -113,14 +113,21 @@ namespace DogFood.Mutation
         {
             if (Control != null)
             {
-                int inSet;
-                return controlPlanned != null
-                    ? controlPlan != null && controlPlan.TryGetValue(test, out inSet) && inSet == id
-                    : controlMutant == id;
+                return ControlPlanned(test, id);
             }
             var plan = System.AppDomain.CurrentDomain.GetData("DgfPlan") as System.Collections.Generic.Dictionary<string, int>;
             int planned;
             return plan != null && plan.TryGetValue(test, out planned) && planned == id;
+        }
+
+        private static bool ControlPlanned(string test, int id)
+        {
+            if (controlPlanned == null)
+            {
+                return controlMutant == id;
+            }
+            int inSet;
+            return controlPlan != null && controlPlan.TryGetValue(test, out inSet) && inSet == id;
         }
 
         /// In a run that records reach, the switches of some comparisons and

@@ -1473,13 +1473,7 @@ fn packed(
     while !open.is_empty() {
         let (next, round, done) = next_round(&open, reach, &tried, count);
         // No untried test left, and every tried one passed: a survivor.
-        for id in done {
-            if engine.confirms_survivors() {
-                solo.insert(id);
-            } else {
-                result.outcomes.insert(id, Outcome::Survived);
-            }
-        }
+        settle_survivors(engine, done, &mut solo, result);
         if round.is_empty() {
             break;
         }
@@ -1495,17 +1489,10 @@ fn packed(
         solo.extend(resolved.fresh.iter().copied());
         fresh.extend(resolved.fresh);
         open = resolved.passed;
-        // Each timed-out pack gave up on the mutant whose test was running,
-        // so this ends; the limit is for a run that keeps stopping anyway.
         for (id, ran) in resolved.cut_short {
             let times = cut.entry(id).or_insert(0);
             *times += 1;
-            if *times > CUT_SHORT {
-                solo.insert(id);
-            } else {
-                tried.entry(id).or_default().extend(ran);
-                open.push(id);
-            }
+            take_cut_short(id, ran, *times, &mut tried, &mut open, &mut solo);
         }
         count *= 2;
     }
@@ -1514,6 +1501,42 @@ fn packed(
         fresh,
         tried,
     })
+}
+
+/// Mutants with no untried test left, all of whose tried tests passed: survivors,
+/// or for a runner that wants it, run alone first.
+fn settle_survivors(
+    engine: &dyn Engine,
+    done: Vec<usize>,
+    solo: &mut BTreeSet<usize>,
+    result: &mut RunResult,
+) {
+    for id in done {
+        if engine.confirms_survivors() {
+            solo.insert(id);
+        } else {
+            result.outcomes.insert(id, Outcome::Survived);
+        }
+    }
+}
+
+/// A mutant whose pack timed out goes on in the next round with the tests that
+/// did run counted. Each timed-out pack gave up on the mutant whose test was
+/// running, so this ends; the limit is for a run that keeps stopping anyway.
+fn take_cut_short(
+    id: usize,
+    ran: BTreeSet<String>,
+    times: u32,
+    tried: &mut HashMap<usize, BTreeSet<String>>,
+    open: &mut Vec<usize>,
+    solo: &mut BTreeSet<usize>,
+) {
+    if times > CUT_SHORT {
+        solo.insert(id);
+    } else {
+        tried.entry(id).or_default().extend(ran);
+        open.push(id);
+    }
 }
 
 /// The next round's tests for the `open` mutants (`count` each, plus the
@@ -1922,41 +1945,71 @@ fn resolve(
     };
     let mut found = Resolved::default();
     for &id in &pack.mutants {
-        let tests = &reach.by_mutant[&id];
-        // A failing test kills the mutant whatever the others do, so a run
-        // may skip a killed mutant's other tests.
-        let failed: Vec<&String> = tests
-            .iter()
-            .filter(|t| results.outcome.get(*t) == Some(&false))
-            .collect();
-        let real: Vec<String> = failed
-            .iter()
-            .filter(|t| !results.polluted.contains(**t))
-            .map(|t| t.to_string())
-            .collect();
-        if !real.is_empty() {
-            outcomes.insert(id, Outcome::Killed);
-            killers.insert(id, real);
-        } else if !failed.is_empty() {
-            found.fresh.push(id);
-        } else if tests.iter().any(|t| !results.outcome.contains_key(t)) {
-            if results.timed_out && !tests.iter().any(|t| results.running.contains(t)) {
-                let ran = tests
-                    .iter()
-                    .filter(|t| results.outcome.contains_key(*t) && results.activated(t, id))
-                    .cloned()
-                    .collect();
-                found.cut_short.push((id, ran));
-            } else {
-                found.undecided.push(id);
+        match pack_verdict(&reach.by_mutant[&id], id, results) {
+            PackVerdict::Killed(real) => {
+                outcomes.insert(id, Outcome::Killed);
+                killers.insert(id, real);
             }
-        } else if tests.iter().any(|t| !results.activated(t, id)) {
-            found.fresh.push(id);
-        } else {
-            found.passed.push(id);
+            PackVerdict::Fresh => found.fresh.push(id),
+            PackVerdict::CutShort(ran) => found.cut_short.push((id, ran)),
+            PackVerdict::Undecided => found.undecided.push(id),
+            PackVerdict::Passed => found.passed.push(id),
         }
     }
     found
+}
+
+/// What a pack's run says about one of its mutants.
+enum PackVerdict {
+    /// Killed, by these tests.
+    Killed(Vec<String>),
+    /// Only a fresh process can tell.
+    Fresh,
+    /// The run stopped before these tests' mutant was done: they did run.
+    CutShort(BTreeSet<String>),
+    Undecided,
+    Passed,
+}
+
+fn pack_verdict(tests: &BTreeSet<String>, id: usize, results: &TestResults) -> PackVerdict {
+    // A failing test kills the mutant whatever the others do, so a run
+    // may skip a killed mutant's other tests.
+    let failed: Vec<&String> = tests
+        .iter()
+        .filter(|t| results.outcome.get(*t) == Some(&false))
+        .collect();
+    let real: Vec<String> = failed
+        .iter()
+        .filter(|t| !results.polluted.contains(**t))
+        .map(|t| t.to_string())
+        .collect();
+    if !real.is_empty() {
+        return PackVerdict::Killed(real);
+    }
+    if !failed.is_empty() {
+        return PackVerdict::Fresh;
+    }
+    if tests.iter().any(|t| !results.outcome.contains_key(t)) {
+        return unreported(tests, id, results);
+    }
+    if tests.iter().any(|t| !results.activated(t, id)) {
+        return PackVerdict::Fresh;
+    }
+    PackVerdict::Passed
+}
+
+/// A mutant some of whose tests never reported.
+fn unreported(tests: &BTreeSet<String>, id: usize, results: &TestResults) -> PackVerdict {
+    if !results.timed_out || tests.iter().any(|t| results.running.contains(t)) {
+        return PackVerdict::Undecided;
+    }
+    PackVerdict::CutShort(
+        tests
+            .iter()
+            .filter(|t| results.outcome.contains_key(*t) && results.activated(t, id))
+            .cloned()
+            .collect(),
+    )
 }
 
 #[cfg(test)]

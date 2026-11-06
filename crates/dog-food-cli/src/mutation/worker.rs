@@ -126,6 +126,22 @@ pub enum Reply {
     Crashed(Report),
 }
 
+impl Report {
+    /// Takes in what `line` says about the request's tests.
+    fn read(&mut self, line: &str) {
+        if let Some(pair) = activated(line) {
+            self.activated.insert(pair);
+        } else if let Some(test) = line.strip_prefix("polluted\t") {
+            self.polluted.insert(test.trim().to_string());
+        } else if let Some(test) = line.strip_prefix("running\t") {
+            self.running.insert(test.trim().to_string());
+        } else if let Some(row) = row(line) {
+            self.running.remove(&row.test);
+            self.rows.push(row);
+        }
+    }
+}
+
 /// An "activated" line: test, mutant id.
 fn activated(line: &str) -> Option<(String, usize)> {
     let (test, id) = line.strip_prefix("activated\t")?.rsplit_once('\t')?;
@@ -414,15 +430,8 @@ impl Worker {
             self.last_word = Some(said);
         } else if line.starts_with("stats\t") {
             self.stats = stats(line);
-        } else if let Some(pair) = activated(line) {
-            report.activated.insert(pair);
-        } else if let Some(test) = line.strip_prefix("polluted\t") {
-            report.polluted.insert(test.trim().to_string());
-        } else if let Some(test) = line.strip_prefix("running\t") {
-            report.running.insert(test.trim().to_string());
-        } else if let Some(row) = row(line) {
-            report.running.remove(&row.test);
-            report.rows.push(row);
+        } else {
+            report.read(line);
         }
     }
 

@@ -294,9 +294,19 @@ impl Dotnet {
             first: Mutex::new(Some(first)),
             stopped: AtomicBool::new(false),
         };
+        self.share_baseline(&shared, workers)
+    }
+
+    /// Runs the batches of `shared` in up to `workers` workers.
+    fn share_baseline(
+        &self,
+        shared: &BaselineShare,
+        workers: usize,
+    ) -> Result<(TestRun, Results), String> {
+        let (project, target) = (shared.project, shared.target);
         let ran: Vec<Result<WorkerShare, String>> = std::thread::scope(|scope| {
             let threads: Vec<_> = (0..workers)
-                .map(|_| scope.spawn(|| self.baseline_worker(&shared)))
+                .map(|_| scope.spawn(|| self.baseline_worker(shared)))
                 .collect();
             threads
                 .into_iter()
@@ -553,44 +563,11 @@ impl Dotnet {
                 .collect();
             lookups.into_iter().filter_map(|l| l.join().ok()).collect()
         });
-        let refused: Vec<String> = found
-            .iter()
-            .filter_map(|(assembly, target)| {
-                target
-                    .as_ref()
-                    .err()
-                    .map(|why| format!("{assembly}: {why}"))
-            })
-            .collect();
-        if !refused.is_empty() {
-            return Err(format!(
-                "dog-food cannot run these test projects:\n  {}\nExclude them with --exclude-test-project.",
-                refused.join("\n  ")
-            ));
-        }
+        refuse_unservable(&found)?;
         let mut targets = HashMap::new();
         for (assembly, target) in found {
             let found = target?;
-            debug!(
-                "targets",
-                "{assembly}: {}{}",
-                found.target.dll.display(),
-                if found.target.mtp {
-                    " (testing platform)"
-                } else {
-                    ""
-                }
-            );
-            if let Some(framework) = found.chosen {
-                if let Ok(mut notes) = self.notes.lock() {
-                    notes.push(format!(
-                        "{assembly} has several target frameworks: its tests ran on {framework}"
-                    ));
-                }
-            }
-            if found.target.mtp {
-                xunit_one_at_a_time(&found.target.dll);
-            }
+            self.note_target(&assembly, &found);
             targets.insert(assembly, found.target);
         }
         if targets.values().any(|t| t.mtp) {
@@ -600,6 +577,30 @@ impl Dotnet {
             self.workers.set_vstest(worker_program()?);
         }
         Ok(targets)
+    }
+
+    /// Says what was found for a test project, and readies its test host.
+    fn note_target(&self, assembly: &str, found: &Found) {
+        let host = if found.target.mtp {
+            " (testing platform)"
+        } else {
+            ""
+        };
+        debug!(
+            "targets",
+            "{assembly}: {}{host}",
+            found.target.dll.display()
+        );
+        if let Some(framework) = &found.chosen {
+            if let Ok(mut notes) = self.notes.lock() {
+                notes.push(format!(
+                    "{assembly} has several target frameworks: its tests ran on {framework}"
+                ));
+            }
+        }
+        if found.target.mtp {
+            xunit_one_at_a_time(&found.target.dll);
+        }
     }
 
     /// The runs whose test project can see `mutant`: its build output holds
@@ -1020,6 +1021,26 @@ fn splittable(filter: Option<&str>) -> bool {
             term.is_empty() || matches!(name, "FullyQualifiedName" | "DisplayName")
         })
     })
+}
+
+/// An error naming the test projects no worker can serve, if any.
+fn refuse_unservable(found: &[(String, Result<Found, String>)]) -> Result<(), String> {
+    let refused: Vec<String> = found
+        .iter()
+        .filter_map(|(assembly, target)| {
+            target
+                .as_ref()
+                .err()
+                .map(|why| format!("{assembly}: {why}"))
+        })
+        .collect();
+    if refused.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "dog-food cannot run these test projects:\n  {}\nExclude them with --exclude-test-project.",
+        refused.join("\n  ")
+    ))
 }
 
 /// How long a test project's tests must take to earn another baseline worker.

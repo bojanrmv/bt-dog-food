@@ -150,29 +150,10 @@ impl Warm {
             Err(err) => return Started::Refused(format!("could not start the runner: {err}")),
         };
         let job = cpu::Job::of(&child);
-        let (sender, lines) = channel();
         let log = folder.join("server.log");
-        let output = std::fs::File::create(&log).ok();
-        for stream in [
-            child
-                .stdout
-                .take()
-                .map(|s| Box::new(s) as Box<dyn Read + Send>),
-            child
-                .stderr
-                .take()
-                .map(|s| Box::new(s) as Box<dyn Read + Send>),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let sender = sender.clone();
-            let output = output.as_ref().and_then(|f| f.try_clone().ok());
-            std::thread::spawn(move || read_lines(stream, output, sender));
-        }
-        drop(sender);
+        let lines = read_output(&mut child, &log);
         let input = child.stdin.take();
-        let mut warm = Warm {
+        let warm = Warm {
             child,
             job,
             input,
@@ -180,10 +161,13 @@ impl Warm {
             control,
             stuck: false,
         };
-        let refused =
-            |reason: String| Started::Refused(format!("{reason} (its output: {})", log.display()));
+        warm.first_run(limit, &log)
+    }
+
+    /// Waits for the first run, which runs every test.
+    fn first_run(mut self, limit: Duration, log: &Path) -> Started {
         loop {
-            match warm.wait(limit, true) {
+            match self.wait(limit, true) {
                 Waited::Line(Line::Init) => continue,
                 Waited::Line(Line::Done(failed)) => {
                     let status = if failed {
@@ -191,12 +175,12 @@ impl Warm {
                     } else {
                         TestRun::Passed
                     };
-                    return Started::Ready(warm, status);
+                    return Started::Ready(self, status);
                 }
-                Waited::Line(Line::BuildFailed) => return refused("the build failed".into()),
-                Waited::Line(Line::Refused(reason)) => return refused(reason),
-                Waited::OverTime => return refused("no first run in time".into()),
-                Waited::Gone => return refused("it ended before its first run".into()),
+                other => {
+                    let reason = why_refused(other);
+                    return Started::Refused(format!("{reason} (its output: {})", log.display()));
+                }
             }
         }
     }
@@ -233,28 +217,15 @@ impl Warm {
     /// The next line, or why there will not be one in time. Before the first
     /// run a runner that uses no processor is waiting for nothing.
     fn wait(&mut self, limit: Duration, starting: bool) -> Waited {
-        let started = Instant::now();
-        let used_before = self.used().unwrap_or_default();
-        let mut last = (used_before, Instant::now());
+        let mut watch = Watch::new(self.used().unwrap_or_default(), limit, starting);
         loop {
             match self.lines.recv_timeout(Duration::from_millis(20)) {
                 Ok(line) => return Waited::Line(line),
                 Err(RecvTimeoutError::Disconnected) => return Waited::Gone,
                 Err(RecvTimeoutError::Timeout) => {}
             }
-            let used = self.used();
-            let spent = used.map(|u| u.saturating_sub(used_before));
-            if exec::past_limit(started.elapsed(), spent, limit) {
+            if watch.over(self.used()) {
                 return Waited::OverTime;
-            }
-            if starting {
-                if let Some(now) = used {
-                    if now > last.0 + Duration::from_millis(100) {
-                        last = (now, Instant::now());
-                    } else if last.1.elapsed() > IDLE_START {
-                        return Waited::OverTime;
-                    }
-                }
             }
         }
     }
@@ -288,6 +259,48 @@ impl Warm {
     }
 }
 
+/// Whether a wait has gone on too long.
+struct Watch {
+    started: Instant,
+    used_before: Duration,
+    limit: Duration,
+    starting: bool,
+    last_used: Duration,
+    last_change: Instant,
+}
+
+impl Watch {
+    fn new(used_before: Duration, limit: Duration, starting: bool) -> Watch {
+        Watch {
+            started: Instant::now(),
+            used_before,
+            limit,
+            starting,
+            last_used: used_before,
+            last_change: Instant::now(),
+        }
+    }
+
+    /// Past the limit; or, before the first run, waiting for nothing.
+    fn over(&mut self, used: Option<Duration>) -> bool {
+        let spent = used.map(|u| u.saturating_sub(self.used_before));
+        exec::past_limit(self.started.elapsed(), spent, self.limit)
+            || (self.starting && self.idle(used))
+    }
+
+    /// No processor time for `IDLE_START`, when the processor time is known.
+    fn idle(&mut self, used: Option<Duration>) -> bool {
+        let Some(now) = used else {
+            return false;
+        };
+        if now > self.last_used + Duration::from_millis(100) {
+            self.last_used = now;
+            self.last_change = Instant::now();
+        }
+        self.last_change.elapsed() > IDLE_START
+    }
+}
+
 impl Drop for Warm {
     fn drop(&mut self) {
         // Its stdin closing ends it; the rest is for one that is stuck.
@@ -303,6 +316,38 @@ impl Drop for Warm {
         }
         exec::kill_tree(&mut self.child, self.job.as_ref());
     }
+}
+
+/// Why a first run did not come.
+fn why_refused(waited: Waited) -> String {
+    match waited {
+        Waited::Line(Line::BuildFailed) => "the build failed".into(),
+        Waited::Line(Line::Refused(reason)) => reason,
+        Waited::OverTime => "no first run in time".into(),
+        _ => "it ended before its first run".into(),
+    }
+}
+
+/// Copies what `child` prints to `log`; what the server says comes out here.
+fn read_output(child: &mut Child, log: &Path) -> Receiver<Line> {
+    let (sender, lines) = channel();
+    let output = std::fs::File::create(log).ok();
+    let streams = [
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+    ];
+    for stream in streams.into_iter().flatten() {
+        let sender = sender.clone();
+        let output = output.as_ref().and_then(|f| f.try_clone().ok());
+        std::thread::spawn(move || read_lines(stream, output, sender));
+    }
+    lines
 }
 
 /// Copies a stream of the server to `output`, and sends on what it says.
