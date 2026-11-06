@@ -276,6 +276,8 @@ pub struct Reach {
     pub files: HashMap<String, Vec<String>>,
     /// Tests that fail with no mutant active: left out of every decision.
     pub failing: BTreeSet<String>,
+    /// Tests that failed with no mutant active and passed when run again.
+    pub flaky: BTreeSet<String>,
     pub duration: Duration,
     /// Each test's time in the run without mutants.
     pub times: HashMap<String, Duration>,
@@ -529,6 +531,12 @@ pub trait Engine: Sync {
         tag: &str,
     ) -> Result<SoloRun, String>;
     fn test_projects(&self) -> Vec<String>;
+    /// Whether a mutant that survived its packs runs once more alone before
+    /// it counts: other mutants in a pack can leave state behind that hides
+    /// it, and this runner has no check that catches that.
+    fn confirms_survivors(&self) -> bool {
+        false
+    }
     /// Why the run tagged `tag` ended without reporting its tests, from its
     /// output.
     fn crash_reason(&self, _tag: &str) -> Option<String> {
@@ -1230,15 +1238,44 @@ fn home_times(reach: &Reach) -> String {
 }
 
 fn note_failing(reach: &Reach, result: &mut RunResult) {
-    if reach.failing.is_empty() {
+    if reach.failing.is_empty() && reach.flaky.is_empty() {
         return;
     }
-    let names: Vec<&String> = reach.failing.iter().take(5).collect();
-    tellln!(
-        "note: {} tests fail without any mutant and are left out: {names:?}",
-        reach.failing.len()
-    );
+    let failing = one_spelling(&reach.failing);
+    if !failing.is_empty() {
+        let names = &failing[..failing.len().min(5)];
+        let note = format!(
+            "{} tests fail without any mutant and are left out, so mutants only they reach look untested: {names:?}",
+            failing.len()
+        );
+        tellln!("note: {note}");
+        result.notes.push(note);
+    }
     result.set_aside.extend(reach.failing.iter().cloned());
+    let flaky = one_spelling(&reach.flaky);
+    if !flaky.is_empty() {
+        let names = &flaky[..flaky.len().min(5)];
+        let note = format!(
+            "{} tests failed without any mutant and passed when run again, so they may depend on other tests or on timing: {names:?}; a kill by one of them is less certain",
+            flaky.len()
+        );
+        tellln!("note: {note}");
+        result.notes.push(note);
+    }
+}
+
+/// `tests` with a name stored in both frameworks' spellings ("a > b" and
+/// "a b") given once.
+fn one_spelling(tests: &BTreeSet<String>) -> Vec<&String> {
+    tests
+        .iter()
+        .filter(|test| {
+            test.contains(" > ")
+                || !tests
+                    .iter()
+                    .any(|other| other.contains(" > ") && other.replace(" > ", " ") == **test)
+        })
+        .collect()
 }
 
 /// Every mutant of `files` without an outcome was left untested at `step`.
@@ -1437,7 +1474,11 @@ fn packed(
         let (next, round, done) = next_round(&open, reach, &tried, count);
         // No untried test left, and every tried one passed: a survivor.
         for id in done {
-            result.outcomes.insert(id, Outcome::Survived);
+            if engine.confirms_survivors() {
+                solo.insert(id);
+            } else {
+                result.outcomes.insert(id, Outcome::Survived);
+            }
         }
         if round.is_empty() {
             break;
@@ -1958,6 +1999,14 @@ mod tests {
     /// A pack stopped at its time limit: the mutant whose test was running
     /// gets a solo run, a mutant whose tests had not started goes back in
     /// the packs with what it already passed, and what was decided stands.
+    #[test]
+    fn a_test_stored_under_both_spellings_counts_once() {
+        let tests: BTreeSet<String> = ["a > b", "a b", "plain", "c > d", "c d"]
+            .map(String::from)
+            .into();
+        assert_eq!(one_spelling(&tests), ["a > b", "c > d", "plain"]);
+    }
+
     #[test]
     fn a_timed_out_pack_keeps_what_it_reported() {
         let reach = reach(&[

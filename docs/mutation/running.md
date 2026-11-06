@@ -37,7 +37,7 @@ mutation score 14% · 3 killed, 5 survived, 14 no tests, 0 timeout, 0 did not co
 
 Score = detected ÷ (detected + survived + no tests), per function and overall.
 
-The run first runs the tests once without mutants. When half of them or more fail, it stops: fix them, or leave them out with a test filter. Fewer failing tests are set aside, and only the others decide about mutants.
+The run first runs the tests once without mutants. When half of them or more fail, it stops: fix them, or leave them out with a test filter. Fewer failing tests are set aside, and only the others decide about mutants. For TypeScript and JavaScript, the test files with failing tests run once more first: a test that passes then is kept, and the report's notes name it, since a test that fails only now and then makes its kills less certain. Tests that still fail are named in the report's notes too.
 
 ## Reports
 

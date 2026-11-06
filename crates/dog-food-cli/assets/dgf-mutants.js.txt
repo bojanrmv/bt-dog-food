@@ -1,7 +1,7 @@
 
 
 // Added by dog-food (dgf mutate --run) in the mutation sandbox only.
-// DGF_MUTANT: one active mutant · DGF_PLAN: "test<TAB>id" lines · DGF_REACH: folder for reach records · DGF_CONTROL: file with these, per run
+// DGF_MUTANT: one active mutant · DGF_PLAN: "test<TAB>id" lines · DGF_ACTIVATED: file for the ones that took effect · DGF_REACH: folder for reach records · DGF_CONTROL: file with these, per run
 function __dgfIs(id) {
   const g = globalThis;
   const s = g.__dgfState || (g.__dgfState = __dgfLoad(g));
@@ -17,7 +17,12 @@ function __dgfIs(id) {
     s.fs.appendFileSync(s.reach, key + "\n");
   }
   if (s.plan) {
-    return s.plan.get(test) === id;
+    const on = s.plan.get(test) === id;
+    if (on && s.activated && !s.on.has(key)) {
+      s.on.add(key);
+      s.fs.appendFileSync(s.activated, test + "\t" + id + "\n");
+    }
+    return on;
   }
   return s.active === id;
 }
@@ -40,5 +45,5 @@ function __dgfLoad(g) {
   }
   const reach = env.DGF_REACH && fs ? env.DGF_REACH + "/reach-" + Math.random().toString(36).slice(2) + ".txt" : undefined;
   const active = env.DGF_MUTANT === undefined ? -1 : Number(env.DGF_MUTANT);
-  return { active, plan, reach, seen: new Set(), fs };
+  return { active, plan, reach, seen: new Set(), on: new Set(), activated: env.DGF_ACTIVATED, fs };
 }

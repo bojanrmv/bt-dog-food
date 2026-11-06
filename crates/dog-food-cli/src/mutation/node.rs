@@ -381,6 +381,56 @@ impl NodeTests {
             .collect()
     }
 
+    /// Runs the test files of the tests that failed with no mutant once more,
+    /// still recording reach: tests that pass now count as passing (a test
+    /// that fails only now and then would otherwise take every mutant only it
+    /// reaches with it). Returns those tests.
+    fn run_failing_again(
+        &self,
+        report: &mut Report,
+        env: &[(&str, String)],
+        budget: Budget,
+        folder: &Path,
+    ) -> BTreeSet<String> {
+        let failing = failing_tests(&report.outcome);
+        if failing.is_empty() {
+            return BTreeSet::new();
+        }
+        let again = folder.join("again");
+        let files = self.files_for(
+            &failing,
+            &Reach {
+                home: report.home.clone(),
+                ..Reach::default()
+            },
+        );
+        let ran = std::fs::create_dir_all(&again)
+            .map_err(|err| err.to_string())
+            .and_then(|()| self.run(&files, env, budget.limit(HOUR), &again));
+        let (status, second) = match ran {
+            Ok(ran) => ran,
+            Err(err) => {
+                debug!("reach", "the failing tests could not run again: {err}");
+                return BTreeSet::new();
+            }
+        };
+        let flaky: BTreeSet<String> = failing
+            .into_iter()
+            .filter(|test| second.outcome.get(test) == Some(&true))
+            .collect();
+        debug!(
+            "reach",
+            "{} test names failed with no mutant; run again ({} test files, {status:?}), {} of them passed",
+            failing_tests(&report.outcome).len(),
+            files.len(),
+            flaky.len()
+        );
+        for test in &flaky {
+            report.outcome.insert(test.clone(), true);
+        }
+        flaky
+    }
+
     /// The chosen Angular project a file (relative to the package) is in.
     fn owner(&self, file: &str) -> Option<&AngularProject> {
         let file = file.replace('\\', "/");
@@ -460,7 +510,39 @@ impl NodeTests {
     }
 }
 
+/// What a pack's run shows. A test that failed although its mutant never took
+/// effect in it failed by what an earlier test left behind (a mock's queued
+/// value, say), and a pass there says nothing: the shared logic gives both
+/// mutants a run alone.
+fn pack_results(
+    outcome: HashMap<String, bool>,
+    plan: &[(String, usize)],
+    took_effect: &str,
+) -> TestResults {
+    let activated: BTreeSet<(String, usize)> = took_effect
+        .lines()
+        .filter_map(|line| {
+            let (test, id) = line.rsplit_once('\t')?;
+            Some((test.to_string(), id.trim().parse().ok()?))
+        })
+        .collect();
+    let polluted = plan
+        .iter()
+        .filter(|pair| outcome.get(&pair.0) == Some(&false) && !activated.contains(*pair))
+        .map(|(test, _)| test.clone())
+        .collect();
+    TestResults {
+        polluted,
+        activated: Some(activated),
+        ..TestResults::of(outcome)
+    }
+}
+
 impl Engine for NodeTests {
+    fn confirms_survivors(&self) -> bool {
+        true
+    }
+
     /// Vitest and Jest strip types without checking them, but Angular's
     /// builder type-checks, and a mutant can break narrowing (`typeof a ===
     /// "number" && ...` turned into `||`): tsc finds those first.
@@ -486,7 +568,7 @@ impl Engine for NodeTests {
         std::fs::create_dir_all(&reached).map_err(|err| err.to_string())?;
         let started = Instant::now();
         let env = [("DGF_REACH", reached.to_string_lossy().into_owned())];
-        let (status, report) = self.run(&[], &env, budget.limit(HOUR), &folder)?;
+        let (status, mut report) = self.run(&[], &env, budget.limit(HOUR), &folder)?;
         if status == TestRun::TimedOut && budget.spent() {
             return Ok(None);
         }
@@ -498,6 +580,7 @@ impl Engine for NodeTests {
                 ));
             }
         }
+        let flaky = self.run_failing_again(&mut report, &env, budget, &folder);
         check_baseline(status, &report.outcome, Some(&folder))?;
         let wall = started.elapsed();
         // Each name is stored twice (Vitest's and Jest's spelling).
@@ -517,6 +600,7 @@ impl Engine for NodeTests {
             .unwrap_or(Path::new(""));
         let mut reach = Reach {
             failing: failing_tests(&report.outcome),
+            flaky,
             files: report
                 .home
                 .iter()
@@ -549,15 +633,21 @@ impl Engine for NodeTests {
         let folder = fresh_folder(&self.sandbox, tag)?;
         let plan = folder.join("plan.txt");
         write_plan(&plan, &pack.plan)?;
+        let activated = folder.join("activated.txt");
         let tests: BTreeSet<String> = pack.plan.iter().map(|(t, _)| t.clone()).collect();
         let files = self.files_for(&tests, reach);
         let (status, report) = self.run(
             &files,
-            &[("DGF_PLAN", plan.to_string_lossy().into_owned())],
+            &[
+                ("DGF_PLAN", plan.to_string_lossy().into_owned()),
+                ("DGF_ACTIVATED", activated.to_string_lossy().into_owned()),
+            ],
             limit,
             &folder,
         )?;
-        Ok((status != TestRun::TimedOut).then(|| TestResults::of(report.outcome)))
+        let took_effect = std::fs::read_to_string(&activated).unwrap_or_default();
+        Ok((status != TestRun::TimedOut)
+            .then(|| pack_results(report.outcome, &pack.plan, &took_effect)))
     }
 
     fn solo(
@@ -881,6 +971,30 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pack_failure_whose_mutant_never_took_effect_is_not_its_kill() {
+        let outcome = HashMap::from([
+            ("a".to_string(), false),
+            ("b".to_string(), false),
+            ("c".to_string(), true),
+        ]);
+        let plan = vec![
+            ("a".to_string(), 1),
+            ("b".to_string(), 2),
+            ("c".to_string(), 3),
+        ];
+        let results = pack_results(outcome, &plan, "a\t1\n");
+        assert_eq!(
+            results.polluted,
+            BTreeSet::from(["b".to_string()]),
+            "b failed with its mutant off: what an earlier test left behind"
+        );
+        assert_eq!(
+            results.activated,
+            Some(BTreeSet::from([("a".to_string(), 1)]))
+        );
+    }
 
     #[test]
     fn a_test_file_that_fails_to_load_is_named_with_its_error() {
