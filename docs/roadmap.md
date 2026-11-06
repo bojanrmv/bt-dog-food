@@ -8,9 +8,16 @@ Value is the expected gain for teams using dgf. Effort is S (a day or two), M (a
 
 | What | Value | Effort | Notes |
 | --- | --- | --- | --- |
+| Mutate outside functions | high | M | Only code inside functions is mutated, so module-level constants and tables, property defaults and base-constructor arguments go untested. On a real repository these held most of the gaps an independent run found outside dgf's reach, including an error-code table no test pinned. The core already finds these mutants and the target step drops them, so this is mostly a target per file and a cache key for it. A separate score, so existing scores do not jump unexplained. |
+| TypeScript kills that another test caused | high | S–M | A test can fail from what an earlier test in its file left behind, even though its own mutant took effect. Confirm kills in a second run where no neighbouring test carries a mutant, so a leak meets a clean test first. Measure against `--no-mix`. Target: the same verdicts every run. |
+| Fewer TypeScript runs alone | medium | S | The checks that made verdicts reliable raised a 301-mutant run from about 21 test runs to 55, about 90 s to 170 s. Most mutants that never took effect could share a clean second pack before anything runs alone. |
+| Why tests fail only sometimes in a baseline | medium | S–M | One block of tests failed together in 2 of 20 baselines. They now get a second run, but the cause is unknown, and a test that fails now and then can still cause a false kill. |
+| Predict mutants that cannot compile | medium | S–M | Finding them by building takes up to a third of a C# run (about 80 s of 220 s on one project), at about 2.5 s a round. The commonest are knowable from the source: `required` members left out of an initializer, a `??` that changes a value type, `throw;` removed from a method that must return. |
+| Is packing still worth it in C# | medium | M | With warm workers, running every mutant alone took about as long as packing on two of four projects (114 s and 125 s, 436 s and 412 s), and four times the runs cost little. Find what a pack spends its time on. Queueing each survivor's next tests at once, not in rounds, removes the wait for a round's slowest pack. |
+| String patterns in `switch` arms | low | M | `"name" => ...` is a constant, so it needs a switch around the whole expression. |
+| Clearer progress and defaults | low | S | "6 of 64 mutants come from the cache" also counts ignored mutants, even with `--no-cache`. A progress count can pass the mutant count without saying what the extra runs are. Files only end-to-end tests use could be left out by default. |
 | NUnit and MSTest end-to-end samples | high | S | Both run through VSTest like xUnit, and test names are escaped for filters (NUnit puts arguments in names), but only xUnit has an end-to-end test. |
 | Linux and macOS in CI | medium | S | The end-to-end tests only run on Windows today. Timeouts use CPU time through Windows job objects; elsewhere they fall back to wall time. |
-| A test host that stays up | medium | M | Each test run pays about 3 s to start; keeping the host (or Vitest) running saves about 12% on a large run. |
 | Cache notices other production code | medium | M | A cached killed mutant is not run again when a change elsewhere makes its killing test miss it. Record the files each killing test reaches and compare them. |
 
 ## AI-assisted engineering
