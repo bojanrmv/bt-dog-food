@@ -22,7 +22,9 @@
 
 ---
 
-**dog-food** is a code-health toolkit. Its command, **`dgf`**, scores every function in a codebase for how hard it is to change, shows which complex code your tests do not cover or would not notice breaking, finds copied code and says how to unite it, and can fail a build or a pull request when any of it gets worse. It runs locally and in CI, writes reports for people (HTML dashboards), for pipelines (Markdown, SARIF, JSON) and for AI assistants, and never needs a server or an account.
+**dog-food** is a code-health toolkit for developers who use AI-assisted engineering. Its command, **`dgf`**, helps you improve the code you and your assistants write. It checks that your tests really test the code: a passing test that would not notice a bug is a false positive, and `dgf mutate` exposes it by making small deliberate bugs and listing the ones no test catches. `dgf dup` finds copied code and says how to unite it. `dgf analyze` holds every function to complexity and CRAP limits, and `dgf changes` fails a branch that makes those scores worse.
+
+It runs locally and in CI, writes reports for people (HTML dashboards), for pipelines (Markdown, SARIF, JSON) and for AI assistants, and never needs a server or an account.
 
 The name comes from *dogfooding*: this repository is checked by its own tool, with the limits it enforces on others.
 
@@ -39,8 +41,8 @@ The name comes from *dogfooding*: this repository is checked by its own tool, wi
 
 **How it behaves**
 
-- **Fast.** Files are parsed with tree-sitter on every core: 4,000 functions in under half a second, 40 MB of Rust in about 6 seconds ([benchmarks](docs/benchmarks.md)).
-- **Read only.** `dgf` reads files and never changes them. Only `dgf mutate --run` builds and tests, and it does so in a copy of your code.
+- **Fast.** Files are parsed with tree-sitter on every core: 15,000 functions in about 1.3 seconds, 40 MB of Rust in about 6 seconds ([benchmarks](docs/benchmarks.md)).
+- **Read only.** `dgf` reads files and never changes them. Only `dgf mutate --run` (in a copy of your code) and `dgf dup --confirm` (on generated inputs) run your code.
 - **Exact, not guessed.** Every score and finding comes from the syntax tree (and, for C# duplication, the compiler), with the rule that produced it.
 - **Adoptable.** A baseline accepts today's code so only new problems fail; `dgf changes` holds new code to a stricter limit than old code.
 
@@ -121,7 +123,7 @@ More: [mutation testing](docs/mutation/README.md): choosing what to mutate, the 
 
 ### Duplication
 
-`dgf dup` finds copied code and says how to unite it: the shared template, what each copy fills in, where a shared version goes, and the risk of leaving it (the CRAP score of the riskiest copy). It finds exact and renamed copies, near misses, the same statements in another order or mixed with other code, and long expressions copied into different statements. For C#, `--semantic` adds methods that do the same thing written differently (a loop and its LINQ, `if` and `switch`), repeated database queries with the extension method that replaces them, and `--confirm` runs each such claim on generated inputs.
+`dgf dup` finds copied code and says how to unite it: the shared template, what each copy fills in, where a shared version goes, and the risk of leaving it (the CRAP score of the riskiest copy). It finds exact and renamed copies, near misses, the same statements in another order or mixed with other code, and long expressions copied into different statements. For C#, it adds methods that do the same thing written differently (a loop and its LINQ, `if` and `switch`), repeated database queries with the extension method that replaces them, and `--confirm` runs each such claim on generated inputs.
 
 ```powershell
 dgf dup                           # biggest wins first
