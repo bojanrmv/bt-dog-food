@@ -405,10 +405,11 @@ fn mutation_runs_on_a_dotnet_solution() {
         "{reach:?}"
     );
     // The source generator behind [GeneratedRegex] still ran: nothing in
-    // Pricing failed to build. The only mutants that do not compile are the
-    // ones that leave an `out var` of a condition unassigned in its body
-    // (CS0165): found and left out, while the rest of the run goes on, even
-    // with a project no test uses (Other) built on its own.
+    // Pricing failed to build. A mutant that would leave an `out var` of a
+    // condition unassigned is never made. The only mutant that does not compile
+    // is one only the compiler can tell (Money has no `-`): found and left out,
+    // while the rest of the run goes on, even with a project no test uses
+    // (Other) built on its own.
     let compile_errors = |function: &str| {
         first["functions"]
             .as_array()
@@ -419,10 +420,11 @@ fn mutation_runs_on_a_dotnet_solution() {
             .sum::<u64>()
     };
     assert_eq!(compile_errors("Pricing.IsOrderCode"), 0, "{first}");
-    assert!(compile_errors("PayloadValueParser.TryParse") > 0, "{first}");
+    assert_eq!(compile_errors("PayloadValueParser.TryParse"), 0, "{first}");
+    assert!(compile_errors("Money.Total") > 0, "{first}");
     assert_eq!(
         first["tally"]["compileError"].as_u64().unwrap(),
-        compile_errors("PayloadValueParser.TryParse"),
+        compile_errors("Money.Total"),
         "{first}"
     );
     // The guard clause's comment turns its statement mutant off, with its reason.

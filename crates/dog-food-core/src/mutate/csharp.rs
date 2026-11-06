@@ -238,8 +238,10 @@ fn has_text_operand(node: Node, src: &[u8]) -> bool {
     })
 }
 
-/// `o is Order x && x.Total > 5`: swapped to `||`, `x` would be unassigned
-/// on the right.
+/// `o is Order x && x.Total > 5`: swapped to `||`, `x` would be unassigned on
+/// the right; `a && int.TryParse(t, out var n)`: `n` would be unassigned where
+/// the code after it uses it. That is a failed build, which costs every mutant
+/// the builds it takes to find this one.
 fn leaves_unassigned(node: Node, op: Node, src: &[u8]) -> bool {
     if !matches!(op.kind(), "&&" | "||") {
         return false;
@@ -251,7 +253,25 @@ fn leaves_unassigned(node: Node, op: Node, src: &[u8]) -> bool {
         return false;
     };
     let names = declared(left, src);
-    !names.is_empty() && uses(right, &names, src)
+    if !names.is_empty() && uses(right, &names, src) {
+        return true;
+    }
+    let names = declared(node, src);
+    !names.is_empty() && used_later(node, &names, src)
+}
+
+/// Whether the function around `node` uses one of `names` after `node`.
+fn used_later(node: Node, names: &[String], src: &[u8]) -> bool {
+    let Some(function) = enclosing_function(node) else {
+        return false;
+    };
+    let mut found = false;
+    super::walk(function, &mut |n| {
+        found |= n.start_byte() >= node.end_byte()
+            && n.kind() == "identifier"
+            && names.iter().any(|name| name == text(n, src));
+    });
+    found
 }
 
 /// `x is null || y` is read as `x is (null || y)`: the operator's real

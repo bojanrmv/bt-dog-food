@@ -359,6 +359,14 @@ public class Mutators
         return parsed ? v + n : 0;
     }
 
+    public int DeclaredOnTheRight(string s, bool active)
+    {
+        // mutant: block { return w; } -> {return default;}
+        // mutant: condition active && int.TryParse(s, out var w) -> false
+        if (active && int.TryParse(s, out var w)) { return w; }
+        return 0;
+    }
+
     // Patterns where some mutants cannot compile: only those mutants are left
     // out, the rest of the function is mutated.
     public string Guarded(Dictionary<string, string> metadata)
