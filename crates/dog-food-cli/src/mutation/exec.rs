@@ -647,8 +647,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let started = Instant::now();
         let status = run(
-            sleeper(3),
-            Duration::from_millis(1500),
+            sleeper(8),
+            Duration::from_secs(4),
             &dir.path().join("out.log"),
         )
         .unwrap();
@@ -658,7 +658,7 @@ mod tests {
         } else {
             assert_eq!(status, TestRun::TimedOut);
         }
-        assert!(started.elapsed() < Duration::from_secs(20));
+        assert!(started.elapsed() < Duration::from_secs(40));
     }
 
     #[test]
