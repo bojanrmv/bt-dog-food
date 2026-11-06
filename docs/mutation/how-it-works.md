@@ -49,6 +49,7 @@
 - **Packing:** with per-test reach, the number of test runs is about *max mutants a single test reaches*, not *number of mutants*: 22 mutants became 11 runs on the small sample.
 - **One test first:** a mutant runs with all its tests only when its first test does not kill it.
 - **Only reaching tests run** in each pack (C#: by name; Node: their test files).
+- **Test runner kept alive:** Vitest, also the one inside `ng test`, stays alive after the baseline, so a run does not pay for a new start or an Angular build. Each run gets new test processes, which read that run's mutants from a file. A run past its limit loses only those processes, and the next run goes on. Runs of one runner take turns, and each uses `--jobs` test processes. If the runner cannot stay alive (a build that fails, a Vitest too old for it, one that ended), each run starts its own, as Jest always does; the debug log says why under `[warm]`.
 - **Only the tests you choose run at all:** filters and excluded test projects apply to the baseline too, which is where unscoped mutation runs spend most of their time.
 - **Small, lasting sandbox:** only the projects the tests need are copied, and the build output stays between runs.
 - **Cache:** a killed mutant is never run again while its function, its killing tests and the build settings are unchanged.

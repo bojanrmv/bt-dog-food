@@ -106,6 +106,18 @@ pub fn kill_tree(child: &mut Child, job: Option<&cpu::Job>) {
     }
 }
 
+/// Stops one process and what it started.
+pub fn kill_pid(pid: u32) {
+    let pid = pid.to_string();
+    let _ = if cfg!(windows) {
+        Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .output()
+    } else {
+        Command::new("kill").args(["-9", &pid]).output()
+    };
+}
+
 /// Processor time of a process and everything it starts: on Windows a job
 /// object, which the processes a child starts join as well. Elsewhere there
 /// is none, and only the wall clock counts.

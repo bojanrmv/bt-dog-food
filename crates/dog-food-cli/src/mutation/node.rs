@@ -7,12 +7,14 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
 use super::exec::{self, error_location, fresh_folder, lines_in, write_plan, Located};
 use super::sandbox::FileMutants;
+use super::warm::{self, Started, Warm, WarmRun};
 use super::{
     check_baseline, failing_tests, Budget, BuildError, Engine, Pack, PackRun, Reach, Round,
     SoloRun, TestResults, TestRun,
@@ -52,12 +54,33 @@ pub struct NodeTests {
     sandbox: PathBuf,
     /// The mutated files: compiler errors elsewhere are not the mutants' doing.
     mutated: HashSet<PathBuf>,
+    /// Vitest and Angular: the test runner kept alive between runs, one per
+    /// Angular project (by name), or one under "" for the package.
+    warm: HashMap<String, Mutex<Slot>>,
+    jobs: usize,
 }
+
+/// A test runner kept alive between runs, as far as it got.
+enum Slot {
+    /// Not started; the first run, which runs every test, starts it.
+    NotStarted,
+    Running(Warm),
+    /// It could not serve: each run starts a test runner of its own.
+    Cold,
+}
+
+/// The most a warm run's limit allows per test file for loading it: the
+/// first run's own startup can include a build no later run does.
+const WARM_MOST_STARTUP: Duration = Duration::from_secs(3);
 
 impl NodeTests {
     /// Uses the nearest package.json above the mutated files that depends on
     /// Vitest or Jest.
-    pub fn prepare(sandbox: &Path, files: &[FileMutants]) -> Result<NodeTests, String> {
+    pub fn prepare(
+        sandbox: &Path,
+        files: &[FileMutants],
+        jobs: usize,
+    ) -> Result<NodeTests, String> {
         let first = files.first().ok_or("no TypeScript or JavaScript mutants")?;
         let start = sandbox.join(&first.relative);
         let (package, runner) = start
@@ -81,11 +104,21 @@ impl NodeTests {
         };
         let script = script_for(&package, runner)
             .ok_or("the test runner is not installed (run npm install in the repository)")?;
+        let warm = match runner {
+            Runner::Jest => HashMap::new(),
+            Runner::Vitest => HashMap::from([(String::new(), Mutex::new(Slot::NotStarted))]),
+            Runner::Angular => angular
+                .iter()
+                .map(|p| (p.name.clone(), Mutex::new(Slot::NotStarted)))
+                .collect(),
+        };
         Ok(NodeTests {
             package,
             runner,
             script,
             angular,
+            warm,
+            jobs,
             sandbox: sandbox.to_path_buf(),
             mutated: files
                 .iter()
@@ -145,6 +178,121 @@ impl NodeTests {
     /// that node_modules links to deletes them first) is tried again after a
     /// wait, twice; then the run fails, instead of every mutant in it
     /// counting as a crash.
+    /// The command that starts a test runner to keep alive, with `server` as
+    /// its reporter.
+    fn warm_command(&self, server: &Path, project: Option<&AngularProject>) -> Command {
+        let mut command = Command::new("node");
+        command.current_dir(&self.package).arg(&self.script);
+        let server = server.to_string_lossy().replace('\\', "/");
+        match project {
+            Some(project) => command.args([
+                "test",
+                &project.name,
+                "--watch=true",
+                "--no-progress",
+                &format!("--reporters={server}"),
+            ]),
+            None => command.args([
+                "--watch",
+                &format!("--reporter={server}"),
+                "--coverage.enabled=false",
+            ]),
+        };
+        command
+    }
+
+    /// Does a run in the test runner kept alive for `project`; `None` when
+    /// there is none and the run has to start one of its own.
+    fn warm_run(
+        &self,
+        project: Option<&AngularProject>,
+        run: &WarmRun,
+        limit: Duration,
+    ) -> Option<TestRun> {
+        let name = project.map_or("", |p| p.name.as_str());
+        let mut slot = self.warm.get(name)?.lock().ok()?;
+        let started = Instant::now();
+        match &mut *slot {
+            Slot::Cold => None,
+            Slot::NotStarted if !run.files.is_empty() => None,
+            Slot::NotStarted => {
+                let status = self.start_warm(&mut slot, name, project, run, limit);
+                if status.is_none() {
+                    *slot = Slot::Cold;
+                }
+                status
+            }
+            Slot::Running(warm) => {
+                let ran = warm.run(run, limit);
+                debug!(
+                    "warm",
+                    "{name}: {} test files in {:.1} s: {ran:?}",
+                    run.files.len(),
+                    started.elapsed().as_secs_f64()
+                );
+                match ran {
+                    Ok(status) => {
+                        if warm.stuck {
+                            *slot = Slot::Cold;
+                        }
+                        Some(status)
+                    }
+                    Err(reason) => {
+                        debug!("warm", "{name}: no longer kept alive: {reason}");
+                        *slot = Slot::Cold;
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    /// Starts the test runner to keep alive, which does its first run.
+    fn start_warm(
+        &self,
+        slot: &mut Slot,
+        name: &str,
+        project: Option<&AngularProject>,
+        run: &WarmRun,
+        limit: Duration,
+    ) -> Option<TestRun> {
+        let started = Instant::now();
+        let tag = name.replace(|c: char| !c.is_alphanumeric(), "-");
+        let folder = exec::runs_folder(&self.sandbox).join(format!("warm{tag}"));
+        let server = warm::server_file(&folder)
+            .map_err(|err| debug!("warm", "{name}: {err}"))
+            .ok()?;
+        let command = self.warm_command(&server, project);
+        match Warm::start(command, &folder, self.jobs, run, limit) {
+            Started::Ready(warm, status) => {
+                debug!(
+                    "warm",
+                    "{name}: built and ran every test in {:.1} s; it stays alive for the mutants",
+                    started.elapsed().as_secs_f64()
+                );
+                *slot = Slot::Running(warm);
+                Some(status)
+            }
+            Started::Refused(reason) => {
+                debug!(
+                    "warm",
+                    "{name}: not kept alive after {:.1} s, each run starts its own: {reason}",
+                    started.elapsed().as_secs_f64()
+                );
+                None
+            }
+        }
+    }
+
+    /// Whether every test runner stayed alive through the first run.
+    fn all_warm(&self) -> bool {
+        !self.warm.is_empty()
+            && self
+                .warm
+                .values()
+                .all(|slot| slot.lock().is_ok_and(|s| matches!(*s, Slot::Running(_))))
+    }
+
     fn run(
         &self,
         files: &[String],
@@ -182,10 +330,28 @@ impl NodeTests {
         let mut merged = Report::default();
         for (n, (project, files)) in self.runs(files).into_iter().enumerate() {
             let report = folder.join(format!("report-{n}.json"));
-            let mut command = self.command(&report, &files, project);
-            command.envs(env.iter().map(|(k, v)| (*k, v.as_str())));
+            let log = folder.join(exec::log_name(n));
             let left = limit.saturating_sub(started.elapsed());
-            let ran = exec::run(command, left, &folder.join(exec::log_name(n)))?;
+            let warm = self.warm_run(
+                project,
+                &WarmRun {
+                    files: &files,
+                    env,
+                    report: &report,
+                    log: &log,
+                    folder,
+                },
+                left,
+            );
+            let ran = match warm {
+                Some(ran) => ran,
+                None => {
+                    let mut command = self.command(&report, &files, project);
+                    command.envs(env.iter().map(|(k, v)| (*k, v.as_str())));
+                    let left = limit.saturating_sub(started.elapsed());
+                    exec::run(command, left, &log)?
+                }
+            };
             status = worse(status, ran);
             merged.merge(Report::read(&report, &self.package));
             if status == TestRun::TimedOut {
@@ -336,10 +502,14 @@ impl Engine for NodeTests {
         let wall = started.elapsed();
         // Each name is stored twice (Vitest's and Jest's spelling).
         let tests: Duration = report.times.values().sum::<Duration>() / 2;
+        let mut per_file = wall.saturating_sub(tests);
+        if self.all_warm() {
+            per_file = per_file.min(WARM_MOST_STARTUP);
+        }
         let startup = report
             .home
             .values()
-            .map(|file| (file.clone(), wall.saturating_sub(tests)))
+            .map(|file| (file.clone(), per_file))
             .collect();
         let package = self
             .package
@@ -839,6 +1009,8 @@ mod tests {
             BTreeSet::from(["Routes > draws".to_string()])
         );
         let tests = NodeTests {
+            warm: HashMap::new(),
+            jobs: 1,
             package: package.to_path_buf(),
             runner: Runner::Vitest,
             script: PathBuf::from("vitest.mjs"),
@@ -863,6 +1035,8 @@ mod tests {
             source_root: format!("{root}/src"),
         };
         let tests = NodeTests {
+            warm: HashMap::new(),
+            jobs: 1,
             package: PathBuf::from("web"),
             runner: Runner::Angular,
             script: PathBuf::from("ng.js"),

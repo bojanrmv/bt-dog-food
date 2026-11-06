@@ -1,7 +1,7 @@
 
 
 // Added by dog-food (dgf mutate --run) in the mutation sandbox only.
-// DGF_MUTANT: one active mutant · DGF_PLAN: "test<TAB>id" lines · DGF_REACH: folder for reach records
+// DGF_MUTANT: one active mutant · DGF_PLAN: "test<TAB>id" lines · DGF_REACH: folder for reach records · DGF_CONTROL: file with these, per run
 function __dgfIs(id) {
   const g = globalThis;
   const s = g.__dgfState || (g.__dgfState = __dgfLoad(g));
@@ -23,8 +23,13 @@ function __dgfIs(id) {
 }
 
 function __dgfLoad(g) {
-  const env = (g.process && g.process.env) || {};
+  let env = (g.process && g.process.env) || {};
   const fs = g.process && g.process.getBuiltinModule ? g.process.getBuiltinModule("fs") : undefined;
+  // A runner kept alive between runs: this run's settings are in a file.
+  if (env.DGF_CONTROL && fs) {
+    env = JSON.parse(String(fs.readFileSync(env.DGF_CONTROL, "utf8")));
+    if (env.DGF_PIDS) fs.appendFileSync(env.DGF_PIDS, g.process.pid + "\n");
+  }
   let plan;
   if (env.DGF_PLAN && fs) {
     plan = new Map();

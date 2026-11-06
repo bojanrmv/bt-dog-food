@@ -24,6 +24,7 @@ pub mod priority;
 pub mod projects;
 mod sandbox;
 mod scope;
+mod warm;
 mod worker;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1005,7 +1006,11 @@ fn prepare(
             build_args(options),
             options.jobs,
         )?),
-        sandbox::Kind::Node => Box::new(node::NodeTests::prepare(&sandbox.dir, &files)?),
+        sandbox::Kind::Node => Box::new(node::NodeTests::prepare(
+            &sandbox.dir,
+            &files,
+            options.jobs,
+        )?),
     };
     Ok(Prepared {
         sandbox,
