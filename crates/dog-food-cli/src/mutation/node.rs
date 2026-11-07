@@ -371,6 +371,7 @@ impl NodeTests {
         let mut reach = Reach {
             failing: failing_tests(&report.outcome),
             flaky,
+            queuing: report.queuing.iter().cloned().collect(),
             files: report
                 .home
                 .iter()
@@ -509,6 +510,21 @@ impl NodeTests {
         files.into_iter().collect()
     }
 
+    /// The test files with a test that passes without mutants and failed here.
+    fn files_that_failed(&self, report: &Report, reach: &Reach) -> Vec<String> {
+        let failed: BTreeSet<String> = report
+            .outcome
+            .iter()
+            .filter(|(test, passed)| !**passed && !reach.failing.contains(*test))
+            .map(|(test, _)| test.clone())
+            .collect();
+        let homes = Reach {
+            home: report.home.clone(),
+            ..Reach::default()
+        };
+        self.files_for(&failed, &homes)
+    }
+
     /// Test files (relative to the package) holding `tests`.
     fn files_for(&self, tests: &BTreeSet<String>, reach: &Reach) -> Vec<String> {
         let files: BTreeSet<String> = tests
@@ -599,6 +615,81 @@ fn needs_every_test(mutant: usize, files: &[String], report: &Report, reach: &Re
         .iter()
         .any(|(test, passed)| !*passed && !reach.failing.contains(test));
     reach.outside.contains(&mutant) && !files.is_empty() && !noticed
+}
+
+/// A test's name as the frameworks spell it: "describe > test" (Vitest) and
+/// "describe test" (Jest).
+fn names_of(test: &JsonTest) -> [String; 2] {
+    let mut parts = test.ancestors.clone();
+    parts.push(test.title.clone());
+    [parts.join(" > "), parts.join(" ")]
+}
+
+/// The words that set only a mock's next value.
+const QUEUES: [&str; 2] = ["ValueOnce(", "ImplementationOnce("];
+
+/// The words that start a test, or code that runs for every test.
+const TEST_STARTS: [&str; 2] = ["it(", "test("];
+const SHARED_STARTS: [&str; 2] = ["beforeEach(", "beforeAll("];
+
+/// Which tests of a test file queue a mock's next value: `None` when the file
+/// queues none; inside it, `None` when any test may, because a hook, a helper
+/// above the tests or a generated title does it.
+fn queuing_titles(text: &str) -> Option<Option<HashSet<&str>>> {
+    let queues_in = |part: &str| QUEUES.iter().any(|q| part.contains(q));
+    if !queues_in(text) {
+        return None;
+    }
+    let starts = block_starts(text);
+    let first = starts.first().map_or(text.len(), |(at, _)| *at);
+    if queues_in(&text[..first]) {
+        return Some(None);
+    }
+    let mut titles = HashSet::new();
+    for (index, (at, shared)) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).map_or(text.len(), |(next, _)| *next);
+        let block = &text[*at..end];
+        if !queues_in(block) {
+            continue;
+        }
+        match (shared, title_of(block)) {
+            (false, Some(title)) => titles.insert(title),
+            _ => return Some(None),
+        };
+    }
+    Some(Some(titles))
+}
+
+/// Where each test or hook starts, and whether it is a hook.
+fn block_starts(text: &str) -> Vec<(usize, bool)> {
+    let mut starts: Vec<(usize, bool)> = Vec::new();
+    for (words, shared) in [(TEST_STARTS, false), (SHARED_STARTS, true)] {
+        for word in words {
+            starts.extend(
+                text.match_indices(word)
+                    .filter(|(at, _)| starts_word(text, *at))
+                    .map(|(at, _)| (at, shared)),
+            );
+        }
+    }
+    starts.sort_unstable();
+    starts
+}
+
+fn starts_word(text: &str, at: usize) -> bool {
+    text[..at]
+        .chars()
+        .next_back()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '.')
+}
+
+/// The title of a test that starts `block`, when it is one plain string.
+fn title_of(block: &str) -> Option<&str> {
+    let after = block[block.find('(')? + 1..].trim_start();
+    let quote = after.chars().next().filter(|c| "'\"`".contains(*c))?;
+    let rest = &after[1..];
+    let title = &rest[..rest.find(quote)?];
+    (!title.contains('\\') && !title.contains("${")).then_some(title)
 }
 
 /// What a pack's run shows. A test that failed although its mutant never took
@@ -715,6 +806,12 @@ impl Engine for NodeTests {
         let (mut status, mut report) = self.run(&files, &env, limit, &folder)?;
         if needs_every_test(mutant, &files, &report, reach) {
             (status, report) = self.run(&[], &env, limit, &folder)?;
+            // All the test files in one process can fail by their order, not
+            // by the mutant: a kill has to hold in the files that failed.
+            let failed = self.files_that_failed(&report, reach);
+            if !failed.is_empty() {
+                (status, report) = self.run(&failed, &env, limit, &folder)?;
+            }
         }
         // The runner runs every test of the files, so a failed run with a
         // reaching test missing lost its worker.
@@ -942,6 +1039,9 @@ struct Report {
     times: HashMap<String, Duration>,
     /// The first test file that failed with no test reported, and why.
     first_failure: Option<String>,
+    /// Tests that queue a mock's next value: one that fails can leave the value
+    /// for the next test that calls the mock.
+    queuing: HashSet<String>,
 }
 
 #[derive(Deserialize)]
@@ -977,6 +1077,7 @@ impl Report {
         self.outcome.extend(other.outcome);
         self.home.extend(other.home);
         self.times.extend(other.times);
+        self.queuing.extend(other.queuing);
         if self.first_failure.is_none() {
             self.first_failure = other.first_failure;
         }
@@ -997,6 +1098,7 @@ impl Report {
                     format!("{home}: {first}")
                 });
             }
+            report.note_queuing(&file);
             for test in file.tests {
                 report.add(&test, &home);
             }
@@ -1004,12 +1106,28 @@ impl Report {
         report
     }
 
+    /// Notes the tests of `file` that queue a mock's next value.
+    fn note_queuing(&mut self, file: &JsonFile) {
+        let Ok(text) = std::fs::read_to_string(&file.name) else {
+            return;
+        };
+        let Some(queued) = queuing_titles(&text) else {
+            return;
+        };
+        for test in &file.tests {
+            if queued
+                .as_ref()
+                .is_none_or(|titles| titles.contains(test.title.as_str()))
+            {
+                self.queuing.extend(names_of(test));
+            }
+        }
+    }
+
     fn add(&mut self, test: &JsonTest, home: &str) {
-        let mut parts = test.ancestors.clone();
-        parts.push(test.title.clone());
         let passed = test.status != "failed";
         let time = Duration::from_secs_f64(test.duration.unwrap_or(0.0).max(0.0) / 1000.0);
-        for name in [parts.join(" > "), parts.join(" ")] {
+        for name in names_of(test) {
             let entry = self.outcome.entry(name.clone()).or_insert(true);
             *entry = *entry && passed;
             *self.times.entry(name.clone()).or_default() += time;
@@ -1021,6 +1139,62 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tests_that_queue_a_mocks_next_value_are_found() {
+        assert_eq!(
+            queuing_titles("it('a', () => { m.mockReturnValue(1); });"),
+            None
+        );
+        let some = "describe('s', () => {\n  it('a', () => { m.mockRejectedValueOnce(1); });\n  it('b', () => { m(); });\n  test(\"c\", () => { m.mockImplementationOnce(f); });\n});";
+        assert_eq!(queuing_titles(some), Some(Some(HashSet::from(["a", "c"]))));
+        let hook = "beforeEach(() => { m.mockResolvedValueOnce(1); });\nit('a', () => {});";
+        assert_eq!(
+            queuing_titles(hook),
+            Some(None),
+            "a hook queues for every test"
+        );
+        let later_hook = "it('a', () => {});\nbeforeEach(() => { m.mockResolvedValueOnce(1); });";
+        assert_eq!(queuing_titles(later_hook), Some(None));
+        let helper = "function go() { m.mockReturnValueOnce(1); }\nit('a', () => { go(); });";
+        assert_eq!(
+            queuing_titles(helper),
+            Some(None),
+            "a helper above the tests may be anyone's"
+        );
+        let made = "it(`${x} works`, () => { m.mockReturnValueOnce(1); });";
+        assert_eq!(
+            queuing_titles(made),
+            Some(None),
+            "a generated title cannot be matched"
+        );
+        let word = "commit('a'); audit('b');\nit('a', () => { m.mockReturnValueOnce(1); });";
+        assert_eq!(queuing_titles(word), Some(Some(HashSet::from(["a"]))));
+    }
+
+    #[test]
+    fn a_report_names_the_tests_that_queue_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = dir.path().join("q.spec.ts");
+        std::fs::write(
+            &spec,
+            "it('a', () => { m.mockReturnValueOnce(1); });\nit('b', () => {});\n",
+        )
+        .unwrap();
+        let name = spec.to_string_lossy().replace('\\', "/");
+        let tests = r#"[{"ancestorTitles": ["s"], "title": "a", "status": "passed"}, {"ancestorTitles": ["s"], "title": "b", "status": "passed"}]"#;
+        let report = dir.path().join("report.json");
+        std::fs::write(
+            &report,
+            format!(r#"{{"testResults": [{{"name": "{name}", "assertionResults": {tests}}}]}}"#),
+        )
+        .unwrap();
+        let read = Report::read(&report, dir.path());
+        assert_eq!(
+            read.queuing,
+            HashSet::from(["s > a".to_string(), "s a".to_string()])
+        );
+    }
 
     #[test]
     fn a_mutant_of_a_loading_module_nobody_noticed_runs_with_every_test() {

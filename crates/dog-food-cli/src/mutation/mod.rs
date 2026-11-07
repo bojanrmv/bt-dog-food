@@ -278,6 +278,10 @@ pub struct Reach {
     pub failing: BTreeSet<String>,
     /// Tests that failed with no mutant active and passed when run again.
     pub flaky: BTreeSet<String>,
+    /// Tests that leave state behind for the next test of their home when they
+    /// fail (a mock's queued value): they share a run with no other mutated test
+    /// of that home.
+    pub queuing: BTreeSet<String>,
     pub duration: Duration,
     /// Each test's time in the run without mutants.
     pub times: HashMap<String, Duration>,
@@ -1685,6 +1689,9 @@ fn run_packs(
     Ok(resolved)
 }
 
+/// What a test that needs a pack to itself costs on top of its own time.
+const NEEDS_A_PACK: Duration = Duration::from_secs(2);
+
 /// Up to `count` tests per mutant that it has not `tried`: the cheapest,
 /// where a test costs its time plus half a second for every mutant it
 /// already carries (each one needs a pack of its own).
@@ -1712,7 +1719,12 @@ fn next_tests(
     for (id, mut tests) in order {
         tests.sort_by_key(|t| {
             let time = reach.times.get(*t).copied().unwrap_or_default();
-            time + Duration::from_millis(500) * load.get(t).copied().unwrap_or(0)
+            let alone = if reach.queuing.contains(*t) {
+                NEEDS_A_PACK
+            } else {
+                Duration::ZERO
+            };
+            time + alone + Duration::from_millis(500) * load.get(t).copied().unwrap_or(0)
         });
         tests.truncate(count);
         for test in &tests {
@@ -1898,7 +1910,9 @@ pub fn pack(mutants: &[usize], reach: &Reach, max_tests: usize) -> (Vec<Pack>, V
     for id in ordered {
         let tests = &reach.by_mutant[&id];
         let fits = |p: &&mut Pack| {
-            p.used.len() + tests.len() <= max_tests && tests.iter().all(|t| !p.used.contains(t))
+            p.used.len() + tests.len() <= max_tests
+                && tests.iter().all(|t| !p.used.contains(t))
+                && keeps_leaks_out(p, tests, reach)
         };
         let index = match packs.iter_mut().position(|p| fits(&p)) {
             Some(index) => index,
@@ -1915,6 +1929,23 @@ pub fn pack(mutants: &[usize], reach: &Reach, max_tests: usize) -> (Vec<Pack>, V
         .filter(|id| reach.outside.contains(id))
         .collect();
     (packs, solo)
+}
+
+/// Whether `tests` can join `pack` without a test that can leave state behind
+/// running next to another mutated test of its home.
+fn keeps_leaks_out(pack: &Pack, tests: &BTreeSet<String>, reach: &Reach) -> bool {
+    if reach.queuing.is_empty() {
+        return true;
+    }
+    tests.iter().all(|test| {
+        let home = reach.home.get(test);
+        let mut neighbours = pack.used.iter().filter(|u| reach.home.get(*u) == home);
+        if reach.queuing.contains(test) {
+            neighbours.next().is_none()
+        } else {
+            !neighbours.any(|u| reach.queuing.contains(u))
+        }
+    })
 }
 
 fn place(pack: &mut Pack, id: usize, tests: &BTreeSet<String>) {
@@ -2456,6 +2487,49 @@ mod tests {
         assert!(!result.partial.contains_key(&1), "no test of it ran");
         let solos = fake.calls().iter().filter(|c| c.contains("mutant")).count();
         assert_eq!(solos, 2);
+    }
+
+    #[test]
+    fn a_mutant_tries_a_test_that_shares_its_run_before_one_that_cannot() {
+        let mut both = reach(&[(0, &["q", "a"])]);
+        both.times.insert("q".to_string(), Duration::from_millis(1));
+        both.times
+            .insert("a".to_string(), Duration::from_millis(50));
+        let first = next_tests(&[0], &both, &HashMap::new(), 1);
+        assert!(first.by_mutant[&0].contains("q"), "the quickest, normally");
+        both.queuing.insert("q".to_string());
+        let first = next_tests(&[0], &both, &HashMap::new(), 1);
+        assert!(first.by_mutant[&0].contains("a"));
+    }
+
+    #[test]
+    fn a_test_that_can_leave_state_behind_runs_with_no_other_mutated_test_of_its_file() {
+        let mut leaky = reach(&[(0, &["q"]), (1, &["a"]), (2, &["b"]), (3, &["other"])]);
+        for test in ["q", "a", "b"] {
+            leaky.home.insert(test.to_string(), "s.spec.ts".to_string());
+        }
+        leaky
+            .home
+            .insert("other".to_string(), "t.spec.ts".to_string());
+        leaky.queuing.insert("q".to_string());
+        let (packs, _) = pack(&[0, 1, 2, 3], &leaky, 100);
+        assert_eq!(packs.len(), 2, "{packs:?}");
+        for p in &packs {
+            let in_file: Vec<&String> = p
+                .used
+                .iter()
+                .filter(|t| leaky.home[*t] == "s.spec.ts")
+                .collect();
+            assert!(
+                in_file.len() == 1 || !in_file.iter().any(|t| *t == "q"),
+                "{packs:?}"
+            );
+        }
+        let with_other = packs.iter().find(|p| p.used.contains("other")).unwrap();
+        assert!(
+            with_other.used.len() > 1,
+            "another file's test still shares a pack"
+        );
     }
 
     #[test]
