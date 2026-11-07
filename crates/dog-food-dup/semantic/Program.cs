@@ -2,6 +2,7 @@
 //
 //   dgf-dup-cs [paths...] [--root DIR] [--tests] [-o FILE] [--explain] [--timings] [--errors] [--confirm]
 //   dgf-dup-cs [paths...] --compare Type.Method Type.Method
+//   dgf-dup-cs --check          (compile checks for dgf mutate: Check.cs)
 //
 // With --regions, after the report it reads [{file, startLine, endLine}] on
 // stdin and writes, for each, what the lines take and give if extracted
@@ -26,6 +27,10 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Operations;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
+if (args is ["--check"])
+{
+    return Check.Run();
+}
 var options = Options.Parse(args);
 var clock = System.Diagnostics.Stopwatch.StartNew();
 var files = Sources.Find(options.Paths, options.Tests);

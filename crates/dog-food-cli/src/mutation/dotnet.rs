@@ -956,6 +956,32 @@ impl Engine for Dotnet {
         Ok((status, results.into_test_results()))
     }
 
+    fn checker(&self, files: &[FileMutants]) -> Option<super::check::Checker> {
+        let started = Instant::now();
+        let folder = exec::runs_folder(&self.sandbox).join("originals");
+        let pairs: Vec<(PathBuf, &str)> = files
+            .iter()
+            .map(|f| (self.sandbox.join(&f.relative), f.source.as_str()))
+            .collect();
+        let checked = super::check::originals(&folder, &pairs).and_then(|pairs| {
+            super::check::Checker::start(dog_food_dup::semantic::command(None), &pairs)
+        });
+        match checked {
+            Ok(checker) => {
+                debug!(
+                    "build",
+                    "compile checks in memory are ready after {:.1} s",
+                    started.elapsed().as_secs_f64()
+                );
+                Some(checker)
+            }
+            Err(err) => {
+                debug!("build", "no compile checks in memory: {err}");
+                None
+            }
+        }
+    }
+
     fn test_projects(&self) -> Vec<String> {
         self.projects
             .iter()

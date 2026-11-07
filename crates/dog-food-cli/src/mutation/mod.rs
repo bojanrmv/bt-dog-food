@@ -16,6 +16,7 @@
 
 mod build;
 pub mod cache;
+mod check;
 mod dotnet;
 mod exec;
 pub mod log;
@@ -535,6 +536,11 @@ pub trait Engine: Sync {
         tag: &str,
     ) -> Result<SoloRun, String>;
     fn test_projects(&self) -> Vec<String>;
+    /// Compile checks in memory for the mutated files, when this language has
+    /// them: the search for mutants that do not compile then takes one build.
+    fn checker(&self, _files: &[sandbox::FileMutants]) -> Option<check::Checker> {
+        None
+    }
     /// Whether a mutant that survived its packs runs once more alone before
     /// it counts: other mutants in a pack can leave state behind that hides
     /// it, and this runner has no check that catches that.

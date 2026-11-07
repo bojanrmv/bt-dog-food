@@ -8,7 +8,9 @@
 //! found, so the innocent ones are still tested. Such errors stay inside
 //! their function, so every function's suspects are tried in the same build.
 //! After the first build, only the projects with mutants are rebuilt until
-//! they compile; one last build of everything the tests need follows.
+//! they compile; one last build of everything the tests need follows. Where
+//! the language has compile checks in memory (C#), the search runs on them
+//! after the first build, and builds only confirm what it found.
 
 use std::collections::{HashMap, HashSet};
 
@@ -27,6 +29,8 @@ pub enum Built {
 /// removes a mutant or halves a group of suspects, so this only guards
 /// against a runaway.
 const BUILD_ROUNDS: usize = 40;
+/// Most checks in memory: each takes a fraction of a second.
+const CHECK_ROUNDS: usize = 200;
 
 /// Mutants taken out of the files: (index of their file, mutant).
 type Held = Vec<(usize, Mutant)>;
@@ -50,24 +54,101 @@ pub fn build(
         waiting: Vec::new(),
         trying: Vec::new(),
     };
+    let mut checked = false;
     for _ in 0..BUILD_ROUNDS {
         match prepared.engine.build(state.round, budget) {
             Ok(()) if state.passed(&mut prepared.files) => return Ok(Built::Done),
             Ok(()) => {}
             Err(BuildError::OutOfTime) => return Ok(Built::OutOfTime),
-            Err(BuildError::Errors(errors)) => state.failed(
-                prepared.engine.as_ref(),
-                &mut prepared.files,
-                &errors,
-                outcomes,
-            )?,
+            Err(BuildError::Errors(errors)) => {
+                state.failed(
+                    prepared.engine.as_ref(),
+                    &mut prepared.files,
+                    &errors,
+                    outcomes,
+                )?;
+                if !std::mem::replace(&mut checked, true) {
+                    check_in_memory(prepared, kind, outcomes, &mut state)?;
+                }
+            }
         }
         sandbox::write(kind, &prepared.files, &prepared.sandbox.dir)?;
     }
     give_up(prepared, kind, outcomes, budget, state)
 }
 
+/// Goes on with the search on compile checks in memory, after a build failed:
+/// each round writes the files and checks them in a fraction of a second.
+/// When nothing is left to try, the next build is of everything the tests
+/// need. Without checks, or when they fail, the builds go on as before.
+fn check_in_memory(
+    prepared: &mut Prepared,
+    kind: Kind,
+    outcomes: &mut HashMap<usize, Outcome>,
+    state: &mut Rebuild,
+) -> Result<(), String> {
+    let Some(mut checker) = prepared.engine.checker(&prepared.files) else {
+        return Ok(());
+    };
+    let started = std::time::Instant::now();
+    for round in 1..=CHECK_ROUNDS {
+        sandbox::write(kind, &prepared.files, &prepared.sandbox.dir)?;
+        let errors = match checker.errors() {
+            Ok(errors) => errors,
+            Err(err) => {
+                debug!("build", "compile checks in memory stopped: {err}");
+                return Ok(());
+            }
+        };
+        if errors.is_empty() && state.clean_in_memory(&mut prepared.files) {
+            debug!(
+                "build",
+                "compile checks in memory found every mutant that does not compile: {round} rounds, {:.1} s",
+                started.elapsed().as_secs_f64()
+            );
+            return Ok(());
+        }
+        if !errors.is_empty() {
+            debug!(
+                "build",
+                "check {round}: {} errors, first: {}",
+                errors.len(),
+                errors
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            );
+            state.failed(
+                prepared.engine.as_ref(),
+                &mut prepared.files,
+                &errors,
+                outcomes,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 impl Rebuild {
+    /// A check in memory found no error: the groups being tried are innocent,
+    /// and the next go in. Returns whether none is left, and the next build is
+    /// of everything the tests need.
+    fn clean_in_memory(&mut self, files: &mut [FileMutants]) -> bool {
+        self.trying.clear();
+        let next = self.next_groups(files);
+        if next.is_empty() {
+            self.round = Round::All;
+            return true;
+        }
+        for group in &next {
+            put_back(files, group);
+        }
+        self.trying = next;
+        false
+    }
+
     /// The build succeeded: the groups being tried are innocent. Returns
     /// whether everything is built.
     fn passed(&mut self, files: &mut [FileMutants]) -> bool {
