@@ -54,9 +54,10 @@ pub struct NodeTests {
     sandbox: PathBuf,
     /// The mutated files: compiler errors elsewhere are not the mutants' doing.
     mutated: HashSet<PathBuf>,
-    /// Vitest and Angular: the test runner kept alive between runs, one per
-    /// Angular project (by name), or one under "" for the package.
-    warm: HashMap<String, Mutex<Slot>>,
+    /// Vitest and Angular: the test runners kept alive between runs, per
+    /// Angular project (by name), or under "" for the package. The first does
+    /// the baseline; the others are spares for a large run.
+    warm: HashMap<String, Vec<Mutex<Slot>>>,
     jobs: usize,
 }
 
@@ -64,9 +65,31 @@ pub struct NodeTests {
 enum Slot {
     /// Not started; the first run, which runs every test, starts it.
     NotStarted,
+    /// Not started; a run that finds the others busy starts it.
+    Spare,
     Running(Warm),
     /// It could not serve: each run starts a test runner of its own.
     Cold,
+}
+
+/// How many mutants are worth another test runner: it takes as long to start
+/// as about ten test runs, and a run needs one for every few mutants.
+const MUTANTS_PER_RUNNER: usize = 100;
+/// The most runners next to the first, however many jobs there are: each holds
+/// a build in memory, and test runs of one test file gain little from more.
+const MOST_SPARES: usize = 2;
+/// What must be free to start another runner.
+const FREE_FOR_A_RUNNER: u64 = 3 * 1024 * 1024 * 1024;
+/// How long a spare may take to do its first run.
+const SPARE_START: Duration = Duration::from_secs(600);
+
+/// How a slot served a run.
+enum Served {
+    /// The run is done: how it went, or `None` when it has to start a runner
+    /// of its own.
+    Done(Option<TestRun>),
+    /// This slot cannot serve it.
+    Next,
 }
 
 /// The most a warm run's limit allows per test file for loading it: the
@@ -97,7 +120,8 @@ impl NodeTests {
         };
         let script = script_for(&package, runner)
             .ok_or("the test runner is not installed (run npm install in the repository)")?;
-        let warm = warm_slots(runner, &angular);
+        let mutants = files.iter().map(|f| f.mutants.len()).sum();
+        let warm = warm_slots(runner, &angular, spares_for(mutants, jobs));
         Ok(NodeTests {
             package,
             runner,
@@ -187,8 +211,8 @@ impl NodeTests {
         command
     }
 
-    /// Does a run in the test runner kept alive for `project`; `None` when
-    /// there is none and the run has to start one of its own.
+    /// Does a run in a test runner kept alive for `project`, waiting for a free
+    /// one; `None` when there is none and the run has to start one of its own.
     fn warm_run(
         &self,
         project: Option<&AngularProject>,
@@ -196,33 +220,108 @@ impl NodeTests {
         limit: Duration,
     ) -> Option<TestRun> {
         let name = project.map_or("", |p| p.name.as_str());
-        let mut slot = self.warm.get(name)?.lock().ok()?;
-        match &*slot {
-            Slot::Cold => None,
-            Slot::NotStarted if !run.files.is_empty() => None,
+        let slots = self.warm.get(name)?;
+        loop {
+            let mut busy = false;
+            for (index, slot) in slots.iter().enumerate() {
+                let Ok(mut slot) = slot.try_lock() else {
+                    busy = true;
+                    continue;
+                };
+                if let Served::Done(ran) = self.serve(&mut slot, index, project, run, limit) {
+                    return ran;
+                }
+            }
+            if !busy {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Does the run in `slot` if it can.
+    fn serve(
+        &self,
+        slot: &mut Slot,
+        index: usize,
+        project: Option<&AngularProject>,
+        run: &WarmRun,
+        limit: Duration,
+    ) -> Served {
+        let name = project.map_or("", |p| p.name.as_str());
+        match slot {
+            Slot::Cold => Served::Next,
+            Slot::NotStarted if !run.files.is_empty() => Served::Done(None),
             Slot::NotStarted => {
-                let status = self.start_warm(&mut slot, name, project, run, limit);
+                let status = self.start_warm(slot, index, project, run, limit);
                 if status.is_none() {
                     *slot = Slot::Cold;
                 }
-                status
+                Served::Done(status)
             }
-            Slot::Running(_) => run_warm(&mut slot, name, run, limit),
+            Slot::Spare => self.serve_on_spare(slot, index, project, run, limit),
+            Slot::Running(_) => Served::Done(run_warm(slot, name, run, limit)),
         }
+    }
+
+    /// Starts a spare and does the run in it, if it starts.
+    fn serve_on_spare(
+        &self,
+        slot: &mut Slot,
+        index: usize,
+        project: Option<&AngularProject>,
+        run: &WarmRun,
+        limit: Duration,
+    ) -> Served {
+        if !self.start_spare(slot, index, project) {
+            return Served::Next;
+        }
+        let name = project.map_or("", |p| p.name.as_str());
+        Served::Done(run_warm(slot, name, run, limit))
+    }
+
+    /// Starts a spare, when the memory for it is free; whether it runs. A run
+    /// that cannot get one goes on with the runners there are.
+    fn start_spare(&self, slot: &mut Slot, index: usize, project: Option<&AngularProject>) -> bool {
+        let name = project.map_or("", |p| p.name.as_str());
+        if super::log::free_memory().is_some_and(|free| free < FREE_FOR_A_RUNNER) {
+            debug!("warm", "{name}: not enough free memory for another runner");
+            *slot = Slot::Cold;
+            return false;
+        }
+        let folder = exec::runs_folder(&self.sandbox).join(format!("spare{index}"));
+        let (report, log) = (folder.join("report.json"), folder.join("output.log"));
+        let first = WarmRun {
+            files: &[],
+            env: &[],
+            report: &report,
+            log: &log,
+            folder: &folder,
+        };
+        if std::fs::create_dir_all(&folder).is_err()
+            || self
+                .start_warm(slot, index, project, &first, SPARE_START)
+                .is_none()
+        {
+            *slot = Slot::Cold;
+            return false;
+        }
+        true
     }
 
     /// Starts the test runner to keep alive, which does its first run.
     fn start_warm(
         &self,
         slot: &mut Slot,
-        name: &str,
+        index: usize,
         project: Option<&AngularProject>,
         run: &WarmRun,
         limit: Duration,
     ) -> Option<TestRun> {
+        let name = project.map_or("", |p| p.name.as_str());
         let started = Instant::now();
         let tag = name.replace(|c: char| !c.is_alphanumeric(), "-");
-        let folder = exec::runs_folder(&self.sandbox).join(format!("warm{tag}"));
+        let folder = exec::runs_folder(&self.sandbox).join(format!("warm{tag}-{index}"));
         let server = warm::server_file(&folder)
             .map_err(|err| debug!("warm", "{name}: {err}"))
             .ok()?;
@@ -248,13 +347,14 @@ impl NodeTests {
         }
     }
 
-    /// Whether every test runner stayed alive through the first run.
+    /// Whether every project's first test runner stayed alive through its first run.
     fn all_warm(&self) -> bool {
         !self.warm.is_empty()
-            && self
-                .warm
-                .values()
-                .all(|slot| slot.lock().is_ok_and(|s| matches!(*s, Slot::Running(_))))
+            && self.warm.values().all(|slots| {
+                slots
+                    .first()
+                    .is_some_and(|slot| slot.lock().is_ok_and(|s| matches!(*s, Slot::Running(_))))
+            })
     }
 
     fn run(
@@ -510,6 +610,39 @@ impl NodeTests {
         files.into_iter().collect()
     }
 
+    /// What a mutant reached while modules load comes to. Every test of a file
+    /// runs with it, so a failure there is not its doing by itself: nobody having
+    /// noticed, every test runs (`widen`), and a kill among all of them has to
+    /// hold in the files that failed, which can fail by their order in one
+    /// process. Then a test that fails with no mutant too (it depends on the
+    /// clock, say) killed nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn settle_outside(
+        &self,
+        widen: bool,
+        env: &[(&str, String)],
+        limit: Duration,
+        folder: &Path,
+        reach: &Reach,
+        status: TestRun,
+        report: Report,
+    ) -> Result<(TestRun, Report), String> {
+        let (mut status, mut report) = (status, report);
+        if widen {
+            (status, report) = self.run(&[], env, limit, folder)?;
+            let failed = self.files_that_failed(&report, reach);
+            if !failed.is_empty() {
+                (status, report) = self.run(&failed, env, limit, folder)?;
+            }
+        }
+        let failed = self.files_that_failed(&report, reach);
+        if failed.is_empty() {
+            return Ok((status, report));
+        }
+        let (_, clean) = self.run(&failed, &[], limit, folder)?;
+        Ok(without_what_fails_anyway(status, report, &clean))
+    }
+
     /// The test files with a test that passes without mutants and failed here.
     fn files_that_failed(&self, report: &Report, reach: &Reach) -> Vec<String> {
         let failed: BTreeSet<String> = report
@@ -552,15 +685,29 @@ fn angular_projects(package: &Path, sandbox: &Path, files: &[FileMutants]) -> Ve
     angular
 }
 
-/// A place for each test runner to keep alive; Jest has none.
-fn warm_slots(runner: Runner, angular: &[AngularProject]) -> HashMap<String, Mutex<Slot>> {
+/// How many spare runners a run of `mutants` is worth, at `jobs` at a time.
+fn spares_for(mutants: usize, jobs: usize) -> usize {
+    (mutants / MUTANTS_PER_RUNNER)
+        .min(jobs.saturating_sub(1))
+        .min(MOST_SPARES)
+}
+
+/// Places for the test runners to keep alive; Jest has none.
+fn warm_slots(
+    runner: Runner,
+    angular: &[AngularProject],
+    spares: usize,
+) -> HashMap<String, Vec<Mutex<Slot>>> {
+    let slots = || {
+        std::iter::once(Slot::NotStarted)
+            .chain((0..spares).map(|_| Slot::Spare))
+            .map(Mutex::new)
+            .collect::<Vec<_>>()
+    };
     match runner {
         Runner::Jest => HashMap::new(),
-        Runner::Vitest => HashMap::from([(String::new(), Mutex::new(Slot::NotStarted))]),
-        Runner::Angular => angular
-            .iter()
-            .map(|p| (p.name.clone(), Mutex::new(Slot::NotStarted)))
-            .collect(),
+        Runner::Vitest => HashMap::from([(String::new(), slots())]),
+        Runner::Angular => angular.iter().map(|p| (p.name.clone(), slots())).collect(),
     }
 }
 
@@ -603,6 +750,27 @@ fn nothing_ran(report: &Report, folder: &Path) -> Result<(), String> {
         )),
         _ => Ok(()),
     }
+}
+
+/// `report` with the tests that also fail in `clean`, a run with no mutant,
+/// counted as passed: they say nothing about the mutant.
+fn without_what_fails_anyway(
+    status: TestRun,
+    mut report: Report,
+    clean: &Report,
+) -> (TestRun, Report) {
+    for (test, passed) in &clean.outcome {
+        if !passed {
+            report.outcome.insert(test.clone(), true);
+        }
+    }
+    let failed = report.outcome.values().any(|passed| !passed);
+    let status = if status == TestRun::Failed && !failed {
+        TestRun::Passed
+    } else {
+        status
+    };
+    (status, report)
 }
 
 /// Whether a mutant reached while modules load, which the test files that
@@ -804,14 +972,10 @@ impl Engine for NodeTests {
         let folder = fresh_folder(&self.sandbox, tag)?;
         let env = [("DGF_MUTANT", mutant.to_string())];
         let (mut status, mut report) = self.run(&files, &env, limit, &folder)?;
-        if needs_every_test(mutant, &files, &report, reach) {
-            (status, report) = self.run(&[], &env, limit, &folder)?;
-            // All the test files in one process can fail by their order, not
-            // by the mutant: a kill has to hold in the files that failed.
-            let failed = self.files_that_failed(&report, reach);
-            if !failed.is_empty() {
-                (status, report) = self.run(&failed, &env, limit, &folder)?;
-            }
+        if reach.outside.contains(&mutant) {
+            let widen = needs_every_test(mutant, &files, &report, reach);
+            (status, report) =
+                self.settle_outside(widen, &env, limit, &folder, reach, status, report)?;
         }
         // The runner runs every test of the files, so a failed run with a
         // reaching test missing lost its worker.
@@ -1139,6 +1303,44 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_test_that_also_fails_with_no_mutant_killed_nothing() {
+        let report = |rows: &[(&str, bool)]| Report {
+            outcome: rows.iter().map(|(t, p)| (t.to_string(), *p)).collect(),
+            ..Report::default()
+        };
+        let (status, kept) = without_what_fails_anyway(
+            TestRun::Failed,
+            report(&[("clock", false), ("fine", true)]),
+            &report(&[("clock", false), ("fine", true)]),
+        );
+        assert_eq!(
+            status,
+            TestRun::Passed,
+            "the only failure is not the mutant's"
+        );
+        assert!(kept.outcome["clock"]);
+        let (status, kept) = without_what_fails_anyway(
+            TestRun::Failed,
+            report(&[("clock", false), ("real", false)]),
+            &report(&[("clock", false), ("real", true)]),
+        );
+        assert_eq!(status, TestRun::Failed, "this one is");
+        assert!(!kept.outcome["real"]);
+        let (status, _) = without_what_fails_anyway(TestRun::TimedOut, report(&[]), &report(&[]));
+        assert_eq!(status, TestRun::TimedOut);
+    }
+
+    #[test]
+    fn a_large_run_is_worth_more_test_runners_a_small_one_is_not() {
+        assert_eq!(spares_for(55, 3), 0, "a branch's mutants");
+        assert_eq!(spares_for(150, 3), 1);
+        assert_eq!(spares_for(326, 3), 2);
+        assert_eq!(spares_for(326, 2), 1, "no more than the jobs");
+        assert_eq!(spares_for(326, 1), 0);
+        assert_eq!(spares_for(5000, 16), 2, "each holds a build in memory");
+    }
 
     #[test]
     fn tests_that_queue_a_mocks_next_value_are_found() {

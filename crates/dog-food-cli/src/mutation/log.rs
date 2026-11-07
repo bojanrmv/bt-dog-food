@@ -96,6 +96,11 @@ fn processor_ticks() -> Option<(u64, u64)> {
     (ok != 0).then_some((total.saturating_sub(idle), total))
 }
 
+/// The machine's free memory in bytes, when it is known.
+pub fn free_memory() -> Option<u64> {
+    memory().map(|(free, _)| free)
+}
+
 /// The machine's (free, total) memory in bytes.
 #[cfg(windows)]
 fn memory() -> Option<(u64, u64)> {
