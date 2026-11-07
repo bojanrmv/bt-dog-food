@@ -46,6 +46,8 @@ dgf mutate --changes --run \
 
 A mutant is **killed** when a test fails with it on, and **survived** when every test that reaches it still passes: a gap to close with a test. Mutants no test reaches are **no tests**. The score is the share detected, per function and overall. Every outcome is in [running and reports](running.md#what-a-run-shows).
 
+Mutants outside any function (constants, tables, property defaults) are reported apart as `outsideFunctions` in JSON and on a line of their own in the text: they do not move the score or the exit code. A survivor there is often a table or a default no test pins.
+
 ## What it needs
 
 - **C#:** test projects on .NET 6 or newer, with a VSTest adapter (xUnit, NUnit, MSTest) or as a Microsoft.Testing.Platform application (xUnit v3, the MSTest runner, TUnit), and `dotnet` on the PATH. .NET Framework test projects are not supported: the run stops and names them, and `--exclude-test-project` leaves them out. Which test projects run is described under [Settings](settings.md).

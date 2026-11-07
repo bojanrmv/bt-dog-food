@@ -8,7 +8,6 @@ Value is the expected gain for teams using dgf. Effort is S (a day or two), M (a
 
 | What | Value | Effort | Notes |
 | --- | --- | --- | --- |
-| Mutate outside functions | high | M | Only code inside functions is mutated, so module-level constants and tables, property defaults and base-constructor arguments go untested. On a real repository these held most of the gaps an independent run found outside dgf's reach, including an error-code table no test pinned. The core already finds these mutants and the target step drops them, so this is mostly a target per file and a cache key for it. A separate score, so existing scores do not jump unexplained. |
 | TypeScript kills that another test caused | high | S–M | A test can fail from what an earlier test in its file left behind, even though its own mutant took effect. Confirm kills in a second run where no neighbouring test carries a mutant, so a leak meets a clean test first. Measure against `--no-mix`. Target: the same verdicts every run. |
 | Fewer TypeScript runs alone | medium | S | The checks that made verdicts reliable raised a 301-mutant run from about 21 test runs to 55, about 90 s to 170 s. Most mutants that never took effect could share a clean second pack before anything runs alone. |
 | Why tests fail only sometimes in a baseline | medium | S–M | One block of tests failed together in 2 of 20 baselines. They now get a second run, but the cause is unknown, and a test that fails now and then can still cause a false kill. |

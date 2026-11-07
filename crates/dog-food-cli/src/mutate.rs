@@ -68,11 +68,17 @@ pub const NEIGHBOUR: &str = "neighbour";
 /// Why a function outside the branch's diff is mutated: a test file the
 /// branch changed reaches it.
 pub const TESTS: &str = "tests";
+/// The reason of a file's mutants outside any function (module-level constants
+/// and tables, property defaults, base-constructor arguments). They are scored
+/// apart: a function's score says nothing about them.
+pub const OUTSIDE: &str = "outside";
+/// The name such a target goes by.
+pub const OUTSIDE_NAME: &str = "(outside functions)";
 
 /// A function of the branch's own diff (or of the paths given), not one
 /// brought in by a changed test file or as a neighbour.
 fn is_own(t: &Target) -> bool {
-    t.reason != NEIGHBOUR && t.reason != TESTS
+    t.reason != NEIGHBOUR && t.reason != TESTS && t.reason != OUTSIDE
 }
 
 /// The string keys of a change: quoted literals of three characters or more
@@ -321,7 +327,7 @@ fn gated(targets: &[Target]) -> impl Iterator<Item = &Mutant> {
     let own = targets.iter().any(is_own);
     targets
         .iter()
-        .filter(move |t| t.reason != NEIGHBOUR && (is_own(t) || !own))
+        .filter(move |t| t.reason != NEIGHBOUR && t.reason != OUTSIDE && (is_own(t) || !own))
         .flat_map(|t| &t.mutants)
 }
 
@@ -345,6 +351,30 @@ fn tests_reach_text(targets: &[Target], result: &RunResult) -> String {
             n.killed,
             n.survived,
             n.no_coverage
+        )
+    })
+}
+
+/// The mutants outside any function, scored apart; `None` when there are none.
+fn outside(targets: &[Target], result: &RunResult) -> Option<Tally> {
+    let mutants: Vec<&Mutant> = targets
+        .iter()
+        .filter(|t| t.reason == OUTSIDE)
+        .flat_map(|t| &t.mutants)
+        .collect();
+    (!mutants.is_empty()).then(|| tally(mutants.into_iter(), result))
+}
+
+/// The line that scores the mutants outside any function.
+fn outside_text(targets: &[Target], result: &RunResult) -> String {
+    outside(targets, result).map_or_else(String::new, |n| {
+        format!(
+            "outside functions (constants, tables, property defaults; scored apart): score {} · {} killed, {} survived, {} no tests, {} did not compile\n",
+            percent(n.score()),
+            n.killed,
+            n.survived,
+            n.no_coverage,
+            n.compile_error
         )
     })
 }
@@ -387,7 +417,7 @@ fn rerun_and_reach_text(targets: &[Target], result: &RunResult) -> String {
     [
         run_errors_text(targets, result),
         retested_text(targets, result),
-        tests_reach_text(targets, result),
+        tests_reach_text(targets, result) + &outside_text(targets, result),
     ]
     .iter()
     .filter(|text| !text.is_empty())
@@ -413,13 +443,29 @@ fn outcome_word(outcome: Outcome) -> &'static str {
         .map_or("?", |(_, word)| word)
 }
 
-/// Every function in `reports` with at least `min_complexity`.
+/// A file's mutants outside any function, as a target of its own.
+fn outside_wanted(file: String, path: PathBuf) -> Wanted {
+    Wanted {
+        file,
+        path,
+        name: OUTSIDE_NAME.to_string(),
+        start_line: 1,
+        end_line: 1,
+        complexity: 0,
+        reason: OUTSIDE,
+        lines: None,
+    }
+}
+
+/// Every function in `reports` with at least `min_complexity`, and with the
+/// default complexity what lies outside them. A higher one asks for complex
+/// functions, and code outside functions has no complexity.
 pub fn from_reports(
     reports: &[FileReport],
     min_complexity: u32,
     display: impl Fn(&str) -> String,
 ) -> Vec<Wanted> {
-    reports
+    let mut wanted: Vec<Wanted> = reports
         .iter()
         .flat_map(|report| {
             let file = display(&report.path);
@@ -438,12 +484,21 @@ pub fn from_reports(
                     lines: None,
                 })
         })
-        .collect()
+        .collect();
+    if min_complexity <= 1 {
+        wanted.extend(
+            reports
+                .iter()
+                .map(|r| outside_wanted(display(&r.path), PathBuf::from(&r.path))),
+        );
+    }
+    wanted
 }
 
 /// Functions that `dgf changes` found new or touched, at least `min_complexity`.
 pub fn from_changes(run: &ChangesRun, root: &Path, min_complexity: u32) -> Vec<Wanted> {
-    run.rows
+    let mut wanted: Vec<Wanted> = run
+        .rows
         .iter()
         .filter(|row| row.change != Change::Removed && row.after.unwrap_or(0) >= min_complexity)
         .map(|row| Wanted {
@@ -456,7 +511,16 @@ pub fn from_changes(run: &ChangesRun, root: &Path, min_complexity: u32) -> Vec<W
             reason: change_reason(row.change),
             lines: None,
         })
-        .collect()
+        .collect();
+    if min_complexity <= 1 {
+        wanted.extend(
+            run.files
+                .iter()
+                .filter(|file| root.join(file).is_file())
+                .map(|file| outside_wanted(file.clone(), root.join(file))),
+        );
+    }
+    wanted
 }
 
 /// The function `name` (a stable name, without positions) in `file`, chosen
@@ -586,6 +650,7 @@ fn file_targets(
             other => warn(other.to_string()),
         })?;
     let lines = functions.first().and_then(|w| w.lines.clone());
+    let last_line = source.lines().count().max(1);
     let mut targets: Vec<Target> = functions
         .into_iter()
         .map(|w| Target {
@@ -593,7 +658,11 @@ fn file_targets(
             path: w.path,
             name: w.name,
             start_line: w.start_line,
-            end_line: w.end_line,
+            end_line: if w.reason == OUTSIDE {
+                last_line
+            } else {
+                w.end_line
+            },
             complexity: w.complexity,
             reason: w.reason,
             mutants: Vec::new(),
@@ -607,20 +676,40 @@ fn file_targets(
                 .any(|&(from, to)| m.line <= to && from <= m.end_line)
         })
     };
-    let bytes = byte_ranges(&targets, &source, language);
+    let every_function = dog_food_core::analyze_source(&source, language).unwrap_or_default();
+    let bytes = byte_ranges(&targets, &every_function);
+    let outside_target = targets.iter().position(|t| t.reason == OUTSIDE);
     for mutant in found.mutants.into_iter().filter(on_lines) {
-        if let Some(index) = innermost(&targets, &bytes, &mutant) {
+        let in_function = every_function
+            .iter()
+            .any(|f| f.start_byte <= mutant.start_byte && mutant.end_byte <= f.end_byte);
+        let home = if in_function {
+            innermost(&targets, &bytes, &mutant)
+        } else {
+            outside_target
+        };
+        if let Some(index) = home {
             targets[index].mutants.push(mutant);
         }
     }
     for target in &mut targets {
-        target.suppressions = found
+        let lines_of = |s: &&Suppression| {
+            let covers = |line: usize, end: usize| line <= s.end_line && s.line <= end;
+            if target.reason == OUTSIDE {
+                target.mutants.iter().any(|m| covers(m.line, m.end_line))
+            } else {
+                covers(target.start_line, target.end_line)
+            }
+        };
+        let suppressions = found
             .suppressions
             .iter()
-            .filter(|s| s.line <= target.end_line && target.start_line <= s.end_line)
+            .filter(lines_of)
             .cloned()
             .collect();
+        target.suppressions = suppressions;
     }
+    targets.retain(|t| t.reason != OUTSIDE || !t.mutants.is_empty());
     Ok(targets)
 }
 
@@ -705,10 +794,8 @@ fn suppressions_text(targets: &[Target], indent: &str) -> String {
 /// Each target's byte range in `source`, when the analysis finds it.
 fn byte_ranges(
     targets: &[Target],
-    source: &str,
-    language: Language,
+    functions: &[dog_food_core::FunctionMetrics],
 ) -> Vec<Option<(usize, usize)>> {
-    let functions = dog_food_core::analyze_source(source, language).unwrap_or_default();
     targets
         .iter()
         .map(|t| {
@@ -730,7 +817,7 @@ fn innermost(
 ) -> Option<usize> {
     let size = |i: usize| bytes[i].map_or(usize::MAX, |(start, end)| end - start);
     (0..targets.len())
-        .filter(|&i| contains(&targets[i], bytes[i], mutant))
+        .filter(|&i| targets[i].reason != OUTSIDE && contains(&targets[i], bytes[i], mutant))
         .min_by_key(|&i| (size(i), targets[i].end_line - targets[i].start_line))
 }
 
@@ -1418,6 +1505,7 @@ fn run_json(targets: &[Target], result: &RunResult, thresholds: &Thresholds) -> 
         "score": overall(targets, result),
         "tally": tally(gated(targets), result),
         "testsReach": tests_reach(targets, result).map(|n| serde_json::json!({ "score": n.score(), "tally": n })),
+        "outsideFunctions": outside(targets, result).map(|n| serde_json::json!({ "score": n.score(), "tally": n })),
         "retested": result.retested.iter().map(|id| serde_json::json!({ "id": id, "outcome": result.outcomes.get(id) })).collect::<Vec<_>>(),
         "budgetHit": result.budget_hit(),
         "notes": result.notes,
@@ -1573,6 +1661,7 @@ fn run_agent(targets: &[Target], result: &RunResult) -> String {
         out.push_str("budget: the time budget ran out; run again to test the rest (results so far are cached)\n");
     }
     out.push_str(&tests_reach_text(targets, result));
+    out.push_str(&outside_text(targets, result));
     out.push_str(&retested_text(targets, result));
     out.push_str("survivors: each is a change no test noticed; add a test that fails for it\n");
     out.push_str(&survivors_by_mutator(targets, result));
@@ -1857,6 +1946,123 @@ mod tests {
         );
         assert_eq!(near[0].lines, Some(vec![(4, 4)]));
         assert!(near.iter().all(|w| w.reason == NEIGHBOUR));
+    }
+
+    /// Targets of `source`, with `chosen` functions and what lies outside them.
+    fn with_outside(name: &str, source: &str, chosen: Wanted) -> Vec<Target> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        std::fs::write(&path, source).unwrap();
+        let chosen = Wanted {
+            path: path.clone(),
+            ..chosen
+        };
+        let wanted = vec![chosen, outside_wanted(name.into(), path)];
+        targets(wanted, &Settings::default()).unwrap().0
+    }
+
+    fn function(name: &str, start_line: usize, end_line: usize) -> Wanted {
+        Wanted {
+            file: "f".into(),
+            path: PathBuf::new(),
+            name: name.into(),
+            start_line,
+            end_line,
+            complexity: 1,
+            reason: "selected",
+            lines: None,
+        }
+    }
+
+    #[test]
+    fn mutants_outside_any_function_get_a_target_and_unchosen_functions_stay_out() {
+        let source = "const TABLE = { a: 'x' };\nexport function f(n: number) {\n  return n > 1;\n}\nexport function g(n: number) {\n  return n < 1;\n}\n";
+        let found = with_outside("t.ts", source, function("f", 2, 4));
+        let outside = found.iter().find(|t| t.reason == OUTSIDE).unwrap();
+        assert_eq!(outside.name, OUTSIDE_NAME);
+        assert!(!outside.mutants.is_empty());
+        assert!(
+            outside.mutants.iter().all(|m| m.line == 1),
+            "{:?}",
+            outside.mutants
+        );
+        let chosen = found.iter().find(|t| t.name == "f").unwrap();
+        assert!(!chosen.mutants.is_empty());
+        assert!(chosen.mutants.iter().all(|m| (2..=4).contains(&m.line)));
+        assert!(
+            found.iter().flat_map(|t| &t.mutants).all(|m| m.line < 5),
+            "g was not chosen"
+        );
+    }
+
+    #[test]
+    fn a_csharp_property_default_is_outside_functions() {
+        let source = "class C {\n  public string N { get; set; } = \"x\";\n  bool F(int a) {\n    return a > 1;\n  }\n}\n";
+        let found = with_outside("C.cs", source, function("C.F", 3, 5));
+        let outside = found.iter().find(|t| t.reason == OUTSIDE).unwrap();
+        assert!(outside.mutants.iter().all(|m| m.line == 2));
+        assert!(!outside.mutants.is_empty());
+    }
+
+    #[test]
+    fn a_file_with_nothing_outside_its_functions_gets_no_extra_target() {
+        let source = "export function f(n: number) {\n  return n > 1;\n}\n";
+        let found = with_outside("t.ts", source, function("f", 1, 3));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "f");
+    }
+
+    #[test]
+    fn outside_functions_is_scored_apart_and_leaves_the_score_alone() {
+        let source =
+            "const TABLE = { a: 'x' };\nexport function f(n: number) {\n  return n > 1;\n}\n";
+        let found = with_outside("t.ts", source, function("f", 2, 4));
+        let mut result = RunResult::default();
+        for target in &found {
+            let outcome = if target.reason == OUTSIDE {
+                Outcome::Survived
+            } else {
+                Outcome::Killed
+            };
+            for mutant in &target.mutants {
+                result.outcomes.insert(mutant.id, outcome);
+            }
+        }
+        assert_eq!(
+            overall(&found, &result),
+            Some(100.0),
+            "only the function counts"
+        );
+        let apart = outside(&found, &result).unwrap();
+        assert_eq!(apart.score(), Some(0.0));
+        assert!(apart.survived > 0);
+        assert!(outside_text(&found, &result).contains("scored apart"));
+        let json = run_json(&found, &result, &Thresholds::default());
+        assert_eq!(json["score"], 100.0);
+        assert_eq!(json["outsideFunctions"]["score"], 0.0);
+    }
+
+    #[test]
+    fn a_higher_complexity_asks_for_functions_only() {
+        let report = dog_food_core::analyze_source(
+            "export function f(n: number) {\n  return n > 1;\n}\n",
+            Language::TypeScript,
+        )
+        .unwrap();
+        let reports = [FileReport {
+            path: "t.ts".into(),
+            functions: report,
+            language: Language::TypeScript,
+            has_errors: false,
+        }];
+        let names = |min: u32| -> Vec<String> {
+            from_reports(&reports, min, |p| p.to_string())
+                .into_iter()
+                .map(|w| w.name)
+                .collect()
+        };
+        assert!(names(1).iter().any(|n| n == OUTSIDE_NAME));
+        assert!(!names(2).iter().any(|n| n == OUTSIDE_NAME));
     }
 
     #[test]

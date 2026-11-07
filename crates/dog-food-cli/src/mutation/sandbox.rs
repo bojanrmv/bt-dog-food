@@ -86,7 +86,9 @@ pub fn group(
             .cloned();
         let entry = by_file.entry(absolute(&target.path)).or_default();
         entry.0.extend(open);
-        entry.1.push((target.start_line, target.end_line));
+        if target.reason != crate::mutate::OUTSIDE {
+            entry.1.push((target.start_line, target.end_line));
+        }
     }
     let root = absolute(root);
     by_file

@@ -6,6 +6,8 @@
 
    The sandbox is kept between runs and brought up to date file by file: new and changed files are copied, deleted ones removed, and the build output stays, so the next build only compiles what changed. Links and NTFS junctions in the repository, and every `node_modules` folder, are linked again in the sandbox, never copied; removing the sandbox removes the links, not what they point at. A run locks its sandbox; a second run at the same time takes the next one (`-2`, `-3`, ...).
 
+   With the default `--min-complexity`, the code outside functions is chosen too: module-level constants and tables, property and field defaults, base-constructor arguments. Decorators, attributes, enums and other compile-time constants stay out. These mutants show as `(outside functions)` and are scored apart, so a function's score and the exit code say nothing about them. Any change to the file tests them again.
+
    Only the files with chosen functions are rewritten. Every mutated expression becomes a switch, nested where expressions nest: `a > b` turns into `(DgfMutants.Is(17) ? (a >= b) : (a > b))`. Every line keeps its number: line breaks in the mutated copy become spaces, or, in C# when the copy holds a string spanning lines or an `#if`, stay between `#line` directives. C# gets a small `DgfMutants.g.cs` in each mutated project; TypeScript and JavaScript get a `__dgfIs` function appended at the end of the file (function declarations are hoisted, so no line moves).
 2. **One build.** C#: `dotnet build` of a solution with the chosen test projects, with analyzers off (source generators still run), warnings not treated as errors, and no NuGet audit: these slow a build down or fail it for reasons that have nothing to do with the mutants. Angular: `tsc --noEmit` on the spec tsconfig. Vitest and Jest need no build: they strip types on load.
 
@@ -50,7 +52,7 @@
 - **One build** for all mutants, and never more than one sandbox per language.
 - **Packing:** with per-test reach, the number of test runs is about *max mutants a single test reaches*, not *number of mutants*: 22 mutants became 11 runs on the small sample.
 - **One test first:** a mutant runs with all its tests only when its first test does not kill it.
-- **Only reaching tests run** in each pack (C#: by name; Node: their test files).
+- **Only reaching tests run** in each pack (C#: by name; Node: their test files). A mutant reached while modules load runs alone with the test files that loaded it, and, if none noticed it, once more with every test: where test files share a process, a module loads under only the first one that needs it.
 - **Test runner kept alive:** Vitest, also the one inside `ng test`, stays alive after the baseline, so a run does not pay for a new start or an Angular build. Each run gets new test processes, which read that run's mutants from a file. A run past its limit loses only those processes, and the next run goes on. Runs of one runner take turns, and each uses `--jobs` test processes. If the runner cannot stay alive (a build that fails, a Vitest too old for it, one that ended), each run starts its own, as Jest always does; the debug log says why under `[warm]`.
 - **Only the tests you choose run at all:** filters and excluded test projects apply to the baseline too, which is where unscoped mutation runs spend most of their time.
 - **Small, lasting sandbox:** only the projects the tests need are copied, and the build output stays between runs.

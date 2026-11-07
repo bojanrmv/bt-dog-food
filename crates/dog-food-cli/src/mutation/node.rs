@@ -589,6 +589,18 @@ fn nothing_ran(report: &Report, folder: &Path) -> Result<(), String> {
     }
 }
 
+/// Whether a mutant reached while modules load, which the test files that
+/// loaded it did not notice, has to run with every test. Where test files share
+/// a process, a module loads once, under the first test file that needs it, so
+/// the files that loaded it are not all the files that use it.
+fn needs_every_test(mutant: usize, files: &[String], report: &Report, reach: &Reach) -> bool {
+    let noticed = report
+        .outcome
+        .iter()
+        .any(|(test, passed)| !*passed && !reach.failing.contains(test));
+    reach.outside.contains(&mutant) && !files.is_empty() && !noticed
+}
+
 /// What a pack's run shows. A test that failed although its mutant never took
 /// effect in it failed by what an earlier test left behind (a mock's queued
 /// value, say), and a pass there says nothing: the shared logic gives both
@@ -699,12 +711,11 @@ impl Engine for NodeTests {
     ) -> Result<SoloRun, String> {
         let files = self.solo_files(mutant, reach);
         let folder = fresh_folder(&self.sandbox, tag)?;
-        let (status, report) = self.run(
-            &files,
-            &[("DGF_MUTANT", mutant.to_string())],
-            limit,
-            &folder,
-        )?;
+        let env = [("DGF_MUTANT", mutant.to_string())];
+        let (mut status, mut report) = self.run(&files, &env, limit, &folder)?;
+        if needs_every_test(mutant, &files, &report, reach) {
+            (status, report) = self.run(&[], &env, limit, &folder)?;
+        }
         // The runner runs every test of the files, so a failed run with a
         // reaching test missing lost its worker.
         let missing = reach
@@ -1010,6 +1021,37 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mutant_of_a_loading_module_nobody_noticed_runs_with_every_test() {
+        let reach = Reach {
+            outside: HashSet::from([1]),
+            failing: BTreeSet::from(["broken".to_string()]),
+            ..Reach::default()
+        };
+        let report = |test: &str, passed: bool| Report {
+            outcome: HashMap::from([(test.to_string(), passed)]),
+            ..Report::default()
+        };
+        let files = ["a.spec.ts".to_string()];
+        assert!(needs_every_test(1, &files, &report("t", true), &reach));
+        assert!(
+            needs_every_test(1, &files, &report("broken", false), &reach),
+            "a test that fails anyway noticed nothing"
+        );
+        assert!(
+            !needs_every_test(1, &files, &report("t", false), &reach),
+            "killed"
+        );
+        assert!(
+            !needs_every_test(2, &files, &report("t", true), &reach),
+            "reached by tests"
+        );
+        assert!(
+            !needs_every_test(1, &[], &report("t", true), &reach),
+            "it just ran with every test"
+        );
+    }
 
     #[test]
     fn a_pack_failure_whose_mutant_never_took_effect_is_not_its_kill() {

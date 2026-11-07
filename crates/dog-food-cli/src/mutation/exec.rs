@@ -498,9 +498,20 @@ fn locate_line(file: &FileMutants, line: usize, located: &mut Located) {
             return;
         }
     }
-    if let Some(&(start, end)) = around(file, line).last() {
-        suspects_in(file, start, end, located);
+    match containing(file, line).last() {
+        Some(&(start, end)) => suspects_in(file, start, end, located),
+        None => outside_suspects(file, located),
     }
+}
+
+/// Every mutant outside the chosen functions.
+fn outside_suspects(file: &FileMutants, located: &mut Located) {
+    located.suspects.extend(
+        file.mutants
+            .iter()
+            .filter(|m| containing(file, m.line).is_empty())
+            .map(|m| m.id),
+    );
 }
 
 /// Every mutant of the innermost chosen function around `line` that has any.
@@ -518,13 +529,7 @@ fn function_suspects(file: &FileMutants, line: usize, located: &mut Located) {
 /// is a signature (a missing return is reported on the method's name, above its
 /// body): it belongs to the first function below it.
 fn around(file: &FileMutants, line: usize) -> Vec<(usize, usize)> {
-    let mut functions: Vec<(usize, usize)> = file
-        .functions
-        .iter()
-        .copied()
-        .filter(|(start, end)| (*start..=*end).contains(&line))
-        .collect();
-    functions.sort_by_key(|(start, end)| end - start);
+    let mut functions = containing(file, line);
     if functions.is_empty() {
         functions.extend(
             file.functions
@@ -534,6 +539,18 @@ fn around(file: &FileMutants, line: usize) -> Vec<(usize, usize)> {
                 .min_by_key(|(start, _)| *start),
         );
     }
+    functions
+}
+
+/// The chosen functions that hold `line`, innermost first.
+fn containing(file: &FileMutants, line: usize) -> Vec<(usize, usize)> {
+    let mut functions: Vec<(usize, usize)> = file
+        .functions
+        .iter()
+        .copied()
+        .filter(|(start, end)| (*start..=*end).contains(&line))
+        .collect();
+    functions.sort_by_key(|(start, end)| end - start);
     functions
 }
 
@@ -750,6 +767,33 @@ four
             ],
         );
         assert_eq!(located.suspects, in_f);
+    }
+
+    #[test]
+    fn an_error_outside_functions_suspects_the_mutants_outside_them() {
+        let source = "class C {\n  public string N { get; set; } = \"x\" + \"y\";\n  public int M = U;\n  bool F(int a) {\n    return a > 1;\n  }\n}\n";
+        let mutants =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp).unwrap();
+        let outside: HashSet<usize> = mutants
+            .iter()
+            .filter(|m| m.line < 4)
+            .map(|m| m.id)
+            .collect();
+        assert!(!outside.is_empty());
+        let file = FileMutants {
+            relative: PathBuf::from("C.cs"),
+            source: source.into(),
+            mutants,
+            functions: vec![(4, 6)],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let located = locate(
+            dir.path(),
+            dir.path(),
+            std::slice::from_ref(&file),
+            &["C.cs(3,18): error CS0103: The name 'U' does not exist".to_string()],
+        );
+        assert_eq!(located.suspects, outside, "not the function below it");
     }
 
     #[test]
