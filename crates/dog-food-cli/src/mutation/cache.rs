@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -28,13 +28,20 @@ use crate::mutate::Target;
 
 /// The cache folder, relative to dgf.toml (or the repository) unless absolute.
 pub const DEFAULT_DIR: &str = ".dgf/mutation-cache";
-const FILE: &str = "mutants.json";
 const LOCK: &str = "mutants.lock";
 const SCHEMA: u32 = 5;
 /// The dgf that writes the cache: another version may decide mutants
 /// differently (which tests reach them, what survives without a run), so
 /// its results are not reused.
 const TOOL: &str = env!("CARGO_PKG_VERSION");
+
+/// Each version's results in a file of its own, so versions that share a
+/// `cache_dir` (a team or its agents updating at different times) keep
+/// their caches instead of replacing each other's. Versions before 0.1.3
+/// wrote `mutants.json`.
+fn file() -> String {
+    format!("mutants-{TOOL}.json")
+}
 /// Entries nobody used for this long are dropped when the cache is saved.
 const KEEP_DAYS: u64 = 30;
 
@@ -274,7 +281,9 @@ impl Cache {
             on_disk.runs.retain(|_, t| t.at / 86_400 >= oldest);
             on_disk.schema_version = SCHEMA;
             on_disk.tool = TOOL.to_string();
-            write(&self.dir, &on_disk)
+            write(&self.dir, &on_disk)?;
+            remove_unused_versions(&self.dir);
+            Ok(())
         })
     }
 
@@ -413,8 +422,29 @@ fn locked<T>(
     work()
 }
 
+/// Other versions' cache files nobody wrote for [`KEEP_DAYS`].
+fn remove_unused_versions(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let keep = Duration::from_secs(KEEP_DAYS * 86_400);
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let versioned = name.starts_with("mutants-") && name.ends_with(".json");
+        let unused = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age > keep);
+        if versioned && name != file() && unused {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn read(dir: &Path) -> Result<Option<Cache>, String> {
-    let Ok(text) = std::fs::read_to_string(dir.join(FILE)) else {
+    let Ok(text) = std::fs::read_to_string(dir.join(file())) else {
         return Ok(None);
     };
     Ok(serde_json::from_str(&text).ok())
@@ -423,8 +453,8 @@ fn read(dir: &Path) -> Result<Option<Cache>, String> {
 /// Writes a temporary file and renames it over the cache, so a reader never
 /// sees half a file.
 fn write(dir: &Path, cache: &Cache) -> Result<(), String> {
-    let path = dir.join(FILE);
-    let temporary = dir.join(format!("{FILE}.{}.tmp", std::process::id()));
+    let path = dir.join(file());
+    let temporary = dir.join(format!("{}.{}.tmp", file(), std::process::id()));
     std::fs::write(
         &temporary,
         serde_json::to_string(cache).expect("cache serializes"),
@@ -496,6 +526,25 @@ mod tests {
         assert!(Cache::load(dir.path()).functions.is_empty());
         older.tool = TOOL.into();
         write(dir.path(), &older).unwrap();
+        assert_eq!(Cache::load(dir.path()).functions.len(), 1);
+    }
+
+    #[test]
+    fn versions_sharing_a_folder_keep_their_own_caches() {
+        let dir = tempfile::tempdir().unwrap();
+        // What an older dgf wrote, and another version's file.
+        std::fs::write(dir.path().join("mutants.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("mutants-0.0.1.json"), "{}").unwrap();
+        let mut cache = Cache::load(dir.path());
+        cache.functions.insert("f".into(), Entry::default());
+        cache.touched.insert("f".into());
+        cache.save().unwrap();
+        assert!(dir.path().join(format!("mutants-{TOOL}.json")).is_file());
+        assert!(dir.path().join("mutants.json").is_file());
+        assert!(
+            dir.path().join("mutants-0.0.1.json").is_file(),
+            "written today, so kept"
+        );
         assert_eq!(Cache::load(dir.path()).functions.len(), 1);
     }
 
