@@ -419,6 +419,10 @@ impl Rebuild {
             return Ok(());
         }
         if located.is_empty() {
+            if self.searching() {
+                self.search_on(files);
+                return Ok(());
+            }
             return self.take_all_out(files, errors);
         }
         self.round = Round::Mutated;
@@ -435,6 +439,30 @@ impl Rebuild {
             put_back(files, group);
         }
         Ok(())
+    }
+
+    /// Whether suspects are still being tried function by function, before
+    /// every mutant came out once.
+    fn searching(&self) -> bool {
+        !self.took_all_out && !(self.waiting.is_empty() && self.trying.is_empty())
+    }
+
+    /// An error that names no mutant while suspects are still being tried:
+    /// their search goes on first, every function side by side, and the
+    /// error waits. Taking every mutant out now would send the suspects
+    /// through the search for that error, one culprit at a time. The groups
+    /// that were in stay in, neither blamed nor cleared (the error may be
+    /// theirs), and say nothing about their other halves.
+    fn search_on(&mut self, files: &mut [FileMutants]) {
+        for group in std::mem::take(&mut self.trying) {
+            if let Some((_, first)) = group.first() {
+                self.forget_half(first.id);
+            }
+        }
+        self.trying = self.next_groups(files);
+        for group in &self.trying {
+            put_back(files, group);
+        }
     }
 
     /// Mutants on an error's line do not compile: they come out for good.
@@ -484,7 +512,9 @@ impl Rebuild {
 
     /// `group` went back in without an error: the two halves broke the build
     /// together, so the culprit is in the other one, which is halved again
-    /// at once (or, alone, is the culprit).
+    /// at once. A single mutant left that way still goes in alone, for a
+    /// build to show it: when the cause is outside the function after all,
+    /// nobody in it is to blame.
     fn cleared(&mut self, group: &Held, outcomes: &mut HashMap<usize, Outcome>) {
         let Some(first) = group.first().map(|(_, m)| m.id) else {
             return;
@@ -494,8 +524,10 @@ impl Rebuild {
         };
         let waits = |g: &Held| g.first().is_some_and(|(_, m)| m.id == other);
         if let Some(at) = self.waiting.iter().position(waits) {
-            let guilty = self.waiting.remove(at);
-            self.split(guilty, outcomes);
+            if self.waiting[at].len() > 1 {
+                let guilty = self.waiting.remove(at);
+                self.split(guilty, outcomes);
+            }
         }
     }
 
@@ -983,6 +1015,58 @@ mod tests {
             "every mutant is in, or the hunt holds it"
         );
         assert!(outcomes.is_empty(), "nobody is blamed");
+    }
+
+    #[test]
+    fn an_error_that_names_no_mutant_waits_for_the_search_under_way() {
+        let source = "class C {\n  bool F(int a, int b) {\n    return a > 1 && b < 2 || a == b;\n  }\n  bool G(int a, int b) {\n    return a >= 3 && b <= 4 || a != b;\n  }\n}\n";
+        let mutants =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp).unwrap();
+        let culprit = mutants.iter().find(|m| m.line == 3).unwrap().id;
+        let mut files = vec![FileMutants {
+            relative: PathBuf::from("C.cs"),
+            source: source.into(),
+            mutants,
+            functions: vec![(2, 4), (5, 7)],
+        }];
+        let mut outcomes = HashMap::new();
+        let mut state = Rebuild::new(true);
+        let errors = ["C.cs(1,1): error CS0165".to_string()];
+        // F's mutants are suspects, and half of them wait.
+        state
+            .failed(
+                &Culprits(HashSet::from([culprit])),
+                &mut files,
+                &errors,
+                &mut outcomes,
+            )
+            .unwrap();
+        assert!(state.searching());
+        let waiting: usize = state.waiting.iter().map(Vec::len).sum();
+        assert!(waiting > 0);
+        // An error elsewhere, with no mutant to its name: nobody comes out
+        // for it yet, and the next suspects go in.
+        let in_before = files[0].mutants.len();
+        state
+            .failed(&Nowhere, &mut files, &errors, &mut outcomes)
+            .unwrap();
+        assert!(!state.took_all_out);
+        assert!(files[0].mutants.len() > in_before, "the search went on");
+        assert!(outcomes.is_empty());
+        // With nothing left to try, it takes them all out.
+        while state.searching() {
+            state
+                .failed(&Nowhere, &mut files, &errors, &mut outcomes)
+                .unwrap();
+        }
+        state
+            .failed(&Nowhere, &mut files, &errors, &mut outcomes)
+            .unwrap();
+        assert!(state.took_all_out && no_mutants(&files));
+        assert!(
+            outcomes.is_empty(),
+            "an error nobody was seen to cause blames nobody"
+        );
     }
 
     #[test]
