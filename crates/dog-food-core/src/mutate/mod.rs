@@ -14,6 +14,8 @@ mod rust;
 mod suppress;
 mod typescript;
 
+use std::collections::HashSet;
+
 use serde::Serialize;
 use tree_sitter::Node;
 
@@ -579,6 +581,7 @@ pub fn schemata_probed(
         csharp: true,
         typed: false,
         probe: Some(probe),
+        tails: HashSet::new(),
     };
     rewrite.render(0, source.len(), &sites)
 }
@@ -591,6 +594,11 @@ const PROBED: usize = 3;
 /// original's type (`never | T` is `T`). Without it, a mutant that changes
 /// a type, such as an arrow returning `undefined` in a factory whose return
 /// type callers infer, would change what the unmutated tests type-check against.
+/// For the same reason the mutated branch of a statement that ends a
+/// function's body ends with `return undefined as never;`: falling off the
+/// end returns `undefined` too, but would add `undefined` to the return type
+/// the function's callers infer, which an Angular template checks even in a
+/// file whose own errors are off.
 pub fn schemata_typed(
     source: &str,
     language: Language,
@@ -611,8 +619,98 @@ pub fn schemata_typed(
         csharp: language == Language::CSharp,
         typed,
         probe: None,
+        tails: if typed {
+            tails(source, language, mutants)
+        } else {
+            HashSet::new()
+        },
     };
     rewrite.render(0, source.len(), &sites)
+}
+
+/// The statement sites after which their function returns: its whole body,
+/// or the body's last statement. Not in constructors and setters, which
+/// cannot return a value.
+fn tails(source: &str, language: Language, mutants: &[&Mutant]) -> HashSet<(usize, usize)> {
+    let Ok(tree) = crate::parse(source, language, "<memory>") else {
+        return HashSet::new();
+    };
+    let root = tree.root_node();
+    mutants
+        .iter()
+        .filter(|m| m.statement)
+        .map(|m| (m.site_start, m.site_end))
+        .filter(|&(start, end)| {
+            root.descendant_for_byte_range(start, end)
+                .and_then(|node| statement_at(node, start, end))
+                .is_some_and(|node| ends_function(node, source.as_bytes()))
+        })
+        .collect()
+}
+
+/// The outermost node that spans exactly `start..end`.
+fn statement_at(mut node: Node, start: usize, end: usize) -> Option<Node> {
+    let spans = |n: &Node| n.start_byte() == start && n.end_byte() == end;
+    if !spans(&node) {
+        return None;
+    }
+    while let Some(parent) = node.parent().filter(spans) {
+        node = parent;
+    }
+    Some(node)
+}
+
+/// TypeScript function kinds whose body is a block.
+const FUNCTIONS: &[&str] = &[
+    "function_declaration",
+    "function_expression",
+    "function",
+    "arrow_function",
+    "method_definition",
+    "generator_function_declaration",
+    "generator_function",
+];
+
+/// Whether `node` is a function's body block, or the last statement in one.
+fn ends_function(node: Node, src: &[u8]) -> bool {
+    let body = if is_function_body(node) {
+        Some(node)
+    } else {
+        body_ended_by(node)
+    };
+    body.and_then(|b| b.parent())
+        .is_some_and(|f| returns_values(f, src))
+}
+
+/// The function body whose last statement is `node`.
+fn body_ended_by(node: Node) -> Option<Node> {
+    let body = node.parent().filter(|p| is_function_body(*p))?;
+    let mut cursor = body.walk();
+    let last = body
+        .named_children(&mut cursor)
+        .filter(|c| !c.kind().contains("comment"))
+        .last();
+    (last == Some(node)).then_some(body)
+}
+
+fn is_function_body(block: Node) -> bool {
+    block.kind() == "statement_block"
+        && block.parent().is_some_and(|f| {
+            FUNCTIONS.contains(&f.kind()) && f.child_by_field_name("body") == Some(block)
+        })
+}
+
+/// A function that may return a value: not a constructor or a setter.
+fn returns_values(function: Node, src: &[u8]) -> bool {
+    if function.kind() != "method_definition" {
+        return true;
+    }
+    let name = function
+        .child_by_field_name("name")
+        .and_then(|n| n.utf8_text(src).ok());
+    let mut cursor = function.walk();
+    let setter = function.children(&mut cursor).any(|c| c.kind() == "set");
+    name != Some("constructor") && !setter
 }
 
 /// `source` ready to be put on one line, byte for byte the same length:
@@ -743,7 +841,12 @@ impl Rewrite<'_> {
         );
         let mutated = self.on_lines(m, start, copy);
         if m.statement {
-            format!("{{if ({switch}) {{{mutated}}} else {{{text}}}}}")
+            let end_of_function = if self.tails.contains(&(start, end)) {
+                ";return undefined as never;"
+            } else {
+                ""
+            };
+            format!("{{if ({switch}) {{{mutated}{end_of_function}}} else {{{text}}}}}")
         } else {
             let cast = if self.typed { " as never" } else { "" };
             format!("({switch} ? ({mutated}){cast} : ({text}))")
@@ -802,6 +905,8 @@ struct Rewrite<'a> {
     typed: bool,
     /// C#: the class whose `Probing` and `Check` work out probed mutants.
     probe: Option<&'a str>,
+    /// TypeScript statement sites that end their function (see [`tails`]).
+    tails: HashSet<(usize, usize)>,
 }
 
 impl Rewrite<'_> {
@@ -863,6 +968,55 @@ fn checkable(m: &Mutant) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_emptied_typescript_function_body_keeps_its_inferred_return_type() {
+        let src = "const rowOf = (a: number) => { return { a }; };
+class K {
+  n = 0;
+  constructor(x: number) { this.n = x; }
+  set v(n: number) { this.n = n; }
+  get g() { return this.n; }
+  f(a: number) { if (a > 1) { return 1; } return 2; }
+}
+";
+        let found = mutate(src, Language::TypeScript, &Settings::default()).unwrap();
+        let blocks: Vec<&Mutant> = found
+            .mutants
+            .iter()
+            .filter(|m| m.mutator == "block")
+            .collect();
+        let refs: Vec<&Mutant> = found.mutants.iter().collect();
+        let typed = schemata_typed(
+            src,
+            Language::TypeScript,
+            &refs,
+            &|id| format!("s{id}"),
+            true,
+        );
+        let ends = |m: &Mutant| {
+            typed.contains(&format!(
+                "{{if (s{}) {{{{}};return undefined as never;}}",
+                m.id
+            ))
+        };
+        let by_original = |start: &str| {
+            blocks
+                .iter()
+                .find(|m| m.original.starts_with(start))
+                .unwrap_or_else(|| panic!("no block mutant at {start}: {blocks:?}"))
+        };
+        assert!(ends(by_original("{ return { a }")), "{typed}");
+        assert!(ends(by_original("{ return this.n")), "{typed}");
+        assert!(ends(by_original("{ if (a > 1)")), "{typed}");
+        // Not the last statement, and functions that cannot return a value.
+        assert!(!ends(by_original("{ return 1; }")), "{typed}");
+        assert!(!ends(by_original("{ this.n = x")), "{typed}");
+        assert!(!ends(by_original("{ this.n = n")), "{typed}");
+        // JavaScript has no types to keep.
+        let plain = schemata(src, Language::TypeScript, &refs, &|id| format!("s{id}"));
+        assert!(!plain.contains("return undefined as never"));
+    }
 
     #[test]
     fn a_typescript_switch_keeps_the_type_of_the_original() {
