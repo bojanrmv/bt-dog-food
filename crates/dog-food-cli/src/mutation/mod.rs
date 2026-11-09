@@ -189,6 +189,9 @@ pub enum Untested {
     /// No test that ran reaches it, and a test project left out of the run
     /// (it did not build or could not run) uses its code.
     SkippedProject,
+    /// Every test that reaches it fails without any mutant (in the sandbox,
+    /// a test that reads a file the sandbox does not have), so none can judge it.
+    FailingTests,
 }
 
 #[derive(Default)]
@@ -260,6 +263,7 @@ impl Untested {
                 | Untested::Failed
                 | Untested::RunError
                 | Untested::SkippedProject
+                | Untested::FailingTests
         )
     }
 }
@@ -1153,7 +1157,8 @@ fn run_language(
     ));
     note_idle_projects(scope, &reach, options, result);
     note_empty_filters(scope, &reach, result);
-    note_failing(&reach, result);
+    let judged_by_failing = only_failing_reach(&reach);
+    note_failing(&reach, judged_by_failing.len(), result);
     reach.set_aside_failing();
     let unchanged = settle_unchanged(&mut reach, result);
     let tested = Instant::now();
@@ -1173,6 +1178,7 @@ fn run_language(
     result.mutants += tested.elapsed();
     log_end(&candidates, result, tested);
     untested_by_skipped(&prepared, &candidates, result);
+    untested_by_failing(judged_by_failing, result);
     result.notes.extend(prepared.engine.notes());
     mark_untested(&prepared.files, result, Untested::TestRuns);
     Ok(killer_files(killers, &reach))
@@ -1311,7 +1317,29 @@ fn home_times(reach: &Reach) -> String {
     format!("{}{tail}", shown.join(", "))
 }
 
-fn note_failing(reach: &Reach, result: &mut RunResult) {
+/// A mutant only failing tests reach has tests, which cannot judge it: not
+/// tested rather than without tests, and not stored.
+fn untested_by_failing(judged_by_failing: HashSet<usize>, result: &mut RunResult) {
+    for id in judged_by_failing {
+        if result.outcomes.get(&id) == Some(&Outcome::NoCoverage) {
+            result.outcomes.remove(&id);
+            result.untested.insert(id, Untested::FailingTests);
+        }
+    }
+}
+
+/// Mutants every test that reaches them fails without any mutant.
+fn only_failing_reach(reach: &Reach) -> HashSet<usize> {
+    reach
+        .by_mutant
+        .iter()
+        .filter(|(_, tests)| !tests.is_empty() && tests.is_subset(&reach.failing))
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// Tests that fail without any mutant, and the `lost` mutants only they reach.
+fn note_failing(reach: &Reach, lost: usize, result: &mut RunResult) {
     if reach.failing.is_empty() && reach.flaky.is_empty() {
         return;
     }
@@ -1319,7 +1347,7 @@ fn note_failing(reach: &Reach, result: &mut RunResult) {
     if !failing.is_empty() {
         let names = &failing[..failing.len().min(5)];
         let note = format!(
-            "{} tests fail without any mutant and are left out, so mutants only they reach look untested: {names:?}",
+            "{} tests fail without any mutant and are left out ({lost} mutants only they reach are listed as not tested): {names:?}",
             failing.len()
         );
         tellln!("note: {note}");
@@ -2846,6 +2874,29 @@ mod tests {
             err.starts_with("the TypeScript/JavaScript run failed"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_mutant_only_failing_tests_reach_is_not_judged_by_them() {
+        let tests = |names: &[&str]| names.iter().map(|n| n.to_string()).collect();
+        let reach = Reach {
+            by_mutant: HashMap::from([
+                (1, tests(&["T.reads_workflow"])),
+                (2, tests(&["T.reads_workflow", "T.adds"])),
+                (3, tests(&["T.adds"])),
+            ]),
+            failing: tests(&["T.reads_workflow"]),
+            ..Reach::default()
+        };
+        assert_eq!(only_failing_reach(&reach), HashSet::from([1]));
+        let mut result = RunResult::default();
+        note_failing(&reach, 1, &mut result);
+        assert!(
+            result.notes[0].contains("1 mutants only they reach are listed as not tested"),
+            "{:?}",
+            result.notes
+        );
+        assert!(!Untested::FailingTests.by_budget());
     }
 
     #[test]

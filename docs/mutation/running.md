@@ -33,11 +33,11 @@ mutation score 14% · 3 killed, 5 survived, 14 no tests, 0 timeout, 0 did not co
 | did not compile | removed before testing | left out |
 | crashed the test run | the test host ended before the tests it was asked for reported (dog-food's worker says so itself), or no test reported at all | left out |
 | ignored | a `dgf-disable` comment, `ignore_methods`, `skip_plain_constructors` or `[ExcludeFromCodeCoverage]`; never tested | left out |
-| not tested | `--max-minutes` ran out first | left out |
+| not tested | `--max-minutes` ran out first; or it could not be tested: no test runner above the file, its test run could not start, every test that reaches it fails without any mutant, or no test that ran reaches it and a skipped test project uses its code (the reason is given with it) | left out |
 
 Score = detected ÷ (detected + survived + no tests), per function and overall.
 
-The run first runs the tests once without mutants. When half of them or more fail, it stops: fix them, or leave them out with a test filter. Fewer failing tests are set aside, and only the others decide about mutants. For TypeScript and JavaScript, the test files with failing tests run once more first: a test that passes then is kept, and the report's notes name it, since a test that fails only now and then makes its kills less certain. Tests that still fail are named in the report's notes too.
+The run first runs the tests once without mutants. When half of them or more fail, it stops: fix them, or leave them out with a test filter. Fewer failing tests are set aside, and only the others decide about mutants. For TypeScript and JavaScript, the test files with failing tests run once more first: a test that passes then is kept, and the report's notes name it, since a test that fails only now and then makes its kills less certain. Tests that still fail are named in the report's notes too. A mutant that only failing tests reach is listed as not tested, not as having no tests: it has tests, which cannot judge it.
 
 ## Reports
 
