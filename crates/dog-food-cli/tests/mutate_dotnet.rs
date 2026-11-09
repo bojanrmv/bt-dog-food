@@ -366,6 +366,17 @@ fn mutation_runs_on_a_dotnet_solution() {
         "killed"
     );
     assert_eq!(outcome(&first, "Unused.Twice", 5, "*"), "no-coverage");
+    // The gate never opens and the test waits without using the processor:
+    // stopped at its time limit, and the mutants packed with it keep their
+    // verdicts (the others asserted here ran in the same packs).
+    assert_eq!(
+        outcome(&first, "Gate.Passes", 9, "!closed -> closed"),
+        "timeout"
+    );
+    assert_eq!(
+        outcome(&first, "Gate.Passes", 11, "true -> false"),
+        "killed"
+    );
     // Built in a static field initializer, inside whichever test touches the
     // class first: every test runs with it, so the one that checks the values kills it.
     assert_eq!(outcome(&first, "Codes.Build", 17, "* -> /"), "killed");

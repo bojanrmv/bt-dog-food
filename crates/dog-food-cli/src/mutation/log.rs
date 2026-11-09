@@ -96,6 +96,25 @@ fn processor_ticks() -> Option<(u64, u64)> {
     (ok != 0).then_some((total.saturating_sub(idle), total))
 }
 
+/// The processor time the machine has left unused so far, on all its
+/// processors together, when it is known.
+pub fn idle_time() -> Option<Duration> {
+    let (busy, total) = processor_ticks()?;
+    Some(ticks_time(total.saturating_sub(busy)))
+}
+
+/// Processor ticks as time: Windows counts in steps of 100 ns.
+#[cfg(windows)]
+fn ticks_time(ticks: u64) -> Duration {
+    Duration::from_micros(ticks / 10)
+}
+
+/// Processor ticks as time: Linux counts in hundredths of a second.
+#[cfg(not(windows))]
+fn ticks_time(ticks: u64) -> Duration {
+    Duration::from_millis(ticks * 10)
+}
+
 /// The machine's free memory in bytes, when it is known.
 pub fn free_memory() -> Option<u64> {
     memory().map(|(free, _)| free)

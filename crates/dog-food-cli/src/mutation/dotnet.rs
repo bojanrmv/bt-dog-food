@@ -14,7 +14,7 @@ use rayon::prelude::*;
 use super::exec::{self, fresh_folder, write_plan, Located};
 use super::projects::TestProject;
 use super::sandbox::FileMutants;
-use super::worker::{Pool, Reply, Report, Target, Worker};
+use super::worker::{Pool, Reply, Report, Stuck, Target, Worker};
 use super::{
     check_baseline, failing_tests, progress, Budget, BuildError, Engine, Pack, PackRun, Reach,
     Round, SoloRun, TestResults, TestRun,
@@ -199,7 +199,14 @@ impl Dotnet {
         }
         // What a planned run reported before it timed out still counts.
         if status == TestRun::TimedOut && !matches!(ask, Ask::Plan(..)) {
-            return Ok((status, Results::default()));
+            let waited = results.waited;
+            return Ok((
+                status,
+                Results {
+                    waited,
+                    ..Results::default()
+                },
+            ));
         }
         Ok((status, results))
     }
@@ -444,16 +451,19 @@ impl Dotnet {
                     self.results(project, report, matches!(ask, Ask::Plan(..))),
                 )
             }
-            Reply::TimedOut { report, .. } => {
+            Reply::TimedOut { why, report } => {
                 worker.stop();
                 let planned = matches!(ask, Ask::Plan(..));
                 let running = report.running.clone();
                 let mut results = self.results(project, report, planned);
                 results.running = running;
+                results.waited = why == Stuck::Waiting;
                 if planned {
-                    // The worker never got to say which mutants took effect.
-                    results.activated =
-                        activated_in(&folder.join(format!("plan-{index}.txt.activated")));
+                    // The worker said which mutants took effect with each
+                    // result it reported, or its tests noted them in a file.
+                    results.activated.extend(activated_in(
+                        &folder.join(format!("plan-{index}.txt.activated")),
+                    ));
                 }
                 (TestRun::TimedOut, results)
             }
@@ -1826,6 +1836,8 @@ struct Results {
     running: BTreeSet<String>,
     /// Whether the run reported activation at all (a plan run does).
     activation_known: bool,
+    /// Timed out waiting, with processors idle (see [`TestResults::waited`]).
+    waited: bool,
 }
 
 impl Results {
@@ -1836,6 +1848,7 @@ impl Results {
             polluted: self.polluted,
             activated: self.activation_known.then_some(self.activated),
             running: self.running,
+            waited: self.waited,
             ..TestResults::default()
         }
     }
@@ -1850,6 +1863,7 @@ impl Results {
         self.activated.extend(other.activated);
         self.running.extend(other.running);
         self.activation_known |= other.activation_known;
+        self.waited |= other.waited;
         self.walls.extend(other.walls);
     }
 }

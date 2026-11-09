@@ -7,7 +7,7 @@
 //
 // Requests, one per line on standard input:
 //   plan<TAB>file[<TAB>nocheck]   file of "test<TAB>mutant id" lines: run those tests, each with its mutant;
-//                                 then run each failed test again with no mutant (the kill check), unless
+//                                 then run the failed tests again with no mutant (the kill check), unless
 //                                 "nocheck": a test that fails again was failed by state the process
 //                                 carries, not by its mutant
 //   tests<TAB>file[<TAB>folder]   file holding a VSTest test filter (empty: every test): run the matching
@@ -23,6 +23,10 @@
 // "polluted<TAB>test" for each failed test when the kill check found one that fails without its
 // mutant, a "stats" line (bytes allocated so far, gen 0/1/2 collections, heap, working set, peak
 // working set) and "done". Anything the tests write to the console goes to standard error.
+// While a plan runs, "running<TAB>test" says a test started, and a passed test's result (after its
+// "activated" line, if its mutant took effect) comes as soon as the next test starts, so a run
+// stopped at its time limit keeps what it reported; a failed test's result waits for the kill check,
+// and "failed<TAB>test" says it is over.
 // A request that takes a while also gets "alive<TAB>seconds<TAB>results so far<TAB>running test<TAB>threads
 // <TAB>queued work items<TAB>working set<TAB>gen 2 collections" every 5 seconds, for the debug log.
 using System;
@@ -118,19 +122,35 @@ namespace DogFood.Worker
                 }
             }
             var activated = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>();
-            With("DgfActivated", activated, () => With("DgfPlan", plan, () => suite.Run(plan.Keys, recorder)));
+            recorder.Plan = plan;
+            recorder.PlanActivated = activated;
+            try
+            {
+                With("DgfActivated", activated, () => With("DgfPlan", plan, () => suite.Run(plan.Keys, recorder)));
+            }
+            finally
+            {
+                recorder.Close();
+                recorder.Tell = null;
+            }
             recorder.Activated.AddRange(activated.Keys);
             var failed = recorder.Results.Where(r => !r.Passed).Select(r => r.Name).ToList();
-            if (check && failed.Any(name => FailsWithoutMutant(name, suite)))
+            if (check && FailWithoutMutants(failed, suite))
             {
                 recorder.Polluted.AddRange(failed);
             }
         }
 
-        private static bool FailsWithoutMutant(string name, Suite suite)
+        /// The kill check in one run: a test run of its own per failed test
+        /// costs more than the tests do.
+        private static bool FailWithoutMutants(List<string> names, Suite suite)
         {
+            if (names.Count == 0)
+            {
+                return false;
+            }
             var again = new Recorder();
-            suite.Run(new[] { name }, again);
+            suite.Run(names, again);
             return again.Results.Any(r => !r.Passed);
         }
 
@@ -269,9 +289,13 @@ namespace DogFood.Worker
                 return false;
             }
             var recorder = new Recorder();
+            if (parts[0] == "plan")
+            {
+                recorder.Tell = Say;
+            }
             try
             {
-                using (parts[0] == "list" ? null : new Heartbeat(protocol, () => recorder.Results.Count))
+                using (parts[0] == "list" ? null : new Heartbeat(Say, () => recorder.Results.Count))
                 {
                     Dispatch(parts, recorder);
                 }
@@ -321,9 +345,20 @@ namespace DogFood.Worker
             }
         }
 
+        /// One line to dgf at once, from whichever thread.
+        private void Say(string text)
+        {
+            lock (protocol)
+            {
+                protocol.WriteLine(text);
+                protocol.Flush();
+            }
+        }
+
         private void Reply(Recorder recorder)
         {
-            foreach (var result in recorder.Results)
+            // dgf has the passed tests a plan told it about already.
+            foreach (var result in recorder.Results.Where(r => !(r.Passed && recorder.Told.Contains(r.Name))))
             {
                 protocol.WriteLine("result\t" + result.Name + "\t" + (result.Passed ? "passed" : "failed") + "\t" + result.Milliseconds + "\t" + result.File);
             }
@@ -351,7 +386,7 @@ namespace DogFood.Worker
         private readonly ManualResetEventSlim stop = new ManualResetEventSlim();
         private readonly Thread thread;
 
-        public Heartbeat(StreamWriter protocol, Func<int> results)
+        public Heartbeat(Action<string> say, Func<int> results)
         {
             var clock = Stopwatch.StartNew();
             thread = new Thread(() =>
@@ -362,8 +397,7 @@ namespace DogFood.Worker
                     {
                         using (var self = Process.GetCurrentProcess())
                         {
-                            protocol.WriteLine("alive\t" + (long)clock.Elapsed.TotalSeconds + "\t" + results() + "\t" + AppDomain.CurrentDomain.GetData("DgfTest") + "\t" + ThreadPool.ThreadCount + "\t" + ThreadPool.PendingWorkItemCount + "\t" + self.WorkingSet64 + "\t" + GC.CollectionCount(2));
-                            protocol.Flush();
+                            say("alive\t" + (long)clock.Elapsed.TotalSeconds + "\t" + results() + "\t" + AppDomain.CurrentDomain.GetData("DgfTest") + "\t" + ThreadPool.ThreadCount + "\t" + ThreadPool.PendingWorkItemCount + "\t" + self.WorkingSet64 + "\t" + GC.CollectionCount(2));
                         }
                     }
                     catch (Exception error) when (error is IOException || error is ObjectDisposedException)
@@ -744,10 +778,70 @@ namespace DogFood.Worker
         public void RecordResult(TestResult testResult) =>
             Finish(testResult.TestCase.FullyQualifiedName, testResult.Outcome != TestOutcome.Failed, (long)testResult.Duration.TotalMilliseconds, testResult.TestCase.CodeFilePath);
 
+        /// While a plan runs: says a line to dgf at once.
+        public Action<string> Tell;
+        /// The plan's mutant for each test, and the "test<TAB>mutant id" pairs that took effect so far.
+        public Dictionary<string, int> Plan;
+        public System.Collections.Concurrent.ConcurrentDictionary<string, bool> PlanActivated;
+        /// The passed tests dgf already has the result of.
+        public readonly HashSet<string> Told = new HashSet<string>();
+        /// The test whose results are coming in.
+        private string open;
+
         public void Start(string name)
         {
             AppDomain.CurrentDomain.SetData("DgfTest", name);
             Pending.Give(name, AppDomain.CurrentDomain.GetData("DgfReach") as string);
+            if (Tell != null && name != open)
+            {
+                Close();
+                open = name;
+                Tell("running\t" + name);
+            }
+        }
+
+        /// The test before is over (all rows of a theory, which share its
+        /// name): when it passed, dgf gets its result at once, and whether
+        /// its mutant took effect. A failed one waits for the kill check:
+        /// dgf only hears that it is over, so a run stopped at its limit
+        /// knows the test was not the one that hung.
+        public void Close()
+        {
+            var result = Ended();
+            if (result == null)
+            {
+                return;
+            }
+            if (!result.Passed)
+            {
+                Tell("failed\t" + result.Name);
+                return;
+            }
+            if (!Told.Add(result.Name))
+            {
+                return;
+            }
+            if (TookEffect(result.Name))
+            {
+                Tell("activated\t" + result.Name + "\t" + Plan[result.Name]);
+            }
+            Tell("result\t" + result.Name + "\tpassed\t" + result.Milliseconds + "\t" + result.File);
+        }
+
+        /// The result of the test whose results were coming in, while dgf is told.
+        private Result Ended()
+        {
+            var name = open;
+            open = null;
+            Result result;
+            return Tell != null && name != null && byName.TryGetValue(name, out result) ? result : null;
+        }
+
+        /// Whether the plan's mutant for `test` took effect in it.
+        private bool TookEffect(string test)
+        {
+            int id;
+            return Plan != null && PlanActivated != null && Plan.TryGetValue(test, out id) && PlanActivated.ContainsKey(test + "\t" + id);
         }
 
         public void End() => AppDomain.CurrentDomain.SetData("DgfTest", null);

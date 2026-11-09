@@ -41,12 +41,11 @@ pub fn output(mut command: Command, limit: Duration) -> Result<Option<(bool, Str
     Ok((status != TestRun::TimedOut).then_some((status == TestRun::Passed, text)))
 }
 
-/// Waits for `child`. A run that is past `limit` but has used less than
-/// `limit` of processor time was kept waiting by a busy machine, not stuck:
-/// it gets more time, up to ten times the limit. One that kept a processor
-/// busy all along (an endless loop) is stopped at the limit.
+/// Waits for `child`, at most `limit` (see [`past_limit`] for when a run
+/// gets more).
 fn wait(mut child: Child, limit: Duration) -> Result<TestRun, String> {
     let started = Instant::now();
+    let spare = Spare::start();
     let job = cpu::Job::of(&child);
     loop {
         if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
@@ -59,6 +58,7 @@ fn wait(mut child: Child, limit: Duration) -> Result<TestRun, String> {
         if past_limit(
             started.elapsed(),
             job.as_ref().and_then(cpu::Job::used),
+            spare.so_far(),
             limit,
         ) {
             kill_tree(&mut child, job.as_ref());
@@ -69,12 +69,38 @@ fn wait(mut child: Child, limit: Duration) -> Result<TestRun, String> {
 }
 
 /// Whether a run `elapsed` into its `limit`, having used `used` processor
-/// time (when known), is over it: past the limit, unless it used less than
-/// the limit of processor time, which a busy machine held back; that gets up
-/// to ten times the limit.
-pub fn past_limit(elapsed: Duration, used: Option<Duration>, limit: Duration) -> bool {
-    let held_back = used.is_some_and(|used| used < limit);
+/// time (when known), is over it. One that kept a processor busy all along
+/// (an endless loop) is stopped at the limit. One that used less than the
+/// limit of processor time either was held back by a busy machine or waits
+/// for something that never comes (a lock, a task nobody completes), and the
+/// machine tells the two apart: with `spare`, the processor time it left
+/// unused meanwhile, at the limit or more, nothing kept the run from the
+/// processor, and it is stopped as well. A run a busy machine held back gets
+/// up to ten times the limit.
+pub fn past_limit(
+    elapsed: Duration,
+    used: Option<Duration>,
+    spare: Option<Duration>,
+    limit: Duration,
+) -> bool {
+    let waits = spare.is_some_and(|spare| spare >= limit);
+    let held_back = used.is_some_and(|used| used < limit) && !waits;
     elapsed > limit && !(held_back && elapsed < limit * 10)
+}
+
+/// The processor time the machine leaves unused from `start` on, on all
+/// its processors together, where that is known.
+#[derive(Debug, Clone, Copy)]
+pub struct Spare(Option<Duration>);
+
+impl Spare {
+    pub fn start() -> Spare {
+        Spare(super::log::idle_time())
+    }
+
+    pub fn so_far(&self) -> Option<Duration> {
+        Some(super::log::idle_time()?.saturating_sub(self.0?))
+    }
 }
 
 /// Test runners start processes of their own; stop all of them.
@@ -399,16 +425,27 @@ impl Located {
 }
 
 /// Reads `path(line,col): error ...` lines, as dotnet and tsc print them.
-/// Relative paths are taken from `base`.
+/// Relative paths are taken from `base`. An error that names its mutant (the
+/// compile checks in memory do, when it is inside the mutant's own code)
+/// blames that one alone.
 pub fn locate(sandbox: &Path, base: &Path, files: &[FileMutants], errors: &[String]) -> Located {
+    let ids: HashSet<usize> = files
+        .iter()
+        .flat_map(|f| f.mutants.iter().map(|m| m.id))
+        .collect();
+    let named = |e: &String| named_mutant(e).filter(|id| ids.contains(id));
+    let mut located = Located {
+        broken: errors.iter().filter_map(named).collect(),
+        ..Located::default()
+    };
     let locations: Vec<(PathBuf, usize, bool)> = errors
         .iter()
+        .filter(|e| named(e).is_none())
         .filter_map(|e| {
             let (path, line) = error_location(e)?;
             Some((error_file(base, &path, e), line, is_flow_error(e)))
         })
         .collect();
-    let mut located = Located::default();
     for file in files {
         let path = absolute(&sandbox.join(&file.relative));
         let added = super::sandbox::added_lines(&file.relative);
@@ -426,6 +463,17 @@ pub fn locate(sandbox: &Path, base: &Path, files: &[FileMutants], errors: &[Stri
     }
     located.suspects.retain(|id| !located.broken.contains(id));
     located
+}
+
+/// The mutant an error line ends with, as ` [dgf mutant 12]`.
+fn named_mutant(error: &str) -> Option<usize> {
+    error
+        .trim_end()
+        .strip_suffix(']')?
+        .rsplit_once(" [dgf mutant ")?
+        .1
+        .parse()
+        .ok()
 }
 
 /// The file an error names. MSBuild gives a path relative to the project
@@ -582,23 +630,6 @@ pub fn error_location(line: &str) -> Option<(PathBuf, usize)> {
 mod tests {
     use super::*;
 
-    /// A command that sleeps: it uses no processor time while it waits.
-    fn sleeper(seconds: u32) -> Command {
-        if cfg!(windows) {
-            let mut command = Command::new("powershell");
-            command.args([
-                "-NoProfile",
-                "-Command",
-                &format!("Start-Sleep -Seconds {seconds}"),
-            ]);
-            command
-        } else {
-            let mut command = Command::new("sleep");
-            command.arg(seconds.to_string());
-            command
-        }
-    }
-
     #[test]
     fn errors_with_paths_relative_to_the_project_find_their_mutants() {
         let dir = tempfile::tempdir().unwrap();
@@ -660,22 +691,30 @@ mod tests {
     }
 
     #[test]
-    fn a_run_that_waits_without_working_gets_more_time() {
-        let dir = tempfile::tempdir().unwrap();
-        let started = Instant::now();
-        let status = run(
-            sleeper(8),
-            Duration::from_secs(4),
-            &dir.path().join("out.log"),
-        )
-        .unwrap();
-        if cfg!(windows) {
-            // Past the limit, but it hardly used the processor: it finishes.
-            assert_eq!(status, TestRun::Passed);
-        } else {
-            assert_eq!(status, TestRun::TimedOut);
+    fn a_run_past_its_limit_gets_more_time_only_when_the_machine_held_it_back() {
+        let s = Duration::from_secs;
+        let limit = s(4);
+        // It kept a processor busy all along: an endless loop.
+        assert!(past_limit(s(5), Some(s(5)), Some(s(0)), limit));
+        // It hardly ran and the machine had nothing to give: held back.
+        assert!(!past_limit(s(5), Some(s(1)), Some(s(1)), limit));
+        assert!(past_limit(s(41), Some(s(1)), Some(s(1)), limit));
+        // It hardly ran while processors stood idle: it waits for something
+        // that never comes.
+        assert!(past_limit(s(5), Some(s(1)), Some(s(4)), limit));
+        // Where the machine's idle time is unknown, as before.
+        assert!(!past_limit(s(5), Some(s(1)), None, limit));
+        assert!(past_limit(s(5), None, None, limit));
+        assert!(!past_limit(s(3), Some(s(3)), Some(s(9)), limit));
+    }
+
+    #[test]
+    fn the_machines_idle_time_only_grows() {
+        let spare = Spare::start();
+        std::thread::sleep(Duration::from_millis(50));
+        if cfg!(any(windows, target_os = "linux")) {
+            assert!(spare.so_far().is_some());
         }
-        assert!(started.elapsed() < Duration::from_secs(40));
     }
 
     #[test]
@@ -710,6 +749,46 @@ four
             crash_reason(dir.path()).as_deref(),
             Some("two | three | four")
         );
+    }
+
+    #[test]
+    fn an_error_that_names_its_mutant_blames_that_one_alone() {
+        let source = "class C {\n  bool F(int a, int b) {\n    return a > 1 && b < 2;\n  }\n}\n";
+        let mutants =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp).unwrap();
+        let on_line: Vec<usize> = mutants
+            .iter()
+            .filter(|m| m.line == 3)
+            .map(|m| m.id)
+            .collect();
+        assert!(on_line.len() > 1);
+        let file = FileMutants {
+            relative: PathBuf::from("C.cs"),
+            source: source.into(),
+            mutants,
+            functions: vec![(2, 4)],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let locate = |error: String| {
+            locate(
+                dir.path(),
+                dir.path(),
+                std::slice::from_ref(&file),
+                &[error],
+            )
+        };
+        // Without a name, every mutant on the line is a suspect.
+        let unnamed = locate("C.cs(3,40): error CS0019: no".to_string());
+        assert!(unnamed.broken.is_empty() && unnamed.suspects.len() == on_line.len());
+        let named = locate(format!(
+            "C.cs(3,40): error CS0019: no [dgf mutant {}]",
+            on_line[1]
+        ));
+        assert_eq!(named.broken, HashSet::from([on_line[1]]));
+        assert!(named.suspects.is_empty());
+        // A name that is not a mutant in the build is read as a place.
+        let unknown = locate("C.cs(3,40): error CS0019: no [dgf mutant 99999]".to_string());
+        assert_eq!(unknown, unnamed);
     }
 
     #[test]

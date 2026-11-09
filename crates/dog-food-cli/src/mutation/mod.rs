@@ -423,6 +423,10 @@ pub struct TestResults {
     pub timed_out: bool,
     /// Tests that had started and not reported when it stopped.
     pub running: BTreeSet<String>,
+    /// It stopped at its time limit having hardly used the processor while
+    /// the machine had processors idle: it waited for something that never
+    /// came (a lock, a task nobody completes), and a longer run would too.
+    pub waited: bool,
 }
 
 impl TestResults {
@@ -1968,7 +1972,9 @@ impl<'a> Runner<'a> {
                     // (and at least 30 s more) also times out. (A run's
                     // processor time cannot tell the two apart: parallel
                     // tests, JIT and GC use processor time on many threads.)
-                    if matches!(&run, Ok(Ran::Done((TestRun::TimedOut, _)))) {
+                    // Not for a run that waited with processors idle: no
+                    // machine held that one back.
+                    if matches!(&run, Ok(Ran::Done((TestRun::TimedOut, r))) if !r.waited) {
                         let longer = (limit * 4).max(limit + Duration::from_secs(30));
                         self.again
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

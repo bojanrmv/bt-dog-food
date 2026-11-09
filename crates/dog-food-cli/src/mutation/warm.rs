@@ -262,6 +262,7 @@ impl Warm {
 /// Whether a wait has gone on too long.
 struct Watch {
     started: Instant,
+    spare: exec::Spare,
     used_before: Duration,
     limit: Duration,
     starting: bool,
@@ -273,6 +274,7 @@ impl Watch {
     fn new(used_before: Duration, limit: Duration, starting: bool) -> Watch {
         Watch {
             started: Instant::now(),
+            spare: exec::Spare::start(),
             used_before,
             limit,
             starting,
@@ -284,8 +286,12 @@ impl Watch {
     /// Past the limit; or, before the first run, waiting for nothing.
     fn over(&mut self, used: Option<Duration>) -> bool {
         let spent = used.map(|u| u.saturating_sub(self.used_before));
-        exec::past_limit(self.started.elapsed(), spent, self.limit)
-            || (self.starting && self.idle(used))
+        exec::past_limit(
+            self.started.elapsed(),
+            spent,
+            self.spare.so_far(),
+            self.limit,
+        ) || (self.starting && self.idle(used))
     }
 
     /// No processor time for `IDLE_START`, when the processor time is known.

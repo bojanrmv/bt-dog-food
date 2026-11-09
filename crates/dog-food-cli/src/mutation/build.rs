@@ -5,8 +5,13 @@
 //! without mutants (C# "use of unassigned local variable" points at the use,
 //! not at the `&&` that caused it) makes every mutant of that function one:
 //! they come out together and go back half at a time until the culprit is
-//! found, so the innocent ones are still tested. Such errors stay inside
+//! found, so the innocent ones are still tested. A half that goes back
+//! without an error clears itself and convicts the other half, which is
+//! halved again without a build of its own. Such errors stay inside
 //! their function, so every function's suspects are tried in the same build.
+//! While a function has a mutant that does not compile on an error's own
+//! line, its other errors may be that mutant's too: nobody else is suspected
+//! until it is out.
 //! After the first build, only the projects with mutants are rebuilt until
 //! they compile; one last build of everything the tests need follows. Where
 //! the language has compile checks in memory (C#), the search runs on them
@@ -51,6 +56,9 @@ struct Rebuild {
     /// The search for the mutants behind an error that names none, once
     /// taking them all out and putting them back by function brought it back.
     hunt: Option<Hunt>,
+    /// The two halves of a group that broke the build, each by its first
+    /// mutant, while both wait untouched.
+    halves: HashMap<usize, usize>,
 }
 
 impl Rebuild {
@@ -63,6 +71,7 @@ impl Rebuild {
             may_drop,
             took_all_out: false,
             hunt: None,
+            halves: HashMap::new(),
         }
     }
 }
@@ -145,7 +154,7 @@ pub fn build(
     let mut state = Rebuild::new(may_drop);
     for _ in 0..BUILD_ROUNDS {
         match prepared.engine.build(state.round, budget) {
-            Ok(()) if state.passed(&mut prepared.files) => return Ok(Built::Done),
+            Ok(()) if state.passed(&mut prepared.files, outcomes) => return Ok(Built::Done),
             Ok(()) => {}
             Err(BuildError::OutOfTime) => return Ok(Built::OutOfTime),
             Err(BuildError::Errors(errors)) => {
@@ -207,7 +216,7 @@ fn check_in_memory(
                 return Ok(());
             }
         };
-        if errors.is_empty() && state.clean_in_memory(&mut prepared.files) {
+        if errors.is_empty() && state.clean_in_memory(&mut prepared.files, outcomes) {
             debug!(
                 "build",
                 "compile checks in memory found every mutant that does not compile: {round} rounds, {:.1} s",
@@ -248,11 +257,15 @@ impl Rebuild {
     /// A check in memory found no error: the groups being tried are innocent,
     /// and the next go in. Returns whether none is left, and the next build is
     /// of everything the tests need.
-    fn clean_in_memory(&mut self, files: &mut [FileMutants]) -> bool {
+    fn clean_in_memory(
+        &mut self,
+        files: &mut [FileMutants],
+        outcomes: &mut HashMap<usize, Outcome>,
+    ) -> bool {
         if self.hunt_goes_on(files) {
             return false;
         }
-        self.trying.clear();
+        self.clear_tried(outcomes);
         let next = self.next_groups(files);
         if next.is_empty() {
             self.round = Round::All;
@@ -267,11 +280,15 @@ impl Rebuild {
 
     /// The build succeeded: the groups being tried are innocent. Returns
     /// whether everything is built.
-    fn passed(&mut self, files: &mut [FileMutants]) -> bool {
+    fn passed(
+        &mut self,
+        files: &mut [FileMutants],
+        outcomes: &mut HashMap<usize, Outcome>,
+    ) -> bool {
         if self.hunt_goes_on(files) {
             return false;
         }
-        self.trying.clear();
+        self.clear_tried(outcomes);
         let next = self.next_groups(files);
         if !next.is_empty() {
             let count: usize = next.iter().map(Vec::len).sum();
@@ -405,8 +422,12 @@ impl Rebuild {
             return self.take_all_out(files, errors);
         }
         self.round = Round::Mutated;
+        // Where a mutant on an error's own line does not compile, the
+        // function's other errors may be its doing: they wait a build.
+        let explained = functions_of(files, &located.broken);
         self.remove_broken(files, &located.broken, outcomes);
-        let tried = self.blame(files, &located.suspects, outcomes);
+        let mut tried = self.blame(files, &located.suspects, &explained, outcomes);
+        tried.extend(explained);
         self.suspect(files, &located.suspects, &tried, outcomes);
         // The next groups go in with this rebuild, not after a clean one.
         self.trying = self.next_groups(files);
@@ -434,6 +455,16 @@ impl Rebuild {
             outcomes.insert(*id, Outcome::CompileError);
         }
         take_out(files, broken);
+        // A group that loses a mutant no longer says anything about its other half.
+        let lost: Vec<usize> = self
+            .trying
+            .iter()
+            .filter(|group| group.iter().any(|(_, m)| broken.contains(&m.id)))
+            .filter_map(|group| group.first().map(|(_, m)| m.id))
+            .collect();
+        for first in lost {
+            self.forget_half(first);
+        }
         let groups = self
             .trying
             .iter_mut()
@@ -441,6 +472,39 @@ impl Rebuild {
         for group in groups {
             group.retain(|(_, m)| !broken.contains(&m.id));
         }
+    }
+
+    /// The groups in for a build that found nothing wrong in their functions
+    /// are innocent, and stay in.
+    fn clear_tried(&mut self, outcomes: &mut HashMap<usize, Outcome>) {
+        for group in std::mem::take(&mut self.trying) {
+            self.cleared(&group, outcomes);
+        }
+    }
+
+    /// `group` went back in without an error: the two halves broke the build
+    /// together, so the culprit is in the other one, which is halved again
+    /// at once (or, alone, is the culprit).
+    fn cleared(&mut self, group: &Held, outcomes: &mut HashMap<usize, Outcome>) {
+        let Some(first) = group.first().map(|(_, m)| m.id) else {
+            return;
+        };
+        let Some(other) = self.forget_half(first) else {
+            return;
+        };
+        let waits = |g: &Held| g.first().is_some_and(|(_, m)| m.id == other);
+        if let Some(at) = self.waiting.iter().position(waits) {
+            let guilty = self.waiting.remove(at);
+            self.split(guilty, outcomes);
+        }
+    }
+
+    /// Forgets that the group starting with `first` has another half; that
+    /// half's first mutant, if it had one.
+    fn forget_half(&mut self, first: usize) -> Option<usize> {
+        let other = self.halves.remove(&first)?;
+        self.halves.remove(&other);
+        Some(other)
     }
 
     /// An error nothing ties to a mutant: every mutant comes out, once, and
@@ -470,18 +534,32 @@ impl Rebuild {
     }
 
     /// The groups being tried that hold a suspect broke the build: they come
-    /// out and are halved. Returns the functions that had a group in.
+    /// out and are halved. In an `explained` function (one with a mutant
+    /// that does not compile on an error's own line) a group comes out and
+    /// waits as it is: that mutant may be all that was wrong. The other
+    /// groups are innocent. Returns the functions that had a group in.
     fn blame(
         &mut self,
         files: &mut [FileMutants],
         suspects: &HashSet<usize>,
+        explained: &HashSet<(usize, usize)>,
         outcomes: &mut HashMap<usize, Outcome>,
     ) -> HashSet<(usize, usize)> {
         let mut tried = HashSet::new();
         for group in std::mem::take(&mut self.trying) {
-            tried.insert(function_of(files, &group));
-            if group.iter().any(|(_, m)| suspects.contains(&m.id)) {
-                take_out(files, &group.iter().map(|(_, m)| m.id).collect());
+            let function = function_of(files, &group);
+            tried.insert(function);
+            if !group.iter().any(|(_, m)| suspects.contains(&m.id)) {
+                self.cleared(&group, outcomes);
+                continue;
+            }
+            take_out(files, &group.iter().map(|(_, m)| m.id).collect());
+            if let Some((_, first)) = group.first() {
+                self.forget_half(first.id);
+            }
+            if explained.contains(&function) {
+                self.waiting.push(group);
+            } else {
                 self.split(group, outcomes);
             }
         }
@@ -520,13 +598,16 @@ impl Rebuild {
         }
     }
 
-    /// A group that broke the build: one mutant is the culprit, more are halved.
+    /// A group that broke the build: one mutant is the culprit, more are
+    /// halved, and the halves remember each other (see [`Rebuild::cleared`]).
     fn split(&mut self, mut group: Held, outcomes: &mut HashMap<usize, Outcome>) {
         if group.len() == 1 {
             outcomes.insert(group[0].1.id, Outcome::CompileError);
             return;
         }
         let half = group.split_off(group.len() / 2);
+        self.halves.insert(half[0].1.id, group[0].1.id);
+        self.halves.insert(group[0].1.id, half[0].1.id);
         self.waiting.push(half);
         self.waiting.push(group);
     }
@@ -550,6 +631,17 @@ fn function_at(files: &[FileMutants], index: usize, line: usize) -> (usize, usiz
         .max_by_key(|(start, end)| end - start)
         .map_or(0, |(start, _)| *start);
     (index, start)
+}
+
+/// The functions the mutants `ids`, still in the files, are in.
+fn functions_of(files: &[FileMutants], ids: &HashSet<usize>) -> HashSet<(usize, usize)> {
+    files
+        .iter()
+        .enumerate()
+        .flat_map(|(index, file)| file.mutants.iter().map(move |m| (index, m)))
+        .filter(|(_, m)| ids.contains(&m.id))
+        .map(|(index, m)| function_at(files, index, m.line))
+        .collect()
 }
 
 fn by_function(files: &[FileMutants], held: Held) -> Vec<Held> {
@@ -794,7 +886,7 @@ mod tests {
         let again = state.failed(&Nowhere, &mut files, &errors, &mut outcomes);
         assert!(again.unwrap_err().contains("does not build"));
         // Or it builds, and they go back to find which.
-        assert!(!state.passed(&mut files));
+        assert!(!state.passed(&mut files, &mut outcomes));
         assert_eq!(files[0].mutants.len(), count);
     }
 
@@ -815,7 +907,7 @@ mod tests {
         let errors = ["Tests/CTests.cs(9,1): error CS0029: a type changed elsewhere".to_string()];
         for builds in 1..=BUILD_ROUNDS {
             let broken = files[0].mutants.iter().any(|m| culprits.contains(&m.id));
-            if !broken && state.passed(&mut files) {
+            if !broken && state.passed(&mut files, &mut outcomes) {
                 return (builds, files, outcomes);
             }
             if broken {
@@ -877,7 +969,7 @@ mod tests {
         state
             .failed(&Nowhere, &mut files, &errors, &mut outcomes)
             .unwrap();
-        assert!(!state.passed(&mut files));
+        assert!(!state.passed(&mut files, &mut outcomes));
         state
             .failed(&Nowhere, &mut files, &errors, &mut outcomes)
             .unwrap();
@@ -925,7 +1017,7 @@ mod tests {
                     .unwrap();
                 return false;
             }
-            state.passed(&mut files)
+            state.passed(&mut files, &mut outcomes)
         });
         assert!(done);
         assert_eq!(
@@ -937,12 +1029,81 @@ mod tests {
         );
         let kept: HashSet<usize> = files[0].mutants.iter().map(|m| m.id).collect();
         assert_eq!(kept, &all - &HashSet::from([first, second]));
-        // About one function's halvings, not the two added up.
+        // About one function's halvings, not the two added up, and one build
+        // per halving: a half that goes back clean convicts the other.
         let per_function = all.len() / 2;
         assert!(
-            builds <= 2 * (usize::BITS - per_function.leading_zeros()) as usize + 4,
+            builds <= (usize::BITS - per_function.leading_zeros()) as usize + 5,
             "{builds} builds"
         );
+    }
+
+    /// Blames the mutant on an error's own line, and with it every other
+    /// mutant of its function, as a second error on a line without mutants does.
+    struct OnItsLine(usize);
+
+    impl Engine for OnItsLine {
+        fn build(&self, _: Round, _: Budget) -> Result<(), BuildError> {
+            unreachable!()
+        }
+        fn locate(&self, files: &[FileMutants], _: &[String]) -> Located {
+            let others = files[0].mutants.iter().map(|m| m.id);
+            Located {
+                broken: HashSet::from([self.0]),
+                suspects: others.filter(|id| *id != self.0).collect(),
+            }
+        }
+        fn reach(&self, _: Budget) -> Result<Option<Reach>, String> {
+            unreachable!()
+        }
+        fn pack(&self, _: &Pack, _: &Reach, _: Duration, _: &str) -> Result<PackRun, String> {
+            unreachable!()
+        }
+        fn solo(
+            &self,
+            _: usize,
+            _: &Reach,
+            _: bool,
+            _: Duration,
+            _: &str,
+        ) -> Result<SoloRun, String> {
+            unreachable!()
+        }
+        fn test_projects(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn a_mutant_that_does_not_compile_explains_its_functions_other_errors() {
+        let source =
+            "class C {\n  bool F(int a, int b) {\n    return a > 1 && b < 2 || a == b;\n  }\n}\n";
+        let mutants =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp).unwrap();
+        let all: HashSet<usize> = mutants.iter().map(|m| m.id).collect();
+        let culprit = mutants[1].id;
+        let mut files = vec![FileMutants {
+            relative: PathBuf::from("F.cs"),
+            source: source.into(),
+            mutants,
+            functions: vec![(2, 4)],
+        }];
+        let mut outcomes = HashMap::new();
+        let mut state = Rebuild::new(true);
+        let errors = ["F.cs(3,1): error CS0019".to_string()];
+        state
+            .failed(&OnItsLine(culprit), &mut files, &errors, &mut outcomes)
+            .unwrap();
+        // The others stay in for the next build, which shows they compile.
+        let kept: HashSet<usize> = files[0].mutants.iter().map(|m| m.id).collect();
+        assert_eq!(kept, &all - &HashSet::from([culprit]));
+        assert!(state.waiting.is_empty() && state.trying.is_empty());
+        assert!(
+            !state.passed(&mut files, &mut outcomes),
+            "the tests' build is next"
+        );
+        assert!(state.passed(&mut files, &mut outcomes));
+        assert_eq!(outcomes, HashMap::from([(culprit, Outcome::CompileError)]));
     }
 
     #[test]
@@ -972,7 +1133,7 @@ mod tests {
                     .unwrap();
                 return false;
             }
-            state.passed(&mut files)
+            state.passed(&mut files, &mut outcomes)
         });
         assert!(done);
         assert_eq!(outcomes, HashMap::from([(2, Outcome::CompileError)]));

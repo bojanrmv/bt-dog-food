@@ -116,14 +116,48 @@ pub struct Report {
 pub enum Reply {
     Done(Report),
     /// Past the limit: the worker was stopped, with what it reported first.
-    /// `busy` when it kept a processor busy all along, as an endless loop does.
     TimedOut {
-        busy: bool,
+        why: Stuck,
         report: Report,
     },
     /// The worker ended before it finished (a mutant crashed it), with the
     /// tests it reported first.
     Crashed(Report),
+}
+
+/// What a worker past its limit was doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stuck {
+    /// It kept a processor busy all along, as an endless loop does.
+    Busy,
+    /// It hardly used the processor while the machine had processors idle:
+    /// it waits for something that never comes, and more time would not help.
+    Waiting,
+    /// It hardly ran on a machine with nothing to spare, even with ten times
+    /// the limit (or its processor time is not known).
+    HeldBack,
+}
+
+impl Stuck {
+    /// For the debug log.
+    fn words(self) -> &'static str {
+        match self {
+            Stuck::Busy => "timed out, busy all along",
+            Stuck::Waiting => "timed out, waiting while processors stood idle",
+            Stuck::HeldBack => "timed out",
+        }
+    }
+
+    /// From the processor time the request used and the machine left unused.
+    fn of(used: Option<Duration>, spare: Option<Duration>, limit: Duration) -> Stuck {
+        if used.is_some_and(|used| used >= limit) {
+            Stuck::Busy
+        } else if used.is_some() && spare.is_some_and(|spare| spare >= limit) {
+            Stuck::Waiting
+        } else {
+            Stuck::HeldBack
+        }
+    }
 }
 
 impl Report {
@@ -135,6 +169,9 @@ impl Report {
             self.polluted.insert(test.trim().to_string());
         } else if let Some(test) = line.strip_prefix("running\t") {
             self.running.insert(test.trim().to_string());
+        } else if let Some(test) = line.strip_prefix("failed\t") {
+            // Over, with its result still to come (after the kill check).
+            self.running.remove(test.trim());
         } else if let Some(row) = row(line) {
             self.running.remove(&row.test);
             self.rows.push(row);
@@ -178,6 +215,8 @@ pub struct Worker {
     stats: Option<Stats>,
     /// The last thing it said about itself during this request, in words.
     last_word: Option<String>,
+    /// What the machine left unused since this request began.
+    spare: exec::Spare,
 }
 
 /// A worker's memory after a request: bytes allocated since it started, GC
@@ -332,6 +371,7 @@ impl Worker {
             name,
             stats: None,
             last_word: None,
+            spare: exec::Spare::start(),
         };
         let ready = worker.lines.recv_timeout(START);
         let took = started.elapsed().as_secs_f64();
@@ -387,6 +427,7 @@ impl Worker {
         let before = self.used();
         let warm = self.warm;
         self.last_word = None;
+        self.spare = exec::Spare::start();
         let reply = self.wait(started, before, limit);
         self.trace(request, &reply, started, before, limit, warm);
         reply
@@ -418,8 +459,8 @@ impl Worker {
                         .map_or("?".into(), |u| format!("{:.3} s", u.as_secs_f64()))
                 );
             }
-            if let Some(busy) = self.over(started, before, limit) {
-                return Reply::TimedOut { busy, report };
+            if let Some(why) = self.over(started, before, limit) {
+                return Reply::TimedOut { why, report };
             }
         }
     }
@@ -435,11 +476,12 @@ impl Worker {
         }
     }
 
-    /// When the request is past its limit: whether it kept a processor busy.
-    fn over(&self, started: Instant, before: Option<Duration>, limit: Duration) -> Option<bool> {
+    /// When the request is past its limit: what it was doing.
+    fn over(&self, started: Instant, before: Option<Duration>, limit: Duration) -> Option<Stuck> {
         let used = self.used_since(before);
-        exec::past_limit(started.elapsed(), used, limit)
-            .then(|| used.is_some_and(|used| used >= limit))
+        let spare = self.spare.so_far();
+        exec::past_limit(started.elapsed(), used, spare, limit)
+            .then(|| Stuck::of(used, spare, limit))
     }
 
     fn used_since(&self, before: Option<Duration>) -> Option<Duration> {
@@ -459,11 +501,7 @@ impl Worker {
     ) {
         let (verdict, rows): (&str, &[Row]) = match reply {
             Reply::Done(report) => ("done", &report.rows),
-            Reply::TimedOut { busy: true, report } => ("timed out, busy all along", &report.rows),
-            Reply::TimedOut {
-                busy: false,
-                report,
-            } => ("timed out", &report.rows),
+            Reply::TimedOut { why, report } => (why.words(), &report.rows),
             Reply::Crashed(report) => ("crashed", &report.rows),
         };
         debug!(
@@ -616,6 +654,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_worker_past_its_limit_is_busy_waiting_or_held_back() {
+        let s = |n| Some(Duration::from_secs(n));
+        let limit = Duration::from_secs(4);
+        assert_eq!(Stuck::of(s(4), s(0), limit), Stuck::Busy);
+        assert_eq!(Stuck::of(s(1), s(4), limit), Stuck::Waiting);
+        assert_eq!(Stuck::of(s(1), s(3), limit), Stuck::HeldBack);
+        assert_eq!(Stuck::of(s(1), None, limit), Stuck::HeldBack);
+        assert_eq!(Stuck::of(None, s(9), limit), Stuck::HeldBack);
+    }
+
+    #[test]
     fn the_environment_wins_over_the_runtime_settings() {
         assert_eq!(runtime_settings(|_| false).len(), 3);
         let left = runtime_settings(|name| name == "DOTNET_TieredPGO");
@@ -647,6 +696,25 @@ mod tests {
         silence.heard(start + SILENCE * 2);
         assert_eq!(silence.check(start + SILENCE * 2 + SILENCE / 2), None);
         assert_eq!(silence.check(start + SILENCE * 3), Some(SILENCE));
+    }
+
+    #[test]
+    fn a_report_knows_which_tests_started_and_are_not_over() {
+        let mut report = Report::default();
+        for line in [
+            "running\tA",
+            "activated\tA\t7",
+            "result\tA\tpassed\t3\t",
+            "running\tB",
+            "failed\tB",
+            "running\tC",
+        ] {
+            report.read(line);
+        }
+        // A passed, B failed and waits for the kill check, C never ended.
+        assert_eq!(report.running, BTreeSet::from(["C".to_string()]));
+        assert_eq!(report.rows.len(), 1);
+        assert!(report.activated.contains(&("A".to_string(), 7)));
     }
 
     #[test]

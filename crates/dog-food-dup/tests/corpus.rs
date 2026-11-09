@@ -411,6 +411,67 @@ fn compile_checks_in_memory_follow_the_files_from_round_to_round() {
     assert_eq!(checks.errors(), errors);
 }
 
+#[test]
+fn a_compile_check_names_the_mutant_whose_own_code_does_not_compile() {
+    if !has_dotnet10() {
+        eprintln!("skipped: needs a .NET 10 SDK");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("Shop");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("Shop.csproj"),
+        r#"<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("DgfMutants.g.cs"),
+        "namespace DogFood.Mutation { internal static class DgfMutants { public static bool Is(int id) => false; public static bool Probing => false; public static T Check<T>(T value, params object[] others) => value; } }\n",
+    )
+    .unwrap();
+    let price = "namespace Shop;\npublic static class Price\n{\n    public static int Of(int n) => n * 2 + (n + 1);\n    public static int Half(int? n)\n    {\n        var half = n ?? 0;\n        return half / 2;\n    }\n}\n";
+    let is = "global::DogFood.Mutation.DgfMutants.Is";
+    let dgf = "global::DogFood.Mutation.DgfMutants";
+    // Two mutants on one line: 7 does not compile, in its switch and in its
+    // probe; 8 does. Mutant 9 changes a type, and the error is further down.
+    let mutated = price
+        .replace(
+            "n * 2",
+            &format!("({is}(7) ? (n * \"2\") : (({dgf}.Probing ? {dgf}.Check((n * 2), 7, (n * \"2\")) : (n * 2))))"),
+        )
+        .replace("(n + 1)", &format!("({is}(8) ? (n - 1) : (n + 1))"))
+        .replace("n ?? 0", &format!("({is}(9) ? (n) : (n ?? 0))"));
+    let file = project.join("Price.cs");
+    let original = dir.path().join("0.cs");
+    std::fs::write(&file, &mutated).unwrap();
+    std::fs::write(&original, price).unwrap();
+    let mut checks = Checks::start(&[(&file, &original)]);
+    let errors = checks.errors();
+    let on_line = |line: &str| -> Vec<&String> {
+        errors
+            .iter()
+            .filter(|e| e.contains(&format!("Price.cs({line},")))
+            .collect()
+    };
+    assert_eq!(on_line("4").len(), 2, "{errors:?}");
+    assert!(
+        on_line("4").iter().all(|e| e.ends_with(" [dgf mutant 7]")),
+        "{errors:?}"
+    );
+    // Where the changed type is used: the compiler cannot say whose doing it is.
+    assert_eq!(on_line("8").len(), 1, "{errors:?}");
+    assert!(!on_line("8")[0].contains("[dgf mutant"), "{errors:?}");
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    // A change inside a body: the file is read again, and the errors follow.
+    std::fs::write(&file, mutated.replace("(n * \"2\")", "(n * 2)")).unwrap();
+    let errors = checks.errors();
+    assert!(
+        errors.len() == 1 && errors[0].contains("Price.cs(8,"),
+        "{errors:?}"
+    );
+}
+
 const REGIONS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/regions");
 
 #[test]

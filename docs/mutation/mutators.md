@@ -59,7 +59,7 @@ Some code has mutants that cannot compile. dgf keeps the function and leaves out
 - `while (true)` with a `return` inside, in a function that returns a value: the loop condition is not mutated (`false` would make the end of the function reachable without a value);
 - `??` whose left side is a nullable value (`decimal? price ?? 0`): the right side alone is kept, the left side alone is not made (it would be `decimal?` where a `decimal` is needed).
 
-When a mutant slips through and the compiler reports "use of unassigned local variable" (CS0165) or "not all code paths return a value" (CS0161), the error points at a use or at the end of the function, not at the mutant: every mutant of that function becomes a suspect and is put back half at a time until the culprit is found.
+When a mutant slips through and the compiler reports "use of unassigned local variable" (CS0165) or "not all code paths return a value" (CS0161), the error points at a use or at the end of the function, not at the mutant: every mutant of that function becomes a suspect and is put back half at a time until the culprit is found (a half that goes back clean convicts the other).
 
 ## New C#
 
