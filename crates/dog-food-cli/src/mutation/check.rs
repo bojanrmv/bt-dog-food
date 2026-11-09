@@ -20,14 +20,18 @@ use super::exec;
 
 /// How long the engine may take to load the projects.
 const LOADING: Duration = Duration::from_secs(180);
-/// How long one check may take.
+/// How long one check may take, plus [`PER_FILE`] for each file: the first
+/// check of a large solution reads every mutated file's errors.
 const CHECKING: Duration = Duration::from_secs(60);
+const PER_FILE: Duration = Duration::from_millis(150);
 
 /// The engine, ready for checks.
 pub struct Checker {
     child: Child,
     input: Option<ChildStdin>,
     lines: Receiver<String>,
+    /// How long one check may take, by how many files it reads.
+    limit: Duration,
 }
 
 impl Checker {
@@ -51,10 +55,12 @@ impl Checker {
                 }
             }
         });
+        let files_count = u32::try_from(files.len()).unwrap_or(u32::MAX);
         let mut checker = Checker {
             input: child.stdin.take(),
             child,
             lines,
+            limit: CHECKING + PER_FILE * files_count,
         };
         let request = serde_json::json!({
             "files": files.iter().map(|(path, original)| serde_json::json!({
@@ -74,7 +80,7 @@ impl Checker {
         self.send("check")?;
         let mut errors = Vec::new();
         loop {
-            let line = self.next(CHECKING)?;
+            let line = self.next(self.limit)?;
             if line == "done" {
                 return Ok(errors);
             }

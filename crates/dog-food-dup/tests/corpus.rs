@@ -307,6 +307,110 @@ fn the_csharp_engine_runs_without_being_asked() {
     assert!(!text.contains("did not run"), "{text}");
 }
 
+/// One `--check` engine session: what each check reports.
+struct Checks {
+    child: std::process::Child,
+    lines: std::io::Lines<std::io::BufReader<std::process::ChildStdout>>,
+}
+
+impl Checks {
+    fn start(files: &[(&Path, &Path)]) -> Checks {
+        use std::io::{BufRead, Write};
+        let mut child = Command::new("dotnet")
+            .arg(engine())
+            .arg("--check")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let request = serde_json::json!({
+            "files": files.iter().map(|(path, original)| serde_json::json!({
+                "path": path, "original": original,
+            })).collect::<Vec<_>>(),
+        });
+        let input = child.stdin.as_mut().unwrap();
+        writeln!(input, "{request}").unwrap();
+        input.flush().unwrap();
+        let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        assert_eq!(lines.next().unwrap().unwrap(), "ready");
+        Checks { child, lines }
+    }
+
+    fn errors(&mut self) -> Vec<String> {
+        use std::io::Write;
+        let input = self.child.stdin.as_mut().unwrap();
+        writeln!(input, "check").unwrap();
+        input.flush().unwrap();
+        let mut errors = Vec::new();
+        for line in self.lines.by_ref() {
+            let line = line.unwrap();
+            if line == "done" {
+                break;
+            }
+            errors.extend(line.strip_prefix("error\t").map(str::to_string));
+        }
+        errors
+    }
+}
+
+impl Drop for Checks {
+    fn drop(&mut self) {
+        drop(self.child.stdin.take());
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn compile_checks_in_memory_follow_the_files_from_round_to_round() {
+    if !has_dotnet10() {
+        eprintln!("skipped: needs a .NET 10 SDK");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("Shop");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("Shop.csproj"),
+        r#"<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"#,
+    )
+    .unwrap();
+    let price = "namespace Shop;\npublic static class Price\n{\n    public static int Of(int n) => n * 2;\n}\n";
+    let total = "namespace Shop;\npublic static class Total\n{\n    public static int Sum(int n) => Price.Of(n) + 1;\n}\n";
+    let (a, b) = (project.join("Price.cs"), project.join("Total.cs"));
+    let originals = dir.path().join("originals");
+    std::fs::create_dir_all(&originals).unwrap();
+    let (a0, b0) = (originals.join("0.cs"), originals.join("1.cs"));
+    for (path, text) in [(&a, price), (&b, total), (&a0, price), (&b0, total)] {
+        std::fs::write(path, text).unwrap();
+    }
+    let mut checks = Checks::start(&[(&a, &a0), (&b, &b0)]);
+    assert!(checks.errors().is_empty());
+    // A mutant that does not compile, in the file it is in.
+    std::fs::write(&a, price.replace("n * 2", "n * \"2\"")).unwrap();
+    let errors = checks.errors();
+    assert!(
+        errors.len() == 1 && errors[0].contains("Price.cs(4,"),
+        "{errors:?}"
+    );
+    std::fs::write(&a, price).unwrap();
+    assert!(checks.errors().is_empty());
+    // One that breaks another file, which did not change itself.
+    std::fs::write(
+        &a,
+        price
+            .replace("public static int Of", "public static string Of")
+            .replace("n * 2", "\"x\""),
+    )
+    .unwrap();
+    let errors = checks.errors();
+    assert!(
+        errors.iter().any(|e| e.contains("Total.cs(4,")),
+        "{errors:?}"
+    );
+    // Nothing changed: the same errors, without checking again.
+    assert_eq!(checks.errors(), errors);
+}
+
 const REGIONS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/regions");
 
 #[test]
