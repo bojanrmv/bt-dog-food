@@ -558,7 +558,9 @@ fn change_reason(change: Change) -> &'static str {
 
 /// Tests are what judges the mutants, so they are never mutated themselves:
 /// `*.test.ts`, `*.spec.ts`, `*Tests.cs`, and anything in a `test`, `tests`,
-/// `__tests__` or `*.Tests` folder.
+/// `__tests__` or `*.Tests` folder; nor is what only tests use: browser
+/// tests and their fixtures (`e2e`, `cypress`, `playwright`), which no unit
+/// test runner reaches, and shared test helpers (`TestSupport`).
 pub fn is_test_code(path: &Path) -> bool {
     let stem = path
         .file_stem()
@@ -576,8 +578,19 @@ pub fn is_test_code(path: &Path) -> bool {
         .flat_map(Path::components)
         .any(|c| {
             let part = c.as_os_str().to_string_lossy().to_lowercase();
-            matches!(part.as_str(), "test" | "tests" | "__tests__" | "spec")
-                || part.ends_with(".tests")
+            matches!(
+                part.as_str(),
+                "test"
+                    | "tests"
+                    | "__tests__"
+                    | "spec"
+                    | "e2e"
+                    | "cypress"
+                    | "playwright"
+                    | "testsupport"
+                    | "test-support"
+                    | "test_support"
+            ) || part.ends_with(".tests")
                 || part.ends_with(".test")
                 || part.ends_with(".unittests")
                 || part.ends_with(".integrationtests")
@@ -2134,6 +2147,10 @@ mod tests {
             "Shop.Tests/DiscountTests.cs",
             "tests/Helpers.cs",
             "src/OrderTest.cs",
+            "frontend/e2e/support/public-event.skips.ts",
+            "frontend/e2e/forms-harness/serve.mjs",
+            "web/cypress/support/commands.ts",
+            "backend/TestSupport/RetryingDatabase.cs",
         ] {
             assert!(is_test_code(Path::new(test)), "{test}");
         }
@@ -2142,6 +2159,8 @@ mod tests {
             "Shop/Latest.cs",
             "src/Contest.ts",
             "Shop/Testing.cs",
+            "src/e2e-config.ts",
+            "src/Support/Clock.cs",
         ] {
             assert!(!is_test_code(Path::new(code)), "{code}");
         }

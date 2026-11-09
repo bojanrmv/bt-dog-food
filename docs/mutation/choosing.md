@@ -37,7 +37,7 @@ MUTANTS  COMPLEXITY  WHY       FUNCTION          LOCATION
 Not mutated at all:
 
 - functions marked `// dgf-ignore`;
-- test code: `*.test.*`, `*.spec.*`, `*Tests.cs`, `*Test.cs`, and anything in a `test`, `tests`, `__tests__`, `spec` or `*.Tests` folder;
+- test code: `*.test.*`, `*.spec.*`, `*Tests.cs`, `*Test.cs`, and anything in a `test`, `tests`, `__tests__`, `spec` or `*.Tests` folder; and what only tests use: browser tests and their fixtures in an `e2e`, `cypress` or `playwright` folder, which no unit test runner reaches, and shared test helpers in a `TestSupport` (or `test-support`, `test_support`) folder;
 - places that only take constants: `const`, attributes, parameter defaults (C#), enum members, `case` and pattern constants; in TypeScript, types, imports, decorators, enums and `x as T`.
 
 Which mutants each function gets: [mutators](mutators.md).

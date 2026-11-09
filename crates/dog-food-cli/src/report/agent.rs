@@ -74,6 +74,10 @@ fn header(run: &Run) -> String {
     if !run.coverage.is_empty() {
         let _ = writeln!(out, "limits: CRAP {}", crap_limits(run));
     }
+    // A skipped path or a file with syntax errors changes what the counts cover.
+    for warning in &run.warnings {
+        let _ = writeln!(out, "warning: {warning}");
+    }
     out
 }
 

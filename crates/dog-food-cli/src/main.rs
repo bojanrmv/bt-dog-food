@@ -461,16 +461,26 @@ fn analyze(args: AnalyzeArgs) -> Result<ExitCode, Failure> {
     Ok(ExitCode::from(code))
 }
 
-/// Finds and analyzes the files under `paths`.
+/// Finds and analyzes the files under `paths`. A path that does not exist
+/// (a file the base branch has and this one deleted) is skipped with a
+/// warning; only when none exists is it an error.
 fn scan(paths: &[PathBuf], excludes: Excludes) -> Result<(Vec<FileReport>, Vec<String>), Failure> {
-    if let Some(missing) = paths.iter().find(|p| !p.exists()) {
-        return Err(io(format!("path not found: {}", missing.display())));
+    let (present, missing): (Vec<PathBuf>, Vec<PathBuf>) =
+        paths.iter().cloned().partition(|p| p.exists());
+    if present.is_empty() {
+        if let Some(first) = missing.first() {
+            return Err(io(format!("path not found: {}", first.display())));
+        }
     }
     progress::step("finding source files");
-    let files = discover::discover(paths, excludes);
+    let files = discover::discover(&present, excludes);
     progress::done(format!("{} files", files.len()));
     progress::step("scoring every function");
-    let (reports, warnings) = analyze_files(&files);
+    let (reports, mut warnings) = analyze_files(&files);
+    let skipped = missing
+        .iter()
+        .map(|p| format!("{}: path not found, skipped", p.display()));
+    warnings.splice(0..0, skipped);
     let functions: usize = reports.iter().map(|r| r.functions.len()).sum();
     progress::done(format!("{functions} functions"));
     Ok((reports, warnings))
