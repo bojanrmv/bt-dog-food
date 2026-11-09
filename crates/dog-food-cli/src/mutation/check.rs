@@ -18,8 +18,11 @@ use std::time::Duration;
 
 use super::exec;
 
-/// How long the engine may take to load the projects.
+/// How long the engine may take to load the projects, plus
+/// [`PER_FILE_LOADING`] for each mutated file: on a busy machine a solution
+/// with a thousand mutated files takes minutes.
 const LOADING: Duration = Duration::from_secs(180);
+const PER_FILE_LOADING: Duration = Duration::from_millis(200);
 /// How long one check may take, plus [`PER_FILE`] for each file: the first
 /// check of a large solution reads every mutated file's errors.
 const CHECKING: Duration = Duration::from_secs(60);
@@ -68,7 +71,7 @@ impl Checker {
             })).collect::<Vec<_>>(),
         });
         checker.send(&request.to_string())?;
-        match checker.next(LOADING)? {
+        match checker.next(LOADING + PER_FILE_LOADING * files_count)? {
             line if line == "ready" => Ok(checker),
             other => Err(format!("the C# engine said {other:?}")),
         }
