@@ -283,6 +283,7 @@ pub fn clone_classes(
     crate::reorder::add(&mut found, blocks, sources, display, settings);
     drop_wrappers(&mut found);
     drop_nested(&mut found);
+    drop_self_copies(&mut found);
     found.sort_by(|a, b| {
         b.saves
             .cmp(&a.saves)
@@ -605,6 +606,44 @@ fn drop_wrappers(classes: &mut Vec<CloneClass>) {
 /// A class whose every copy lies inside a copy of another class, with as
 /// many copies: the same functions found again for a block nested in the
 /// bigger copy, which says it already.
+/// A copy that overlaps an earlier copy of its class in the same file is the
+/// same code found twice (a body that is one long expression is both a block
+/// and an expression), not a copy of its own: it goes, with what the class
+/// says of it, and a class left with one copy goes too.
+fn drop_self_copies(classes: &mut Vec<CloneClass>) {
+    let same_place = |a: &Copy, b: &Copy| {
+        a.file == b.file && a.start_line <= b.end_line && b.start_line <= a.end_line
+    };
+    for class in classes.iter_mut() {
+        let copies = std::mem::take(&mut class.copies);
+        let mut kept: Vec<Copy> = Vec::new();
+        let mut index = Vec::new();
+        for copy in copies {
+            let twice = kept.iter().any(|k| same_place(k, &copy));
+            index.push((!twice).then_some(kept.len()));
+            if !twice {
+                kept.push(copy);
+            }
+        }
+        let removed = index.iter().filter(|i| i.is_none()).count();
+        class.copies = kept;
+        if removed == 0 {
+            continue;
+        }
+        class.saves -= (removed * class.lines.saturating_sub(1)) as i64;
+        class
+            .differences
+            .retain_mut(|d| match index.get(d.copy).copied().flatten() {
+                Some(now) => {
+                    d.copy = now;
+                    true
+                }
+                None => false,
+            });
+    }
+    classes.retain(|c| c.copies.len() >= 2);
+}
+
 fn drop_nested(classes: &mut Vec<CloneClass>) {
     let inside = |inner: &Copy, outer: &Copy| {
         inner.file == outer.file

@@ -508,6 +508,38 @@ fn a_long_expression_copied_into_different_statements_is_found() {
 }
 
 #[test]
+fn a_body_that_is_one_long_expression_is_not_a_copy_of_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let text = "pub fn neighbours(files: &[PathBuf], keys: &Keys, root: &Path) -> Vec<Wanted> {
+    files
+        .par_iter()
+        .filter(|path| !is_test_code(path))
+        .flat_map_iter(|path| {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            let found = keys.literals.iter().any(|k| text.contains(k.as_str()))
+                || keys.names.iter().any(|n| text.contains(n.as_str()));
+            let file = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\\\', \"/\");
+            found.then(|| Wanted { file, path: path.clone() })
+        })
+        .collect()
+}
+";
+    write(root, "neighbours.rs", text);
+    let found = run(root, false);
+    for class in &found.classes {
+        let places: Vec<(&str, usize)> = class
+            .copies
+            .iter()
+            .map(|c| (c.file.as_str(), c.start_line))
+            .collect();
+        let mut distinct = places.clone();
+        distinct.dedup();
+        assert_eq!(distinct, places, "a copy of itself: {class:#?}");
+    }
+}
+
+#[test]
 fn lists_of_calls_configuring_a_parameter_are_not_copies() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
