@@ -192,6 +192,9 @@ pub enum Untested {
     /// Every test that reaches it fails without any mutant (in the sandbox,
     /// a test that reads a file the sandbox does not have), so none can judge it.
     FailingTests,
+    /// Left out of the build: an error that names no mutant came back, and
+    /// the builds ran out before the search for its cause reached it.
+    BuildSearch,
 }
 
 #[derive(Default)]
@@ -264,6 +267,7 @@ impl Untested {
                 | Untested::RunError
                 | Untested::SkippedProject
                 | Untested::FailingTests
+                | Untested::BuildSearch
         )
     }
 }
@@ -1099,12 +1103,14 @@ fn run_language(
     // A test project that does not build in a sandbox with only the tested
     // projects may build in a full one: it is only left out of a full one.
     let full = scope.roots.as_slice() == std::slice::from_ref(&scope.root);
+    let mut left_out = HashSet::new();
     let mut status = build::build(
         &mut prepared,
         scope.kind,
         &mut result.outcomes,
         budget,
         full,
+        &mut left_out,
     );
     if status.is_err() && !full {
         result.notes.push("the sandbox with only the tested projects did not build, so the whole repository was copied; set `sandbox = \"full\"` in [mutate] to skip the first attempt".into());
@@ -1116,15 +1122,18 @@ fn run_language(
             options,
             &result.outcomes,
         )?;
+        left_out.clear();
         status = build::build(
             &mut prepared,
             scope.kind,
             &mut result.outcomes,
             budget,
             true,
+            &mut left_out,
         );
     }
     result.build += built.elapsed();
+    mark_left_out(left_out, result);
     debug!("build", "{:.1} s, {}", secs(built), build_text(&status));
     result.sandboxes.push(prepared.sandbox.dir.clone());
     result.test_projects.extend(prepared.engine.test_projects());
@@ -1315,6 +1324,14 @@ fn home_times(reach: &Reach) -> String {
         String::new()
     };
     format!("{}{tail}", shown.join(", "))
+}
+
+/// Mutants the build left out untested (see [`build::build`]): not judged,
+/// and not stored, so the next run tries them again.
+fn mark_left_out(left_out: HashSet<usize>, result: &mut RunResult) {
+    for id in left_out {
+        result.untested.insert(id, Untested::BuildSearch);
+    }
 }
 
 /// A mutant only failing tests reach has tests, which cannot judge it: not

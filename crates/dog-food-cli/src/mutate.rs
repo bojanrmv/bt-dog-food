@@ -1429,7 +1429,7 @@ fn untested_reason(result: &RunResult, id: usize) -> Option<String> {
 }
 
 /// Each untested step as the reports name it.
-const UNTESTED_WORDS: [(Untested, &str); 9] = [
+const UNTESTED_WORDS: [(Untested, &str); 10] = [
     (Untested::Build, "stopped while building"),
     (Untested::Baseline, "stopped during the baseline test run"),
     (Untested::TestRuns, "its test runs did not finish"),
@@ -1456,6 +1456,10 @@ const UNTESTED_WORDS: [(Untested, &str); 9] = [
     (
         Untested::FailingTests,
         "every test that reaches it fails without any mutant (see the notes)",
+    ),
+    (
+        Untested::BuildSearch,
+        "left out of the build: an error that names no mutant came back, and the builds ran out before the search for its cause reached it; run again to test it",
     ),
 ];
 

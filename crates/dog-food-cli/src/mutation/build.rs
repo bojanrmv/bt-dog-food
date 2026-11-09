@@ -131,13 +131,16 @@ impl Hunt {
 }
 
 /// `may_drop`: test projects that do not build even with no mutant in the
-/// sandbox are left out, and the others still run.
+/// sandbox are left out, and the others still run. `left_out` gets the
+/// mutants the search for an error that names none did not reach before the
+/// builds ran out: they are not tested, and not judged.
 pub fn build(
     prepared: &mut Prepared,
     kind: Kind,
     outcomes: &mut HashMap<usize, Outcome>,
     budget: Budget,
     may_drop: bool,
+    left_out: &mut HashSet<usize>,
 ) -> Result<Built, String> {
     let mut state = Rebuild::new(may_drop);
     for _ in 0..BUILD_ROUNDS {
@@ -151,7 +154,7 @@ pub fn build(
         }
         sandbox::write(kind, &prepared.files, &prepared.sandbox.dir)?;
     }
-    give_up(prepared, kind, outcomes, budget, state)
+    give_up(prepared, kind, outcomes, budget, state, left_out)
 }
 
 /// A failed build: with no mutant in, test projects that do not build are
@@ -289,6 +292,19 @@ impl Rebuild {
             return false;
         }
         true
+    }
+
+    /// When the builds run out: the suspects of errors on their lines or in
+    /// their functions, and the mutants a hunt had not cleared yet.
+    fn unresolved(&self) -> (HashSet<usize>, HashSet<usize>) {
+        let ids = |groups: &[Held]| -> HashSet<usize> {
+            groups.iter().flatten().map(|(_, m)| m.id).collect()
+        };
+        let suspects = &ids(&self.waiting) | &ids(&self.trying);
+        let hunted = self.hunt.as_ref().map_or_else(HashSet::new, |h| {
+            &(&ids(&h.candidates) | &ids(&h.later)) | &ids(&h.trying)
+        });
+        (suspects, hunted)
     }
 
     /// A clean build or check while hunting: the groups tried stay in, and
@@ -549,33 +565,37 @@ fn by_function(files: &[FileMutants], held: Held) -> Vec<Held> {
 }
 
 /// Out of rounds: every suspect still unresolved counts as not compiling.
+/// Out of rounds: every suspect still unresolved (an error was on its line,
+/// or on its function's) counts as not compiling. The mutants a hunt had
+/// not cleared were never shown to break the build: they are left out,
+/// untested.
 fn give_up(
     prepared: &mut Prepared,
     kind: Kind,
     outcomes: &mut HashMap<usize, Outcome>,
     budget: Budget,
     state: Rebuild,
+    left_out: &mut HashSet<usize>,
 ) -> Result<Built, String> {
-    let hunted = state
-        .hunt
-        .iter()
-        .flat_map(|h| h.candidates.iter().chain(&h.later).chain(&h.trying));
-    let unresolved: HashSet<usize> = state
-        .waiting
-        .iter()
-        .chain(&state.trying)
-        .chain(hunted)
-        .flatten()
-        .map(|(_, m)| m.id)
-        .collect();
-    tellln!(
-        "note: {} suspected mutants were not isolated and count as not compiling",
-        unresolved.len()
-    );
+    let (unresolved, hunted) = state.unresolved();
+    if !unresolved.is_empty() {
+        tellln!(
+            "note: {} suspected mutants were not isolated and count as not compiling",
+            unresolved.len()
+        );
+    }
     for id in &unresolved {
         outcomes.insert(*id, Outcome::CompileError);
     }
     take_out(&mut prepared.files, &unresolved);
+    if !hunted.is_empty() {
+        tellln!(
+            "note: {} mutants were left out untested: an error that names no mutant came back, and the builds ran out before the search for its cause reached them",
+            hunted.len()
+        );
+        take_out(&mut prepared.files, &hunted);
+        left_out.extend(hunted);
+    }
     sandbox::write(kind, &prepared.files, &prepared.sandbox.dir)?;
     match prepared.engine.build(Round::All, budget) {
         Ok(()) => Ok(Built::Done),
@@ -836,6 +856,41 @@ mod tests {
             assert_eq!(kept, expected, "every innocent mutant is back in");
             assert!(builds <= 12 * culprits.len() + 6, "{builds} builds");
         }
+    }
+
+    #[test]
+    fn a_hunt_cut_short_leaves_its_mutants_untested_not_broken() {
+        let source = "class C {\n  bool F(int a, int b) {\n    return a > 1 && b < 2 || a == b;\n  }\n  bool G(int a, int b) {\n    return a >= 3 && b <= 4 || a != b;\n  }\n}\n";
+        let mutants =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp).unwrap();
+        let all: HashSet<usize> = mutants.iter().map(|m| m.id).collect();
+        let mut files = vec![FileMutants {
+            relative: PathBuf::from("C.cs"),
+            source: source.into(),
+            mutants,
+            functions: vec![(2, 4), (5, 7)],
+        }];
+        let mut outcomes = HashMap::new();
+        let mut state = Rebuild::new(true);
+        let errors = ["Tests/CTests.cs(9,1): error CS0029: elsewhere".to_string()];
+        // Taken out, back in by function, back again: the hunt starts.
+        state
+            .failed(&Nowhere, &mut files, &errors, &mut outcomes)
+            .unwrap();
+        assert!(!state.passed(&mut files));
+        state
+            .failed(&Nowhere, &mut files, &errors, &mut outcomes)
+            .unwrap();
+        assert!(state.hunt.is_some());
+        let (suspects, hunted) = state.unresolved();
+        assert!(suspects.is_empty(), "{suspects:?}");
+        let in_files: HashSet<usize> = files[0].mutants.iter().map(|m| m.id).collect();
+        assert_eq!(
+            &hunted | &in_files,
+            all,
+            "every mutant is in, or the hunt holds it"
+        );
+        assert!(outcomes.is_empty(), "nobody is blamed");
     }
 
     #[test]

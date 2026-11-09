@@ -33,7 +33,7 @@ mutation score 14% · 3 killed, 5 survived, 14 no tests, 0 timeout, 0 did not co
 | did not compile | removed before testing | left out |
 | crashed the test run | the test host ended before the tests it was asked for reported (dog-food's worker says so itself), or no test reported at all | left out |
 | ignored | a `dgf-disable` comment, `ignore_methods`, `skip_plain_constructors` or `[ExcludeFromCodeCoverage]`; never tested | left out |
-| not tested | `--max-minutes` ran out first; or it could not be tested: no test runner above the file, its test run could not start, every test that reaches it fails without any mutant, or no test that ran reaches it and a skipped test project uses its code (the reason is given with it) | left out |
+| not tested | `--max-minutes` ran out first; or it could not be tested: no test runner above the file, its test run could not start, every test that reaches it fails without any mutant, no test that ran reaches it and a skipped test project uses its code, or the build ran out of rounds before clearing it of an error that names no mutant (the reason is given with it) | left out |
 
 Score = detected ÷ (detected + survived + no tests), per function and overall.
 
