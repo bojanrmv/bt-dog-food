@@ -1124,7 +1124,11 @@ fn run_language(
     debug!("build", "{:.1} s, {}", secs(built), build_text(&status));
     result.sandboxes.push(prepared.sandbox.dir.clone());
     result.test_projects.extend(prepared.engine.test_projects());
-    if status? == build::Built::OutOfTime {
+    // What the engine noted so far (a test project left out, compile checks
+    // that did not run) is told however the run ends.
+    let status = status.inspect_err(|_| result.notes.extend(prepared.engine.notes()))?;
+    if status == build::Built::OutOfTime {
+        result.notes.extend(prepared.engine.notes());
         mark_untested(&prepared.files, result, Untested::Build);
         return Ok(cache::KilledBy::new());
     }
@@ -1133,11 +1137,11 @@ fn run_language(
         secs(built),
         secs(started)
     ));
-    let Some(mut reach) = prepared
-        .engine
-        .reach(budget)
-        .map_err(|err| with_test_hint(err, scope))?
-    else {
+    let reached = prepared.engine.reach(budget);
+    if !matches!(reached, Ok(Some(_))) {
+        result.notes.extend(prepared.engine.notes());
+    }
+    let Some(mut reach) = reached.map_err(|err| with_test_hint(err, scope))? else {
         mark_untested(&prepared.files, result, Untested::Baseline);
         return Ok(cache::KilledBy::new());
     };

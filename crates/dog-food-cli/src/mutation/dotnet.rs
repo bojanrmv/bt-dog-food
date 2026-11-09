@@ -80,6 +80,9 @@ pub struct Dotnet {
     /// Test projects left out of the run: they do not build in the sandbox,
     /// or dog-food cannot run them.
     skipped: Mutex<Vec<Skipped>>,
+    /// Whether a file with mutants is in no project folder (a file test
+    /// projects link in): only a build of the test projects compiles it.
+    unowned: bool,
 }
 
 /// A test project left out of the run.
@@ -113,10 +116,12 @@ impl Dotnet {
                 filter: t.filter.clone(),
             })
             .collect();
-        let mutated: BTreeSet<PathBuf> = files
+        let homes: Vec<Option<PathBuf>> = files
             .iter()
-            .filter_map(|f| super::sandbox::project_file(&sandbox.join(&f.relative)))
+            .map(|f| super::sandbox::project_file(&sandbox.join(&f.relative)))
             .collect();
+        let unowned = homes.iter().any(Option::is_none);
+        let mutated: BTreeSet<PathBuf> = homes.into_iter().flatten().collect();
         let tests = sandbox.join("dgf-tests.sln");
         write_if_changed(
             &tests,
@@ -151,6 +156,7 @@ impl Dotnet {
             notes: Mutex::new(Vec::new()),
             mutated_projects,
             skipped: Mutex::new(Vec::new()),
+            unowned,
         })
     }
 
@@ -923,9 +929,11 @@ impl Dotnet {
 
 impl Engine for Dotnet {
     /// `All` builds every test project (and what they use); `Mutated` only
-    /// the projects with mutants, which is where a mutant can break the build.
+    /// the projects with mutants, which is where a mutant can break the build,
+    /// unless a file with mutants is in no project: then everything, since a
+    /// build of the projects would pass without compiling it.
     fn build(&self, round: Round, budget: Budget) -> Result<(), BuildError> {
-        if round == Round::Mutated {
+        if round == Round::Mutated && !self.unowned {
             return self.build_mutated(budget);
         }
         let restore = !self.restored.load(Ordering::Relaxed);
@@ -1052,9 +1060,24 @@ impl Engine for Dotnet {
             .iter()
             .map(|f| (self.sandbox.join(&f.relative), f.source.as_str()))
             .collect();
-        let checked = super::check::originals(&folder, &pairs).and_then(|pairs| {
-            super::check::Checker::start(dog_food_dup::semantic::command(None), &pairs)
-        });
+        let command = dog_food_dup::semantic::command(None);
+        let engine = std::iter::once(command.get_program())
+            .chain(command.get_args())
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let checked = super::check::originals(&folder, &pairs)
+            .and_then(|pairs| super::check::Checker::start(command, &pairs));
+        if let Err(err) = &checked {
+            progress(&format!(
+                "no compile checks in memory ({engine}: {err}); finding the mutants that do not compile by builds alone, which is slower"
+            ));
+            if let Ok(mut notes) = self.notes.lock() {
+                notes.push(format!(
+                    "mutants that do not compile were found by builds alone, which is slower: the C# engine dgf found ({engine}) could not run compile checks ({err}). It may be older than this dgf: `dotnet tool install -g dgf` ships a matching one beside dgf, and `DGF_DUP_CS` can name one"
+                ));
+            }
+        }
         match checked {
             Ok(checker) => {
                 debug!(

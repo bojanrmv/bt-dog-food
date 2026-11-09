@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use dog_food_core::Mutant;
 
+use super::exec::Located;
 use super::sandbox::{self, FileMutants, Kind};
 use super::{progress, Budget, BuildError, Engine, Outcome, Prepared, Round};
 
@@ -45,6 +46,11 @@ struct Rebuild {
     checked: bool,
     /// Whether test projects that do not build with no mutant in may be left out.
     may_drop: bool,
+    /// Whether every mutant came out once for an error that names none.
+    took_all_out: bool,
+    /// The search for the mutants behind an error that names none, once
+    /// taking them all out and putting them back by function brought it back.
+    hunt: Option<Hunt>,
 }
 
 impl Rebuild {
@@ -55,7 +61,72 @@ impl Rebuild {
             trying: Vec::new(),
             checked: false,
             may_drop,
+            took_all_out: false,
+            hunt: None,
         }
+    }
+}
+
+/// An error that names no mutant (a type that changes in one function and
+/// fails in another, or in a test project) and comes back when the mutants
+/// go back by function. Every build puts half of the groups still out back
+/// in: a clean build clears that half, and an error narrows the search to
+/// it, so each culprit takes a few builds and every build makes progress.
+#[derive(Default)]
+struct Hunt {
+    /// Out, not tried yet.
+    candidates: Vec<Held>,
+    /// Out, set aside while the search narrows to the half being tried.
+    later: Vec<Held>,
+    /// Back in for this build.
+    trying: Vec<Held>,
+}
+
+impl Hunt {
+    /// Puts half of the candidates back in; false when none is left.
+    fn next(&mut self, files: &mut [FileMutants]) -> bool {
+        if self.candidates.is_empty() {
+            self.candidates = std::mem::take(&mut self.later);
+        }
+        if self.candidates.is_empty() {
+            return false;
+        }
+        let rest = self.candidates.split_off(self.candidates.len().div_ceil(2));
+        self.trying = std::mem::replace(&mut self.candidates, rest);
+        for group in &self.trying {
+            put_back(files, group);
+        }
+        true
+    }
+
+    /// The groups tried broke the build: the search narrows to them. A
+    /// single mutant is the culprit; a single group is halved.
+    fn narrow(&mut self, files: &mut [FileMutants], outcomes: &mut HashMap<usize, Outcome>) {
+        let tried = std::mem::take(&mut self.trying);
+        for group in &tried {
+            take_out(files, &group.iter().map(|(_, m)| m.id).collect());
+        }
+        self.later.append(&mut self.candidates);
+        self.candidates = match <[Held; 1]>::try_from(tried) {
+            Ok([group]) if group.len() == 1 => {
+                outcomes.insert(group[0].1.id, Outcome::CompileError);
+                Vec::new()
+            }
+            Ok([mut group]) => {
+                let half = group.split_off(group.len() / 2);
+                vec![group, half]
+            }
+            Err(tried) => tried,
+        };
+    }
+
+    fn mutants(&self) -> usize {
+        self.candidates
+            .iter()
+            .chain(&self.later)
+            .chain(&self.trying)
+            .map(Vec::len)
+            .sum()
     }
 }
 
@@ -175,6 +246,9 @@ impl Rebuild {
     /// and the next go in. Returns whether none is left, and the next build is
     /// of everything the tests need.
     fn clean_in_memory(&mut self, files: &mut [FileMutants]) -> bool {
+        if self.hunt_goes_on(files) {
+            return false;
+        }
         self.trying.clear();
         let next = self.next_groups(files);
         if next.is_empty() {
@@ -191,6 +265,9 @@ impl Rebuild {
     /// The build succeeded: the groups being tried are innocent. Returns
     /// whether everything is built.
     fn passed(&mut self, files: &mut [FileMutants]) -> bool {
+        if self.hunt_goes_on(files) {
+            return false;
+        }
         self.trying.clear();
         let next = self.next_groups(files);
         if !next.is_empty() {
@@ -214,6 +291,79 @@ impl Rebuild {
         true
     }
 
+    /// A clean build or check while hunting: the groups tried stay in, and
+    /// the next half goes in. False once the hunt is over (or none runs).
+    fn hunt_goes_on(&mut self, files: &mut [FileMutants]) -> bool {
+        let Some(hunt) = self.hunt.as_mut() else {
+            return false;
+        };
+        hunt.trying.clear();
+        if hunt.next(files) {
+            self.round = Round::All;
+            return true;
+        }
+        self.hunt = None;
+        false
+    }
+
+    /// Whether the hunt takes this failed build: one is under way, or an
+    /// error that names no mutant came back after they all came out once.
+    fn hunted(
+        &mut self,
+        files: &mut [FileMutants],
+        located: &Located,
+        outcomes: &mut HashMap<usize, Outcome>,
+    ) -> bool {
+        if self.hunt.is_some() && !located.broken.is_empty() {
+            // Those mutants explain the build: the same half goes again without them.
+            self.remove_broken(files, &located.broken, outcomes);
+            return true;
+        }
+        if self.hunt.is_none() && !self.came_back(files, located) {
+            return false;
+        }
+        self.hunt_failed(files, outcomes);
+        true
+    }
+
+    /// An error that names no mutant, with mutants in, after they all came
+    /// out once and the build without them passed.
+    fn came_back(&self, files: &[FileMutants], located: &Located) -> bool {
+        located.is_empty() && self.took_all_out && !no_mutants(files)
+    }
+
+    /// The error that names no mutant came back: the hunt starts with every
+    /// mutant out, or narrows to the groups it just put back.
+    fn hunt_failed(&mut self, files: &mut [FileMutants], outcomes: &mut HashMap<usize, Outcome>) {
+        self.round = Round::All;
+        if let Some(hunt) = self.hunt.as_mut() {
+            hunt.narrow(files, outcomes);
+            if !hunt.next(files) {
+                self.hunt = None;
+            }
+            return;
+        }
+        let all: HashSet<usize> = files
+            .iter()
+            .flat_map(|f| f.mutants.iter().map(|m| m.id))
+            .collect();
+        let held = take_out(files, &all);
+        let mut candidates = by_function(files, held);
+        candidates.append(&mut self.waiting);
+        self.trying.clear();
+        let mut hunt = Hunt {
+            candidates,
+            ..Hunt::default()
+        };
+        progress(&format!(
+            "an error that names no mutant came back; looking for its cause among {} mutants, half of what is left per build",
+            hunt.mutants()
+        ));
+        if hunt.next(files) {
+            self.hunt = Some(hunt);
+        }
+    }
+
     /// One waiting group per function.
     fn next_groups(&mut self, files: &[FileMutants]) -> Vec<Held> {
         let mut functions = HashSet::new();
@@ -232,23 +382,14 @@ impl Rebuild {
         outcomes: &mut HashMap<usize, Outcome>,
     ) -> Result<(), String> {
         let located = engine.locate(files, errors);
+        if self.hunted(files, &located, outcomes) {
+            return Ok(());
+        }
         if located.is_empty() {
             return self.take_all_out(files, errors);
         }
         self.round = Round::Mutated;
-        if !located.broken.is_empty() {
-            progress(&format!(
-                "{} mutants do not compile; building again without them",
-                located.broken.len()
-            ));
-            for id in &located.broken {
-                outcomes.insert(*id, Outcome::CompileError);
-            }
-            take_out(files, &located.broken);
-            for group in &mut self.trying {
-                group.retain(|(_, m)| !located.broken.contains(&m.id));
-            }
-        }
+        self.remove_broken(files, &located.broken, outcomes);
         let tried = self.blame(files, &located.suspects, outcomes);
         self.suspect(files, &located.suspects, &tried, outcomes);
         // The next groups go in with this rebuild, not after a clean one.
@@ -257,6 +398,33 @@ impl Rebuild {
             put_back(files, group);
         }
         Ok(())
+    }
+
+    /// Mutants on an error's line do not compile: they come out for good.
+    fn remove_broken(
+        &mut self,
+        files: &mut [FileMutants],
+        broken: &HashSet<usize>,
+        outcomes: &mut HashMap<usize, Outcome>,
+    ) {
+        if broken.is_empty() {
+            return;
+        }
+        progress(&format!(
+            "{} mutants do not compile; building again without them",
+            broken.len()
+        ));
+        for id in broken {
+            outcomes.insert(*id, Outcome::CompileError);
+        }
+        take_out(files, broken);
+        let groups = self
+            .trying
+            .iter_mut()
+            .chain(self.hunt.iter_mut().flat_map(|h| h.trying.iter_mut()));
+        for group in groups {
+            group.retain(|(_, m)| !broken.contains(&m.id));
+        }
     }
 
     /// An error nothing ties to a mutant: every mutant comes out, once, and
@@ -279,6 +447,7 @@ impl Rebuild {
         let held = take_out(files, &all);
         self.waiting.extend(by_function(files, held));
         self.trying.clear();
+        self.took_all_out = true;
         // Not only the mutated projects: a test project may be what fails.
         self.round = Round::All;
         Ok(())
@@ -387,10 +556,15 @@ fn give_up(
     budget: Budget,
     state: Rebuild,
 ) -> Result<Built, String> {
+    let hunted = state
+        .hunt
+        .iter()
+        .flat_map(|h| h.candidates.iter().chain(&h.later).chain(&h.trying));
     let unresolved: HashSet<usize> = state
         .waiting
         .iter()
         .chain(&state.trying)
+        .chain(hunted)
         .flatten()
         .map(|(_, m)| m.id)
         .collect();
@@ -602,6 +776,66 @@ mod tests {
         // Or it builds, and they go back to find which.
         assert!(!state.passed(&mut files));
         assert_eq!(files[0].mutants.len(), count);
+    }
+
+    /// Builds until done, failing with an error that names no mutant while
+    /// any of `culprits` is in; the builds it took.
+    fn hunt_down(culprits: &HashSet<usize>) -> (usize, Vec<FileMutants>, HashMap<usize, Outcome>) {
+        let source = "class C {\n  bool F(int a, int b) {\n    return a > 1 && b < 2 || a == b;\n  }\n  bool G(int a, int b) {\n    return a >= 3 && b <= 4 || a != b;\n  }\n  bool H(int a) {\n    return a < 5 && a > 0;\n  }\n}\n";
+        let mutants =
+            dog_food_core::mutate::mutants(source, dog_food_core::Language::CSharp).unwrap();
+        let mut files = vec![FileMutants {
+            relative: PathBuf::from("C.cs"),
+            source: source.into(),
+            mutants,
+            functions: vec![(2, 4), (5, 7), (8, 10)],
+        }];
+        let mut outcomes = HashMap::new();
+        let mut state = Rebuild::new(true);
+        let errors = ["Tests/CTests.cs(9,1): error CS0029: a type changed elsewhere".to_string()];
+        for builds in 1..=BUILD_ROUNDS {
+            let broken = files[0].mutants.iter().any(|m| culprits.contains(&m.id));
+            if !broken && state.passed(&mut files) {
+                return (builds, files, outcomes);
+            }
+            if broken {
+                state
+                    .failed(&Nowhere, &mut files, &errors, &mut outcomes)
+                    .unwrap();
+            }
+        }
+        panic!("not found in {BUILD_ROUNDS} builds: {outcomes:?}");
+    }
+
+    #[test]
+    fn an_error_that_names_no_mutant_and_comes_back_is_hunted_down() {
+        let all: Vec<usize> = dog_food_core::mutate::mutants(
+            "class C {\n  bool F(int a, int b) {\n    return a > 1 && b < 2 || a == b;\n  }\n  bool G(int a, int b) {\n    return a >= 3 && b <= 4 || a != b;\n  }\n  bool H(int a) {\n    return a < 5 && a > 0;\n  }\n}\n",
+            dog_food_core::Language::CSharp,
+        )
+        .unwrap()
+        .iter()
+        .map(|m| m.id)
+        .collect();
+        assert!(all.len() > 12, "{}", all.len());
+        // One culprit, in the middle function; then one in each of two functions.
+        for culprits in [
+            HashSet::from([all[all.len() / 2]]),
+            HashSet::from([all[1], all[all.len() - 2]]),
+        ] {
+            let (builds, files, outcomes) = hunt_down(&culprits);
+            let blamed: HashSet<usize> = outcomes.keys().copied().collect();
+            assert_eq!(blamed, culprits, "only the culprits are blamed");
+            assert!(outcomes.values().all(|o| *o == Outcome::CompileError));
+            let kept: HashSet<usize> = files[0].mutants.iter().map(|m| m.id).collect();
+            let expected: HashSet<usize> = all
+                .iter()
+                .copied()
+                .filter(|id| !culprits.contains(id))
+                .collect();
+            assert_eq!(kept, expected, "every innocent mutant is back in");
+            assert!(builds <= 12 * culprits.len() + 6, "{builds} builds");
+        }
     }
 
     #[test]
