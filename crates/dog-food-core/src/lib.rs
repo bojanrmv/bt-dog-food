@@ -45,11 +45,35 @@ pub enum Error {
     /// A `dgf-disable` comment that cannot be used, with its 1-based line.
     #[error("line {line}: {message}")]
     Suppression { line: usize, message: String },
+    /// dog-food itself failed on this source: a bug, kept to this one file.
+    #[error(
+        "{origin}: skipped, dog-food failed on it ({message}); please report this with the file"
+    )]
+    Internal { origin: String, message: String },
+}
+
+/// Runs `work` on one source, turning a panic into an error: the caller
+/// skips that source and the others go on.
+pub(crate) fn guarded<T>(
+    origin: &str,
+    work: impl FnOnce() -> Result<T, Error>,
+) -> Result<T, Error> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic".to_string());
+        Err(Error::Internal {
+            origin: origin.to_string(),
+            message,
+        })
+    })
 }
 
 /// Analyzes source text that is already in memory.
 pub fn analyze_source(source: &str, language: Language) -> Result<Vec<FunctionMetrics>, Error> {
-    let (functions, _) = analyze(source, language, "<memory>")?;
+    let (functions, _) = guarded("<memory>", || analyze(source, language, "<memory>"))?;
     Ok(functions)
 }
 
@@ -61,7 +85,7 @@ pub fn analyze_file(path: &Path) -> Result<FileReport, Error> {
         path: display.clone(),
         source,
     })?;
-    let (functions, has_errors) = analyze(&source, language, &display)?;
+    let (functions, has_errors) = guarded(&display, || analyze(&source, language, &display))?;
     Ok(FileReport {
         path: display,
         language,
@@ -155,4 +179,20 @@ fn error_nodes(node: tree_sitter::Node) -> usize {
     }
     let mut cursor = node.walk();
     own + node.children(&mut cursor).map(error_nodes).sum::<usize>()
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_on_one_source_is_an_error_for_it() {
+        let failed = guarded::<()>("a.cs", || panic!("index out of bounds"));
+        let text = failed.unwrap_err().to_string();
+        assert!(text.starts_with("a.cs: skipped"), "{text}");
+        assert!(text.contains("index out of bounds"), "{text}");
+        let owned = guarded::<()>("b.cs", || panic!("{}", String::from("owned")));
+        assert!(owned.unwrap_err().to_string().contains("owned"));
+        assert_eq!(guarded("c.cs", || Ok(1)).unwrap(), 1);
+    }
 }

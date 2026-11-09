@@ -236,6 +236,14 @@ pub fn mutants(source: &str, language: Language) -> Result<Vec<Mutant>, Error> {
 /// Every mutant in `source`, in source order. Mutants a comment, an ignored
 /// method or an attribute turns off are kept with `ignored` set.
 pub fn mutate(source: &str, language: Language, settings: &Settings) -> Result<Mutations, Error> {
+    crate::guarded("<memory>", || mutate_unguarded(source, language, settings))
+}
+
+fn mutate_unguarded(
+    source: &str,
+    language: Language,
+    settings: &Settings,
+) -> Result<Mutations, Error> {
     let tree = crate::parse(source, language, "<memory>")?;
     let src = source.as_bytes();
     let rules = rules(language);

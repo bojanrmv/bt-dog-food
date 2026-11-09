@@ -16,8 +16,8 @@ use super::projects::TestProject;
 use super::sandbox::FileMutants;
 use super::worker::{Pool, Reply, Report, Target, Worker};
 use super::{
-    check_baseline, failing_tests, Budget, BuildError, Engine, Pack, PackRun, Reach, Round,
-    SoloRun, TestResults, TestRun,
+    check_baseline, failing_tests, progress, Budget, BuildError, Engine, Pack, PackRun, Reach,
+    Round, SoloRun, TestResults, TestRun,
 };
 use crate::discover::absolute;
 
@@ -75,6 +75,17 @@ pub struct Dotnet {
     /// Each test's time in the last run's baseline.
     last_times: Mutex<HashMap<String, Duration>>,
     notes: Mutex<Vec<String>>,
+    /// The projects with mutants.
+    mutated_projects: Vec<PathBuf>,
+    /// Test projects left out of the run: they do not build in the sandbox,
+    /// or dog-food cannot run them.
+    skipped: Mutex<Vec<Skipped>>,
+}
+
+/// A test project left out of the run.
+struct Skipped {
+    /// The projects it uses, itself included, by `project_key`.
+    uses: HashSet<String>,
 }
 
 /// Where a sandbox records the build settings of its last successful build.
@@ -111,6 +122,7 @@ impl Dotnet {
             &tests,
             &solution(sandbox, projects.iter().map(|p| p.path.as_path())),
         )?;
+        let mutated_projects: Vec<PathBuf> = mutated.iter().cloned().collect();
         let mutated_solution = sandbox.join("dgf-mutated.sln");
         write_if_changed(
             &mutated_solution,
@@ -137,6 +149,8 @@ impl Dotnet {
             jobs: jobs.max(1),
             last_times: Mutex::new(HashMap::new()),
             notes: Mutex::new(Vec::new()),
+            mutated_projects,
+            skipped: Mutex::new(Vec::new()),
         })
     }
 
@@ -555,21 +569,26 @@ impl Dotnet {
     /// start; plain threads, not the thread pool the runs use, so no run
     /// waits on itself.
     fn find_targets(&self) -> Result<HashMap<String, Target>, String> {
-        let found: Vec<(String, Result<Found, String>)> = std::thread::scope(|scope| {
+        let found: Vec<(&Project, Result<Found, String>)> = std::thread::scope(|scope| {
             let lookups: Vec<_> = self
                 .projects
                 .iter()
-                .map(|p| scope.spawn(move || (p.assembly.clone(), find_target(&p.path))))
+                .map(|p| (p, scope.spawn(move || find_target(&p.path))))
                 .collect();
-            lookups.into_iter().filter_map(|l| l.join().ok()).collect()
+            lookups
+                .into_iter()
+                .map(|(p, lookup)| {
+                    let found = lookup
+                        .join()
+                        .unwrap_or_else(|_| Err("looking up its build output failed".into()));
+                    (p, found)
+                })
+                .collect()
         });
-        refuse_unservable(&found)?;
-        let mut targets = HashMap::new();
-        for (assembly, target) in found {
-            let found = target?;
-            self.note_target(&assembly, &found);
-            targets.insert(assembly, found.target);
+        if found.iter().all(|(_, target)| target.is_err()) {
+            return Err(unservable(&found));
         }
+        let targets = self.served(found);
         if targets.values().any(|t| t.mtp) {
             self.workers.set_mtp(mtp_program()?);
         }
@@ -577,6 +596,28 @@ impl Dotnet {
             self.workers.set_vstest(worker_program()?);
         }
         Ok(targets)
+    }
+
+    /// The test projects a worker can serve, by assembly; the others are
+    /// skipped, with a note saying why.
+    fn served(&self, found: Vec<(&Project, Result<Found, String>)>) -> HashMap<String, Target> {
+        let mut targets = HashMap::new();
+        for (project, target) in found {
+            match target {
+                Ok(found) => {
+                    self.note_target(&project.assembly, &found);
+                    targets.insert(project.assembly.clone(), found.target);
+                }
+                Err(why) => self.skip(
+                    &project.path,
+                    format!(
+                        "{} was skipped: dog-food cannot run it ({why}); the other test projects ran. Leave it out with --exclude-test-project to drop this note",
+                        project.assembly
+                    ),
+                ),
+            }
+        }
+        targets
     }
 
     /// Says what was found for a test project, and readies its test host.
@@ -654,6 +695,7 @@ impl Dotnet {
             return self
                 .projects
                 .iter()
+                .filter(|p| self.serves(p))
                 .map(|p| (p, p.filter.clone()))
                 .collect();
         };
@@ -663,9 +705,29 @@ impl Dotnet {
             .collect();
         self.projects
             .iter()
-            .filter(|p| homes.contains(p.assembly.as_str()))
+            .filter(|p| homes.contains(p.assembly.as_str()) && self.serves(p))
             .map(|p| (p, None))
             .collect()
+    }
+
+    /// Whether `project` runs: false for one skipped because dog-food cannot run it.
+    fn serves(&self, project: &Project) -> bool {
+        match self.targets.get() {
+            Some(Ok(targets)) => targets.contains_key(&project.assembly),
+            _ => true,
+        }
+    }
+
+    /// Leaves `project` out of the run, and says why.
+    fn skip(&self, project: &Path, note: String) {
+        if let Ok(mut skipped) = self.skipped.lock() {
+            skipped.push(Skipped {
+                uses: uses(project),
+            });
+        }
+        if let Ok(mut notes) = self.notes.lock() {
+            notes.push(note);
+        }
     }
 
     /// Each test's source files: the one the test adapter reports, else every
@@ -704,8 +766,30 @@ impl Dotnet {
     }
 
     /// Builds `target`; `alone` skips its project references, which an
-    /// earlier build of everything left up to date.
+    /// earlier build of everything left up to date. A build without a
+    /// restore that finds a project's restore output missing (the sandbox's
+    /// last restore did not cover it, or its `obj` folder was cleared) is
+    /// restored and built again.
     fn build_target(
+        &self,
+        target: &Path,
+        restore: bool,
+        alone: bool,
+        budget: Budget,
+    ) -> Result<(), BuildError> {
+        let built = self.build_once(target, restore, alone, budget);
+        if !restore && matches!(&built, Err(BuildError::Errors(e)) if needs_restore(e)) {
+            debug!(
+                "build",
+                "{}: a project's restore output is missing; restoring",
+                target.display()
+            );
+            return self.build_once(target, true, alone, budget);
+        }
+        built
+    }
+
+    fn build_once(
         &self,
         target: &Path,
         restore: bool,
@@ -792,6 +876,11 @@ const SANDBOX_BUILD: &[&str] = &[
 /// Errors from the C# compiler, which only runs once the restore worked.
 fn compiler_errors(errors: &[String]) -> bool {
     errors.iter().any(|e| e.contains(": error CS"))
+}
+
+/// NETSDK1004: a project's restore output (`project.assets.json`) is not there.
+fn needs_restore(errors: &[String]) -> bool {
+    errors.iter().any(|e| e.contains("error NETSDK1004"))
 }
 
 /// CS0006: a referenced project's assembly is not there.
@@ -999,6 +1088,184 @@ impl Engine for Dotnet {
     fn notes(&self) -> Vec<String> {
         self.notes.lock().map(|n| n.clone()).unwrap_or_default()
     }
+
+    fn drop_broken(&mut self, errors: &[String], budget: Budget) -> bool {
+        let tests: Vec<PathBuf> = self.projects.iter().map(|p| p.path.clone()).collect();
+        let broken = match named_in(errors, &tests, &self.mutated_projects) {
+            Named::CodeUnderTest => return false,
+            Named::Tests(broken) => broken,
+            Named::Unknown => self.build_each(budget),
+        };
+        if broken.is_empty() || broken.len() == self.projects.len() {
+            return false;
+        }
+        self.leave_out(&broken)
+    }
+
+    fn skipped_may_reach(&self, relative: &Path) -> bool {
+        let Some(project) = super::sandbox::project_file(&self.sandbox.join(relative)) else {
+            return false;
+        };
+        let key = project_key(&project);
+        self.skipped
+            .lock()
+            .is_ok_and(|skipped| skipped.iter().any(|s| s.uses.contains(&key)))
+    }
+}
+
+impl Dotnet {
+    /// Builds each test project on its own, one after the other (they share
+    /// projects): the ones that fail, each with its first error. None when
+    /// the budget runs out.
+    fn build_each(&self, budget: Budget) -> Vec<(usize, String)> {
+        let restore = !self.restored.load(Ordering::Relaxed);
+        let mut broken = Vec::new();
+        for (index, project) in self.projects.iter().enumerate() {
+            match self.build_target(&project.path, restore, false, budget) {
+                Ok(()) => {}
+                Err(BuildError::OutOfTime) => return Vec::new(),
+                Err(BuildError::Errors(errors)) => {
+                    broken.push((index, errors.into_iter().next().unwrap_or_default()));
+                }
+            }
+        }
+        broken
+    }
+
+    /// Leaves the `broken` test projects (index, first error) out of the
+    /// run, says why, and rewrites the solution of the test projects.
+    fn leave_out(&mut self, broken: &[(usize, String)]) -> bool {
+        for (index, error) in broken {
+            let project = &self.projects[*index];
+            progress(&format!(
+                "{} does not build in the sandbox; leaving it out",
+                project.assembly
+            ));
+            self.skip(
+                &project.path,
+                format!(
+                    "{} was skipped: it does not build in the sandbox, even with no mutant in it ({}); the other test projects ran",
+                    project.assembly,
+                    shorten(error)
+                ),
+            );
+        }
+        let dropped: HashSet<usize> = broken.iter().map(|(index, _)| *index).collect();
+        self.projects = std::mem::take(&mut self.projects)
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| !dropped.contains(index))
+            .map(|(_, project)| project)
+            .collect();
+        write_if_changed(
+            &self.tests,
+            &solution(
+                &self.sandbox,
+                self.projects.iter().map(|p| p.path.as_path()),
+            ),
+        )
+        .is_ok()
+    }
+}
+
+/// What the projects named in a failed build's errors say about it.
+#[derive(Debug, PartialEq)]
+enum Named {
+    /// A project with mutants does not build: its code is what is tested.
+    CodeUnderTest,
+    /// Only test projects fail: (index, first error) of each.
+    Tests(Vec<(usize, String)>),
+    /// Some other project fails, or an error names none: building each test
+    /// project tells which fail.
+    Unknown,
+}
+
+/// Which projects a failed build's errors name. MSBuild ends an error line
+/// with its project: `... [D:\a\A.csproj]`, or `[...A.csproj::TargetFramework=net8.0]`.
+fn named_in(errors: &[String], tests: &[PathBuf], mutated: &[PathBuf]) -> Named {
+    let mutated: HashSet<String> = mutated.iter().map(|p| project_key(p)).collect();
+    let tests: Vec<String> = tests.iter().map(|p| project_key(p)).collect();
+    let mut first: BTreeMap<usize, String> = BTreeMap::new();
+    let mut other = false;
+    for error in errors {
+        let Some(named) = project_named(error) else {
+            other = true;
+            continue;
+        };
+        let key = project_key(Path::new(&named));
+        if mutated.contains(&key) {
+            return Named::CodeUnderTest;
+        }
+        match tests.iter().position(|t| *t == key) {
+            Some(index) => {
+                first.entry(index).or_insert_with(|| error.clone());
+            }
+            None => other = true,
+        }
+    }
+    if other || first.is_empty() {
+        return Named::Unknown;
+    }
+    Named::Tests(first.into_iter().collect())
+}
+
+fn project_named(error: &str) -> Option<String> {
+    let inside = error.trim_end().strip_suffix(']')?;
+    let open = inside.rfind('[')?;
+    let named = inside[open + 1..].split("::").next()?.trim();
+    named
+        .to_ascii_lowercase()
+        .ends_with("proj")
+        .then(|| named.to_string())
+}
+
+/// A project path as MSBuild and dog-food may both write it: absolute,
+/// one kind of slash, one case.
+fn project_key(path: &Path) -> String {
+    let text = absolute(path).to_string_lossy().replace('/', "\\");
+    text.strip_prefix(r"\\?\").unwrap_or(&text).to_lowercase()
+}
+
+/// The projects `project` uses through project references, itself included.
+fn uses(project: &Path) -> HashSet<String> {
+    let mut seen = HashSet::new();
+    let mut waiting = vec![absolute(project)];
+    while let Some(next) = waiting.pop() {
+        if !seen.insert(project_key(&next)) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&next).unwrap_or_default();
+        let folder = next.parent().unwrap_or(Path::new("")).to_path_buf();
+        waiting.extend(
+            project_references(&text)
+                .into_iter()
+                .map(|r| absolute(&folder.join(r))),
+        );
+    }
+    seen
+}
+
+/// The `Include` of each `<ProjectReference>`, with `/` for slashes; ones
+/// built from MSBuild properties are left out.
+fn project_references(text: &str) -> Vec<String> {
+    text.split("<ProjectReference")
+        .skip(1)
+        .filter_map(|tail| {
+            let tag = &tail[..tail.find('>').unwrap_or(tail.len())];
+            let start = tag.find("Include")?;
+            let value = tag[start..].split('"').nth(1)?;
+            (!value.contains("$(")).then(|| value.replace('\\', "/"))
+        })
+        .collect()
+}
+
+/// The first 300 characters of a compiler error.
+fn shorten(error: &str) -> String {
+    let error = error.trim();
+    match error.char_indices().nth(300) {
+        Some((at, _)) => format!("{}...", &error[..at]),
+        None => error.to_string(),
+    }
 }
 
 /// One project's part of a run: its status and results, its assembly, and how long it took.
@@ -1050,23 +1317,21 @@ fn splittable(filter: Option<&str>) -> bool {
 }
 
 /// An error naming the test projects no worker can serve, if any.
-fn refuse_unservable(found: &[(String, Result<Found, String>)]) -> Result<(), String> {
+/// Why none of the test projects can run.
+fn unservable(found: &[(&Project, Result<Found, String>)]) -> String {
     let refused: Vec<String> = found
         .iter()
-        .filter_map(|(assembly, target)| {
+        .filter_map(|(project, target)| {
             target
                 .as_ref()
                 .err()
-                .map(|why| format!("{assembly}: {why}"))
+                .map(|why| format!("{}: {why}", project.assembly))
         })
         .collect();
-    if refused.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "dog-food cannot run these test projects:\n  {}\nExclude them with --exclude-test-project.",
+    format!(
+        "dog-food cannot run any of the test projects:\n  {}",
         refused.join("\n  ")
-    ))
+    )
 }
 
 /// How long a test project's tests must take to earn another baseline worker.
@@ -2230,6 +2495,105 @@ mod tests {
             declared_types("public sealed class PricingTests : IDisposable { record Row(int A); }"),
             ["PricingTests", "Row"]
         );
+    }
+
+    #[test]
+    fn a_failed_build_is_blamed_on_the_projects_its_errors_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let a = root.join("tests").join("A.Tests").join("A.Tests.csproj");
+        let b = root.join("tests").join("B.Tests").join("B.Tests.csproj");
+        let lib = root.join("src").join("Lib").join("Lib.csproj");
+        let other = root.join("src").join("Win").join("Win.csproj");
+        let line = |file: &str, project: &Path, suffix: &str| {
+            format!(
+                "{file}(3,5): error CS0246: The type 'X' could not be found [{}{suffix}]",
+                project.display()
+            )
+        };
+        let tests = [a.clone(), b.clone()];
+        let mutated = [lib.clone()];
+        // Only B's own errors, one of them from a framework of several, in another case.
+        let errors = [
+            line("B.cs", &b, "::TargetFramework=net8.0"),
+            line(
+                "B2.cs",
+                &PathBuf::from(b.to_string_lossy().to_uppercase()),
+                "",
+            ),
+        ];
+        assert_eq!(
+            named_in(&errors, &tests, &mutated),
+            Named::Tests(vec![(1, errors[0].clone())])
+        );
+        // The code under test does not build: no test project is to blame.
+        let errors = [line("B.cs", &b, ""), line("L.cs", &lib, "")];
+        assert_eq!(named_in(&errors, &tests, &mutated), Named::CodeUnderTest);
+        // Another project fails, or an error names none: each test project is built to tell.
+        assert_eq!(
+            named_in(&[line("W.cs", &other, "")], &tests, &mutated),
+            Named::Unknown
+        );
+        assert_eq!(
+            named_in(&["error MSB4025: no project".into()], &tests, &mutated),
+            Named::Unknown
+        );
+    }
+
+    #[test]
+    fn a_skipped_test_project_uses_what_it_references_through_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let write = |relative: &str, text: &str| {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+        };
+        write(
+            "tests/A.Tests/A.Tests.csproj",
+            r#"<Project><ItemGroup>
+  <ProjectReference Include="..\..\src\App\App.csproj" />
+  <ProjectReference Include="$(Root)\src\Gen\Gen.csproj" />
+</ItemGroup></Project>"#,
+        );
+        write(
+            "src/App/App.csproj",
+            r#"<Project><ItemGroup><ProjectReference
+    Include="../Core/Core.csproj"></ProjectReference></ItemGroup></Project>"#,
+        );
+        // A cycle does not loop.
+        write(
+            "src/Core/Core.csproj",
+            r#"<Project><ItemGroup><ProjectReference Include="..\App\App.csproj" /></ItemGroup></Project>"#,
+        );
+        write("src/Other/Other.csproj", "<Project />");
+        let used = uses(&root.join("tests/A.Tests/A.Tests.csproj"));
+        let key = |relative: &str| project_key(&root.join(relative));
+        assert_eq!(
+            used,
+            HashSet::from([
+                key("tests/A.Tests/A.Tests.csproj"),
+                key("src/App/App.csproj"),
+                key("src/Core/Core.csproj"),
+            ])
+        );
+        assert!(!used.contains(&key("src/Other/Other.csproj")));
+    }
+
+    #[test]
+    fn missing_restore_output_asks_for_a_restore() {
+        let missing = r"C:\sdk\Microsoft.NET.Sdk.targets(308,5): error NETSDK1004: Assets file 'C:\s\obj\project.assets.json' not found. Run a NuGet package restore to generate this file. [C:\s\A.Tests.csproj]";
+        assert!(needs_restore(&[missing.to_string()]));
+        assert!(!needs_restore(&["A.cs(1,1): error CS0019: no".to_string()]));
+    }
+
+    #[test]
+    fn a_long_error_is_shortened_on_a_character() {
+        assert_eq!(shorten("  short  "), "short");
+        let long = "é".repeat(400);
+        let short = shorten(&long);
+        assert_eq!(short.chars().count(), 303);
+        assert!(short.ends_with("..."));
     }
 
     #[test]

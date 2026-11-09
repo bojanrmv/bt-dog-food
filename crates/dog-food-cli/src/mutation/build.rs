@@ -41,40 +41,73 @@ struct Rebuild {
     waiting: Vec<Held>,
     /// The groups of suspects in the files for this build: one per function.
     trying: Vec<Held>,
+    /// Whether the compile checks in memory ran (after the first failed build).
+    checked: bool,
+    /// Whether test projects that do not build with no mutant in may be left out.
+    may_drop: bool,
 }
 
+impl Rebuild {
+    fn new(may_drop: bool) -> Rebuild {
+        Rebuild {
+            round: Round::All,
+            waiting: Vec::new(),
+            trying: Vec::new(),
+            checked: false,
+            may_drop,
+        }
+    }
+}
+
+/// `may_drop`: test projects that do not build even with no mutant in the
+/// sandbox are left out, and the others still run.
 pub fn build(
     prepared: &mut Prepared,
     kind: Kind,
     outcomes: &mut HashMap<usize, Outcome>,
     budget: Budget,
+    may_drop: bool,
 ) -> Result<Built, String> {
-    let mut state = Rebuild {
-        round: Round::All,
-        waiting: Vec::new(),
-        trying: Vec::new(),
-    };
-    let mut checked = false;
+    let mut state = Rebuild::new(may_drop);
     for _ in 0..BUILD_ROUNDS {
         match prepared.engine.build(state.round, budget) {
             Ok(()) if state.passed(&mut prepared.files) => return Ok(Built::Done),
             Ok(()) => {}
             Err(BuildError::OutOfTime) => return Ok(Built::OutOfTime),
             Err(BuildError::Errors(errors)) => {
-                state.failed(
-                    prepared.engine.as_ref(),
-                    &mut prepared.files,
-                    &errors,
-                    outcomes,
-                )?;
-                if !std::mem::replace(&mut checked, true) {
-                    check_in_memory(prepared, kind, outcomes, &mut state)?;
-                }
+                build_failed(prepared, kind, outcomes, &mut state, &errors, budget)?;
             }
         }
         sandbox::write(kind, &prepared.files, &prepared.sandbox.dir)?;
     }
     give_up(prepared, kind, outcomes, budget, state)
+}
+
+/// A failed build: with no mutant in, test projects that do not build are
+/// left out when they may be; otherwise the errors decide which mutants
+/// come out, and the first failure starts the compile checks in memory.
+fn build_failed(
+    prepared: &mut Prepared,
+    kind: Kind,
+    outcomes: &mut HashMap<usize, Outcome>,
+    state: &mut Rebuild,
+    errors: &[String],
+    budget: Budget,
+) -> Result<(), String> {
+    if state.may_leave_out(&prepared.files) && prepared.engine.drop_broken(errors, budget) {
+        // The next build is of everything, without them.
+        return Ok(());
+    }
+    state.failed(
+        prepared.engine.as_ref(),
+        &mut prepared.files,
+        errors,
+        outcomes,
+    )?;
+    if !std::mem::replace(&mut state.checked, true) {
+        check_in_memory(prepared, kind, outcomes, state)?;
+    }
+    Ok(())
 }
 
 /// Goes on with the search on compile checks in memory, after a build failed:
@@ -132,6 +165,12 @@ fn check_in_memory(
 }
 
 impl Rebuild {
+    /// Whether a failed build may leave test projects out: one of everything,
+    /// with no mutant in, when that is allowed.
+    fn may_leave_out(&self, files: &[FileMutants]) -> bool {
+        self.may_drop && self.round == Round::All && no_mutants(files)
+    }
+
     /// A check in memory found no error: the groups being tried are innocent,
     /// and the next go in. Returns whether none is left, and the next build is
     /// of everything the tests need.
@@ -220,9 +259,11 @@ impl Rebuild {
         Ok(())
     }
 
-    /// An error nothing ties to a mutant: every mutant comes out, once. If the
-    /// sandbox then builds, a mutant caused it and they go back by function, to
-    /// find which. If it does not, the code does not compile without mutants.
+    /// An error nothing ties to a mutant: every mutant comes out, once, and
+    /// everything the tests need is built. If the sandbox then builds, a mutant
+    /// caused it and they go back by function, to find which. If it does not,
+    /// the code does not compile without mutants (or a test project does not:
+    /// the build leaves it out when it may).
     fn take_all_out(&mut self, files: &mut [FileMutants], errors: &[String]) -> Result<(), String> {
         let all: HashSet<usize> = files
             .iter()
@@ -238,7 +279,8 @@ impl Rebuild {
         let held = take_out(files, &all);
         self.waiting.extend(by_function(files, held));
         self.trying.clear();
-        self.round = Round::Mutated;
+        // Not only the mutated projects: a test project may be what fails.
+        self.round = Round::All;
         Ok(())
     }
 
@@ -366,6 +408,10 @@ fn give_up(
         Err(BuildError::OutOfTime) => Ok(Built::OutOfTime),
         Err(BuildError::Errors(errors)) => Err(build_error(&errors)),
     }
+}
+
+fn no_mutants(files: &[FileMutants]) -> bool {
+    files.iter().all(|f| f.mutants.is_empty())
 }
 
 /// Removes the mutants `ids` from the files and returns them.
@@ -537,17 +583,17 @@ mod tests {
             mutants,
             functions: vec![(2, 4)],
         }];
-        let mut state = Rebuild {
-            round: Round::All,
-            waiting: Vec::new(),
-            trying: Vec::new(),
-        };
+        let mut state = Rebuild::new(true);
         let mut outcomes = HashMap::new();
         let errors = vec!["Other.cs(1,1): error CS1503: nothing to do with a mutant".to_string()];
         state
             .failed(&Nowhere, &mut files, &errors, &mut outcomes)
             .expect("the mutants may have caused it");
         assert!(files[0].mutants.is_empty(), "all out for one clean build");
+        assert!(no_mutants(&files));
+        assert_eq!(state.round, Round::All, "of everything, test projects too");
+        assert!(state.may_leave_out(&files));
+        assert!(!Rebuild::new(false).may_leave_out(&files));
         assert!(outcomes.is_empty(), "nobody is blamed yet");
         assert_eq!(state.waiting.iter().map(Vec::len).sum::<usize>(), count);
         // Still failing with none in: the code itself does not compile.
@@ -574,11 +620,7 @@ mod tests {
             functions: vec![(2, 4), (5, 7)],
         }];
         let mut outcomes = HashMap::new();
-        let mut state = Rebuild {
-            round: Round::All,
-            waiting: Vec::new(),
-            trying: Vec::new(),
-        };
+        let mut state = Rebuild::new(true);
         let mut builds = 0;
         let done = (0..BUILD_ROUNDS).any(|_| {
             builds += 1;
@@ -630,11 +672,7 @@ mod tests {
         }];
         // The build fails, with no mutant on the error's line, while mutant 2 is in.
         let mut outcomes = HashMap::new();
-        let mut state = Rebuild {
-            round: Round::All,
-            waiting: Vec::new(),
-            trying: Vec::new(),
-        };
+        let mut state = Rebuild::new(true);
         let mut rounds = Vec::new();
         let done = (0..BUILD_ROUNDS).any(|_| {
             rounds.push(state.round);

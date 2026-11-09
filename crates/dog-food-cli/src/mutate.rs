@@ -1416,7 +1416,7 @@ fn untested_reason(result: &RunResult, id: usize) -> Option<String> {
 }
 
 /// Each untested step as the reports name it.
-const UNTESTED_WORDS: [(Untested, &str); 7] = [
+const UNTESTED_WORDS: [(Untested, &str); 8] = [
     (Untested::Build, "stopped while building"),
     (Untested::Baseline, "stopped during the baseline test run"),
     (Untested::TestRuns, "its test runs did not finish"),
@@ -1435,6 +1435,10 @@ const UNTESTED_WORDS: [(Untested, &str); 7] = [
     (
         Untested::RunError,
         "its test run could not start (the error is at the end)",
+    ),
+    (
+        Untested::SkippedProject,
+        "no test that ran reaches it, and a test project that was skipped uses this code (see the notes)",
     ),
 ];
 

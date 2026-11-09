@@ -240,7 +240,12 @@ pub fn scan_files(files: &[PathBuf], root: &Path, tests: bool, settings: Setting
     let parsed: Vec<(tokens::Source, Vec<tokens::Block>)> = files
         .par_iter()
         .enumerate()
-        .filter_map(|(index, path)| tokens::blocks(path, index, tests))
+        // A file dog-food fails on is left out, as one that does not parse.
+        .filter_map(|(index, path)| {
+            std::panic::catch_unwind(|| tokens::blocks(path, index, tests))
+                .ok()
+                .flatten()
+        })
         .collect();
     // Number the files again: some did not parse.
     let mut sources = Vec::new();

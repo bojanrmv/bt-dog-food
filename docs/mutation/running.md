@@ -59,6 +59,6 @@ The HTML page is described in [the dashboards](../dashboards.md#mutation).
 | --- | --- |
 | 0 | Done, and the score is not below `--fail-under` (or `break` in `thresholds`) |
 | 1 | The score is below `--fail-under` (or `break`); a run where no mutant counted never fails |
-| 2 | Usage or settings error, or the sandbox does not build without mutants |
+| 2 | Usage or settings error, or the sandbox does not build without mutants (a C# test project that is all that fails is left out instead; see how it works) |
 | 3 | A path does not exist or a file could not be written |
 | 4 | `--max-minutes` ran out; the report shows what was and was not tested |

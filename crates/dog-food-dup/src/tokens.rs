@@ -163,27 +163,31 @@ fn says_generated(line: &str) -> bool {
 /// Node kinds that hold a list of statements, in C#, TypeScript and Rust.
 const BLOCKS: &[&str] = &["block", "statement_block", "switch_section"];
 
-fn collect(node: Node, src: &[u8], file: usize, tests: bool, out: &mut Vec<Block>) {
-    if !tests && is_test_module(node, src) {
-        return;
-    }
-    if BLOCKS.contains(&node.kind()) {
-        out.extend(statement_block(node, src, file));
-    }
-    if is_long_expression(node) {
-        out.push(Block {
-            file,
-            function: enclosing_function(node, src),
-            is_body: false,
-            is_constructor: false,
-            is_expression: true,
-            parameters: parameters(node, src),
-            statements: vec![statement(node, src)],
-        });
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect(child, src, file, tests, out);
+/// Every block under `root`, parents before children. A loop, not
+/// recursion: generated code can nest deeper than the stack goes.
+fn collect(root: Node, src: &[u8], file: usize, tests: bool, out: &mut Vec<Block>) {
+    let mut waiting = vec![root];
+    while let Some(node) = waiting.pop() {
+        if !tests && is_test_module(node, src) {
+            continue;
+        }
+        if BLOCKS.contains(&node.kind()) {
+            out.extend(statement_block(node, src, file));
+        }
+        if is_long_expression(node) {
+            out.push(Block {
+                file,
+                function: enclosing_function(node, src),
+                is_body: false,
+                is_constructor: false,
+                is_expression: true,
+                parameters: parameters(node, src),
+                statements: vec![statement(node, src)],
+            });
+        }
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        waiting.extend(children.into_iter().rev());
     }
 }
 

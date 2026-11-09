@@ -186,6 +186,9 @@ pub enum Untested {
     /// could not be cleared, a worker that would not start); the error is
     /// in `RunResult::run_errors`. Not the budget's doing.
     RunError,
+    /// No test that ran reaches it, and a test project left out of the run
+    /// (it did not build or could not run) uses its code.
+    SkippedProject,
 }
 
 #[derive(Default)]
@@ -252,7 +255,11 @@ impl Untested {
     pub fn by_budget(self) -> bool {
         !matches!(
             self,
-            Untested::NoRunner | Untested::NotCached | Untested::Failed | Untested::RunError
+            Untested::NoRunner
+                | Untested::NotCached
+                | Untested::Failed
+                | Untested::RunError
+                | Untested::SkippedProject
         )
     }
 }
@@ -557,6 +564,18 @@ pub trait Engine: Sync {
     fn notes(&self) -> Vec<String> {
         Vec::new()
     }
+    /// After a build of everything failed with no mutant in the sandbox
+    /// (`errors`), leaves out the test projects that do not build, so the
+    /// others still run. False when none could be left out: every test
+    /// project fails, or the code under test itself does not build.
+    fn drop_broken(&mut self, _errors: &[String], _budget: Budget) -> bool {
+        false
+    }
+    /// Whether a test project left out of the run (it did not build or could
+    /// not run) uses the code in `relative` (a path in the sandbox).
+    fn skipped_may_reach(&self, _relative: &std::path::Path) -> bool {
+        false
+    }
 }
 
 /// How often a mutant goes back in the packs after a run hit its time limit
@@ -587,11 +606,16 @@ pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, Strin
     note_filtered(targets, options, &mut result);
     timings(targets, options, &mut cache, &mut result);
     cache.save()?;
-    // With nothing else to show, a failure is the whole answer.
-    match result.failed.first() {
-        Some(first) if finished == 0 => Err(first.clone()),
-        _ => Ok(result),
+    answer(result, finished)
+}
+
+/// With no language finished, the failures are the whole answer: each of
+/// them, not only the first.
+fn answer(result: RunResult, finished: usize) -> Result<RunResult, String> {
+    if finished == 0 && !result.failed.is_empty() {
+        return Err(result.failed.join("\n"));
     }
+    Ok(result)
 }
 
 /// One language's mutants: from the cache where it has them, the rest
@@ -1068,8 +1092,17 @@ fn run_language(
         "building the sandbox (preparing it took {:.1} s)",
         secs(started)
     ));
-    let mut status = build::build(&mut prepared, scope.kind, &mut result.outcomes, budget);
-    if status.is_err() && scope.roots.as_slice() != std::slice::from_ref(&scope.root) {
+    // A test project that does not build in a sandbox with only the tested
+    // projects may build in a full one: it is only left out of a full one.
+    let full = scope.roots.as_slice() == std::slice::from_ref(&scope.root);
+    let mut status = build::build(
+        &mut prepared,
+        scope.kind,
+        &mut result.outcomes,
+        budget,
+        full,
+    );
+    if status.is_err() && !full {
         result.notes.push("the sandbox with only the tested projects did not build, so the whole repository was copied; set `sandbox = \"full\"` in [mutate] to skip the first attempt".into());
         drop(prepared);
         prepared = prepare(
@@ -1079,7 +1112,13 @@ fn run_language(
             options,
             &result.outcomes,
         )?;
-        status = build::build(&mut prepared, scope.kind, &mut result.outcomes, budget);
+        status = build::build(
+            &mut prepared,
+            scope.kind,
+            &mut result.outcomes,
+            budget,
+            true,
+        );
     }
     result.build += built.elapsed();
     debug!("build", "{:.1} s, {}", secs(built), build_text(&status));
@@ -1129,9 +1168,30 @@ fn run_language(
     )?;
     result.mutants += tested.elapsed();
     log_end(&candidates, result, tested);
+    untested_by_skipped(&prepared, &candidates, result);
     result.notes.extend(prepared.engine.notes());
     mark_untested(&prepared.files, result, Untested::TestRuns);
     Ok(killer_files(killers, &reach))
+}
+
+/// A mutant no test that ran reaches, in code a skipped test project uses,
+/// is not tested rather than without tests: that project's tests may reach
+/// it. Not stored either, so the next run, with the project fixed, tests it.
+fn untested_by_skipped(prepared: &Prepared, candidates: &[usize], result: &mut RunResult) {
+    let candidates: HashSet<usize> = candidates.iter().copied().collect();
+    let unreached: Vec<usize> = prepared
+        .files
+        .iter()
+        .filter(|file| prepared.engine.skipped_may_reach(&file.relative))
+        .flat_map(|file| file.mutants.iter().map(|m| m.id))
+        .filter(|id| {
+            candidates.contains(id) && result.outcomes.get(id) == Some(&Outcome::NoCoverage)
+        })
+        .collect();
+    for id in unreached {
+        result.outcomes.remove(&id);
+        result.untested.insert(id, Untested::SkippedProject);
+    }
 }
 
 fn log_start(prepared: &Prepared, scope: &Scope, options: &Options, started: Instant) {
@@ -2782,6 +2842,32 @@ mod tests {
             err.starts_with("the TypeScript/JavaScript run failed"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn when_both_languages_fail_each_failure_is_told() {
+        let mut result = RunResult::default();
+        failed(
+            sandbox::Kind::CSharp,
+            "the sandbox does not build".into(),
+            &[],
+            &mut result,
+        );
+        failed(sandbox::Kind::Node, "no runner".into(), &[], &mut result);
+        let err = answer(result, 0).err().unwrap();
+        assert_eq!(
+            err,
+            "the C# run failed: the sandbox does not build\nthe TypeScript/JavaScript run failed: no runner"
+        );
+        // One language finished: its results are shown, the failure as a note.
+        let mut result = RunResult::default();
+        failed(
+            sandbox::Kind::CSharp,
+            "the sandbox does not build".into(),
+            &[],
+            &mut result,
+        );
+        assert!(answer(result, 1).is_ok());
     }
 
     #[test]
