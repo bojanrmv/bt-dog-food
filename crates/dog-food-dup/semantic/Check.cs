@@ -106,41 +106,12 @@ static class Check
     /// and all of them are checked again. The others keep the errors they had.</summary>
     static List<string> Round(Dictionary<string, (SyntaxTree Tree, CSharpCompilation Compilation)> current, Dictionary<string, HashSet<string>> known)
     {
-        // Files of one project share a compilation: replace them all first.
-        var replaced = new Dictionary<CSharpCompilation, CSharpCompilation>();
-        var reshaped = new HashSet<CSharpCompilation>();
-        var trees = new Dictionary<string, SyntaxTree>(StringComparer.OrdinalIgnoreCase);
-        foreach (var path in known.Keys)
-        {
-            var text = File.ReadAllText(path);
-            if (Texts.TryGetValue(path, out var last) && last == text)
-            {
-                continue;
-            }
-            Texts[path] = text;
-            var (old, compilation) = current[path];
-            var tree = CSharpSyntaxTree.ParseText(text, Parse, old.FilePath);
-            var shape = Shape(tree.GetRoot());
-            if (!Shapes.TryGetValue(path, out var before) || before != shape)
-            {
-                reshaped.Add(compilation);
-            }
-            Shapes[path] = shape;
-            var latest = replaced.TryGetValue(compilation, out var made) ? made : compilation;
-            replaced[compilation] = latest.ReplaceSyntaxTree(old, tree);
-            trees[path] = tree;
-        }
-        // The next round starts from the files as they are now.
-        foreach (var (path, tree) in trees)
-        {
-            var (_, compilation) = current[path];
-            current[path] = (tree, replaced[compilation]);
-        }
+        var (replaced, reshaped, trees) = Reread(current, known);
         Retarget(current, replaced);
         var whole = reshaped.Select(compilation => replaced[compilation]).ToHashSet();
         var newer = replaced.Values.ToHashSet();
         var stale = known.Keys.Where(path => newer.Contains(current[path].Compilation)
-            && (whole.Contains(current[path].Compilation) || trees.ContainsKey(path)
+            && (whole.Contains(current[path].Compilation) || trees.Contains(path)
                 || (Found.TryGetValue(path, out var had) && had.Count > 0))).ToList();
         var results = new List<string>[stale.Count];
         Parallel.For(0, stale.Count, i =>
@@ -154,6 +125,56 @@ static class Check
             Found[stale[i]] = results[i];
         }
         return known.Keys.SelectMany(path => Found.TryGetValue(path, out var errors) ? errors : []).ToList();
+    }
+
+    /// <summary>Parses the files whose text changed and puts them in their projects' compilations
+    /// (files of one project share one: all are replaced before any is checked). Returns each
+    /// compilation that got a newer one, those of them with a change outside members' bodies, and
+    /// the files that changed.</summary>
+    static (Dictionary<CSharpCompilation, CSharpCompilation> Replaced, HashSet<CSharpCompilation> Reshaped, HashSet<string> Changed) Reread(
+        Dictionary<string, (SyntaxTree Tree, CSharpCompilation Compilation)> current, Dictionary<string, HashSet<string>> known)
+    {
+        var replaced = new Dictionary<CSharpCompilation, CSharpCompilation>();
+        var reshaped = new HashSet<CSharpCompilation>();
+        var trees = new Dictionary<string, SyntaxTree>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in known.Keys.Where(Changed).ToList())
+        {
+            var (old, compilation) = current[path];
+            var tree = CSharpSyntaxTree.ParseText(Texts[path], Parse, old.FilePath);
+            if (Reshaped(path, tree))
+            {
+                reshaped.Add(compilation);
+            }
+            replaced[compilation] = replaced.GetValueOrDefault(compilation, compilation).ReplaceSyntaxTree(old, tree);
+            trees[path] = tree;
+        }
+        // The next round starts from the files as they are now.
+        foreach (var (path, tree) in trees)
+        {
+            current[path] = (tree, replaced[current[path].Compilation]);
+        }
+        return (replaced, reshaped, trees.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Whether a file's text is not what the last round read; it is remembered.</summary>
+    static bool Changed(string path)
+    {
+        var text = File.ReadAllText(path);
+        if (Texts.TryGetValue(path, out var last) && last == text)
+        {
+            return false;
+        }
+        Texts[path] = text;
+        return true;
+    }
+
+    /// <summary>Whether a file's code outside its members' bodies is not what it was; it is remembered.</summary>
+    static bool Reshaped(string path, SyntaxTree tree)
+    {
+        var shape = Shape(tree.GetRoot());
+        var same = Shapes.TryGetValue(path, out var before) && before == shape;
+        Shapes[path] = shape;
+        return !same;
     }
 
     /// <summary>Every file of a project points at the project's newest compilation.</summary>
@@ -196,22 +217,30 @@ static class Check
     {
         for (var child = node; child != within && child.Parent is { } parent; child = parent)
         {
-            switch (parent)
+            if (ArmOf(parent, child) is { } arm)
             {
-                case ConditionalExpressionSyntax choice when child == choice.WhenTrue && Switch(choice.Condition) is { } id:
-                    return (id, choice.WhenFalse);
-                case IfStatementSyntax choice when child == choice.Statement && choice.Else is { } other && Switch(choice.Condition) is { } id:
-                    return (id, other);
-                case ArgumentListSyntax list when child is ArgumentSyntax copy && list.Parent is InvocationExpressionSyntax call && Named(call, "Check"):
-                    var index = list.Arguments.IndexOf(copy);
-                    if (index >= 2 && index % 2 == 0 && list.Arguments[index - 1].Expression is LiteralExpressionSyntax { Token.Value: int probed })
-                    {
-                        return (probed, list.Arguments[0]);
-                    }
-                    break;
+                return arm;
             }
         }
         return null;
+    }
+
+    /// <summary>The mutant whose own code <paramref name="child"/> is, as a part of <paramref name="parent"/>.</summary>
+    static (int Id, SyntaxNode Original)? ArmOf(SyntaxNode parent, SyntaxNode child) => parent switch
+    {
+        ConditionalExpressionSyntax choice when child == choice.WhenTrue => Of(Switch(choice.Condition), choice.WhenFalse),
+        IfStatementSyntax { Else: { } other } choice when child == choice.Statement => Of(Switch(choice.Condition), other),
+        ArgumentListSyntax list when child is ArgumentSyntax copy => Probed(list, list.Arguments.IndexOf(copy)),
+        _ => null,
+    };
+
+    static (int Id, SyntaxNode Original)? Of(int? id, SyntaxNode original) => id is { } found ? (found, original) : null;
+
+    /// <summary>The mutant whose copy is argument <paramref name="index"/> of a probe: <c>Check((original), id, (copy), ...)</c>.</summary>
+    static (int Id, SyntaxNode Original)? Probed(ArgumentListSyntax list, int index)
+    {
+        var copy = index >= 2 && index % 2 == 0 && list.Parent is InvocationExpressionSyntax call && Named(call, "Check");
+        return copy ? Of(list.Arguments[index - 1].Expression is LiteralExpressionSyntax { Token.Value: int id } ? id : null, list.Arguments[0]) : null;
     }
 
     /// <summary>The mutant a switch's condition asks for: <c>DgfMutants.Is(id)</c>.</summary>
@@ -238,14 +267,10 @@ static class Check
     }
 
     /// <summary>The body of a method, constructor, operator or accessor, or of an expression-bodied property.</summary>
-    static bool IsBody(SyntaxNode node) => node.Parent switch
-    {
-        BaseMethodDeclarationSyntax m => node == m.Body || node == m.ExpressionBody,
-        AccessorDeclarationSyntax a => node == a.Body || node == a.ExpressionBody,
-        PropertyDeclarationSyntax p => node == p.ExpressionBody,
-        IndexerDeclarationSyntax i => node == i.ExpressionBody,
-        _ => false,
-    };
+    static bool IsBody(SyntaxNode node) => node is BlockSyntax or ArrowExpressionClauseSyntax && HasBody(node.Parent);
+
+    static bool HasBody(SyntaxNode? member) =>
+        member is BaseMethodDeclarationSyntax or AccessorDeclarationSyntax or PropertyDeclarationSyntax or IndexerDeclarationSyntax;
 
     /// <summary>The member a node is in, by its type and name and parameter count.</summary>
     static string Member(SyntaxNode node)
