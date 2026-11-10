@@ -36,7 +36,7 @@
     <ToolPackageRuntimeIdentifiers Condition="'$(ToolPackageRuntimeIdentifiers)' == ''">$(RuntimeIdentifiers)</ToolPackageRuntimeIdentifiers>
 
     <PackageId>dgf</PackageId>
-    <Version Condition="'$(Version)' == ''">0.1.2</Version>
+    <Version Condition="'$(Version)' == ''">0.1.3</Version>
     <Authors>Bojan Pavlovic</Authors>
     <Title>dog-food (dgf): code complexity, mutation testing and duplicate code</Title>
     <Description>Code-health command-line tool for C#, .NET, TypeScript, JavaScript and Rust. Cyclomatic and cognitive complexity, CRAP scores from code coverage, mutation testing that shows what your unit tests miss, duplicate code and clone detection with how to unite it, and branch checks for pull requests. HTML dashboards, SARIF and CI gates. One fast native binary, no server or account.</Description>
