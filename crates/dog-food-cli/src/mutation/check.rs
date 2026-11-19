@@ -33,6 +33,8 @@ pub struct Checker {
     child: Child,
     input: Option<ChildStdin>,
     lines: Receiver<String>,
+    /// Holds the engine and what it starts, to stop them together.
+    job: Option<exec::cpu::Job>,
     /// How long one check may take, by how many files it reads.
     limit: Duration,
 }
@@ -49,6 +51,7 @@ impl Checker {
         let mut child = command
             .spawn()
             .map_err(|err| format!("could not start the C# engine: {err}"))?;
+        let job = exec::cpu::Job::of(&child);
         let stdout = child.stdout.take().ok_or("no output")?;
         let (sender, lines) = channel();
         std::thread::spawn(move || {
@@ -63,6 +66,7 @@ impl Checker {
             input: child.stdin.take(),
             child,
             lines,
+            job,
             limit: CHECKING + PER_FILE * files_count,
         };
         let request = serde_json::json!({
@@ -112,7 +116,7 @@ impl Checker {
 impl Drop for Checker {
     fn drop(&mut self) {
         self.input = None;
-        exec::kill_tree(&mut self.child, None);
+        exec::kill_tree(&mut self.child, self.job.as_ref());
     }
 }
 

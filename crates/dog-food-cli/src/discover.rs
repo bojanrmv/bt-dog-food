@@ -151,14 +151,7 @@ mod tests {
         let link = dir.path().join("link");
         // A junction, the link Windows makes without extra rights.
         #[cfg(windows)]
-        let linked = std::process::Command::new("cmd")
-            .args(["/c", "mklink", "/J"])
-            .arg(&link)
-            .arg(&real_root)
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .ok_or(());
+        let linked = crate::junction::create(&link, &real_root);
         #[cfg(unix)]
         let linked = std::os::unix::fs::symlink(&real_root, &link);
         if linked.is_err() {

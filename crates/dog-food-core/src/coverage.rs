@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use quick_xml::events::{BytesStart, Event};
-use quick_xml::Reader;
+use quick_xml::events::{BytesRef, BytesStart, Event};
+use quick_xml::{Reader, XmlVersion};
 
 /// Hit counts per line number, for one source file.
 pub type Lines = HashMap<usize, u64>;
@@ -179,17 +179,28 @@ fn lcov_line(data: &str) -> Option<(usize, u64)> {
 /// `<class filename="…">` elements with `<line number="…" hits="…"/>` inside.
 /// Relative file names are joined to the report's single `<source>`, if any.
 pub fn parse_cobertura(text: &str) -> Result<Vec<(String, Lines)>, String> {
-    let mut reader = Reader::from_str(text);
     let mut state = Cobertura::default();
+    each_event(text, "Cobertura", |event| state.read(event))?;
+    Ok(state.finish())
+}
+
+/// Hands every event of the XML in `text` to `each`; `format` names the
+/// report when it is not valid XML.
+fn each_event<'a>(
+    text: &'a str,
+    format: &str,
+    mut each: impl FnMut(Event<'a>),
+) -> Result<(), String> {
+    let mut reader = Reader::from_str(text);
     loop {
         let event = reader
             .read_event()
-            .map_err(|err| format!("not valid Cobertura XML: {err}"))?;
-        if !state.read(event) {
-            break;
+            .map_err(|err| format!("not valid {format} XML: {err}"))?;
+        match event {
+            Event::Eof => return Ok(()),
+            event => each(event),
         }
     }
-    Ok(state.finish())
 }
 
 /// What has been read so far from a Cobertura report.
@@ -197,23 +208,38 @@ pub fn parse_cobertura(text: &str) -> Result<Vec<(String, Lines)>, String> {
 struct Cobertura {
     files: Vec<(String, Lines)>,
     sources: Vec<String>,
-    in_source: bool,
+    /// The text so far of the `<source>` being read.
+    source: Option<String>,
 }
 
 impl Cobertura {
-    /// Takes one XML event; `false` at the end of the document.
-    fn read(&mut self, event: Event) -> bool {
+    /// Takes one XML event.
+    fn read(&mut self, event: Event) {
         match event {
             Event::Start(tag) | Event::Empty(tag) => {
-                self.in_source = tag.name().as_ref() == b"source";
+                self.end_source();
+                self.source = (tag.name().as_ref() == "source").then(String::new);
                 cobertura_tag(&tag, &mut self.files);
             }
-            Event::Text(text) if self.in_source => self.sources.extend(source_text(&text)),
-            Event::End(_) => self.in_source = false,
-            Event::Eof => return false,
+            Event::Text(text) => self.source_text(&text.xml10_content()),
+            // The reader hands `&amp;` in a path over on its own.
+            Event::GeneralRef(entity) => self.source_text(&referenced(&entity)),
+            Event::End(_) => self.end_source(),
             _ => {}
         }
-        true
+    }
+
+    fn source_text(&mut self, text: &str) {
+        if let Some(source) = &mut self.source {
+            source.push_str(text);
+        }
+    }
+
+    fn end_source(&mut self) {
+        let source = self.source.take().unwrap_or_default();
+        if !source.trim().is_empty() {
+            self.sources.push(source.trim().to_string());
+        }
     }
 
     fn finish(mut self) -> Vec<(String, Lines)> {
@@ -229,22 +255,27 @@ impl Cobertura {
     }
 }
 
-fn source_text(text: &quick_xml::events::BytesText) -> Option<String> {
-    let text = text.unescape().ok()?;
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
+/// What `&name;` or `&#number;` stands for: a character, or one of the
+/// five names XML knows. Any other name stands for nothing here.
+fn referenced(entity: &BytesRef) -> String {
+    match entity.resolve_char_ref() {
+        Ok(Some(character)) => character.to_string(),
+        _ => quick_xml::escape::resolve_predefined_entity(entity)
+            .unwrap_or_default()
+            .to_string(),
+    }
 }
 
 fn cobertura_tag(tag: &BytesStart, files: &mut Vec<(String, Lines)>) {
     match tag.name().as_ref() {
-        b"class" => {
-            if let Some(file) = attribute(tag, b"filename") {
+        "class" => {
+            if let Some(file) = attribute(tag, "filename") {
                 files.push((file, Lines::new()));
             }
         }
-        b"line" => {
-            let number = attribute(tag, b"number").and_then(|n| n.parse::<usize>().ok());
-            let hits = attribute(tag, b"hits").and_then(|h| h.parse::<u64>().ok());
+        "line" => {
+            let number = attribute(tag, "number").and_then(|n| n.parse::<usize>().ok());
+            let hits = attribute(tag, "hits").and_then(|h| h.parse::<u64>().ok());
             if let (Some(number), Some(hits), Some((_, lines))) = (number, hits, files.last_mut()) {
                 // A line can appear under both <methods> and <lines>; keep the higher count.
                 let entry = lines.entry(number).or_insert(0);
@@ -259,18 +290,12 @@ fn cobertura_tag(tag: &BytesStart, files: &mut Vec<(String, Lines)>) {
 /// sl="…" el="…" fileid="…"/>` with the hit count of lines `sl..=el`. File
 /// ids are numbered per `<Module>`.
 pub fn parse_opencover(text: &str) -> Result<Vec<(String, Lines)>, String> {
-    let mut reader = Reader::from_str(text);
     let mut state = OpenCover::default();
-    loop {
-        let event = reader
-            .read_event()
-            .map_err(|err| format!("not valid OpenCover XML: {err}"))?;
-        match event {
-            Event::Start(tag) | Event::Empty(tag) => state.tag(&tag),
-            Event::Eof => break,
-            _ => {}
+    each_event(text, "OpenCover", |event| {
+        if let Event::Start(tag) | Event::Empty(tag) = event {
+            state.tag(&tag);
         }
-    }
+    })?;
     Ok(state.finish())
 }
 
@@ -285,26 +310,25 @@ struct OpenCover {
 impl OpenCover {
     fn tag(&mut self, tag: &BytesStart) {
         match tag.name().as_ref() {
-            b"Module" => self.module += 1,
-            b"File" => {
-                if let (Some(uid), Some(path)) =
-                    (attribute(tag, b"uid"), attribute(tag, b"fullPath"))
+            "Module" => self.module += 1,
+            "File" => {
+                if let (Some(uid), Some(path)) = (attribute(tag, "uid"), attribute(tag, "fullPath"))
                 {
                     self.paths.insert((self.module, uid), path);
                 }
             }
-            b"SequencePoint" => self.sequence_point(tag),
+            "SequencePoint" => self.sequence_point(tag),
             _ => {}
         }
     }
 
     fn sequence_point(&mut self, tag: &BytesStart) {
-        let number = |name: &[u8]| attribute(tag, name).and_then(|v| v.parse::<usize>().ok());
+        let number = |name: &str| attribute(tag, name).and_then(|v| v.parse::<usize>().ok());
         let (Some(hits), Some(start), Some(end), Some(file)) = (
-            number(b"vc"),
-            number(b"sl"),
-            number(b"el"),
-            attribute(tag, b"fileid"),
+            number("vc"),
+            number("sl"),
+            number("el"),
+            attribute(tag, "fileid"),
         ) else {
             return;
         };
@@ -324,11 +348,13 @@ impl OpenCover {
     }
 }
 
-fn attribute(tag: &BytesStart, name: &[u8]) -> Option<String> {
-    tag.attributes()
+fn attribute(tag: &BytesStart, name: &str) -> Option<String> {
+    let found = tag
+        .attributes()
         .flatten()
-        .find(|attr| attr.key.as_ref() == name)
-        .and_then(|attr| attr.unescape_value().ok().map(|v| v.into_owned()))
+        .find(|attr| attr.key.as_ref() == name)?;
+    let value = found.normalized_value(XmlVersion::Implicit1_0).ok()?;
+    Some(value.into_owned())
 }
 
 #[cfg(test)]
@@ -394,6 +420,29 @@ mod tests {
         assert!(files[0].0.starts_with("D:"));
         assert_eq!(files[0].1.get(&10), Some(&3));
         assert_eq!(files[0].1.get(&11), Some(&0));
+    }
+
+    /// `R&D` is written `R&amp;D` (or with the character's number) in XML.
+    #[test]
+    fn a_folder_with_an_ampersand_in_its_name_is_read_whole() {
+        let report = r#"<coverage>
+  <sources><source>
+    /work/R&amp;D &#x26; more/
+  </source></sources>
+  <packages><package><classes>
+    <class filename="src/A&amp;B.cs"><lines><line number="1" hits="2"/></lines></class>
+  </classes></package></packages>
+</coverage>"#;
+        let files = parse_cobertura(report).unwrap();
+        let file = files[0].0.replace('\\', "/");
+        assert_eq!(file, "/work/R&D & more/src/A&B.cs");
+        assert_eq!(files[0].1.get(&1), Some(&2));
+        // Two sources: the files stay as the report names them.
+        let two = report.replace(
+            "</source>",
+            "</source><source>/other &unknown; one/</source>",
+        );
+        assert_eq!(parse_cobertura(&two).unwrap()[0].0, "src/A&B.cs");
     }
 
     #[test]

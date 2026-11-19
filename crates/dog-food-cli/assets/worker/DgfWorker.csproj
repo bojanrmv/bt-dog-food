@@ -8,6 +8,12 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <RollForward>Major</RollForward>
+    <!-- What the file's properties show: every file a release ships says what it is part of. -->
+    <Product>dog-food (dgf)</Product>
+    <Company>Bojan Pavlovic</Company>
+    <Copyright>Copyright (c) Bojan Pavlovic. MIT license.</Copyright>
+    <AssemblyTitle>dog-food (dgf) test worker</AssemblyTitle>
+    <RepositoryUrl>https://github.com/bojanrmv/bt-dog-food</RepositoryUrl>
   </PropertyGroup>
   <ItemGroup>
     <!-- Compiled against an old object model; the test project's own copy loads at run time. -->

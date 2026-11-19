@@ -71,6 +71,9 @@ warn = 10
 # max_minutes = 45
 # "closure": copy only the projects the tests need (default); "full": the whole repository.
 # sandbox = "closure"
+# Where the sandbox is kept instead of the temp folder: outside the repository, and
+# short. `~/` is the home folder. The DGF_SANDBOX_DIR environment variable wins.
+# sandbox_dir = "~/dgf-sandbox"
 # Which mutators run: basic, standard (default), advanced.
 # level = "standard"
 # Mutators never made, by name.
@@ -118,6 +121,8 @@ pub struct MutateConfig {
     pub cache_dir: Option<String>,
     pub max_minutes: Option<f64>,
     pub sandbox: Option<SandboxMode>,
+    /// Where the sandbox is kept instead of the temp folder.
+    pub sandbox_dir: Option<String>,
     /// `basic`, `standard` (default) or `advanced`.
     pub level: Option<String>,
     /// Mutators never made, by name.
@@ -255,9 +260,67 @@ pub fn parse(text: &str) -> Result<Config, toml::de::Error> {
     toml::from_str(text)
 }
 
+/// A folder a setting names: relative to `config_dir`, where dgf.toml is,
+/// and `~/` is the home folder.
+pub fn folder(dir: &str, config_dir: &Path) -> PathBuf {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    match (dir.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => config_dir.join(dir),
+    }
+}
+
+/// Where the mutation sandbox is kept when not in the temp folder: what the
+/// DGF_SANDBOX_DIR environment variable holds (`variable`), which is one
+/// machine's choice, else `sandbox_dir` in dgf.toml.
+pub fn sandbox_dir(
+    variable: Option<String>,
+    mutate: &MutateConfig,
+    config_dir: &Path,
+) -> Option<PathBuf> {
+    variable
+        .filter(|dir| !dir.trim().is_empty())
+        .or_else(|| mutate.sandbox_dir.clone())
+        .map(|dir| folder(&dir, config_dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sandbox_folder_is_the_machines_choice_then_the_files() {
+        let beside = Path::new("repo");
+        let file = parse("[mutate]\nsandbox_dir = \"../sandboxes\"")
+            .unwrap()
+            .mutate;
+        let none = MutateConfig::default();
+        assert_eq!(sandbox_dir(None, &none, beside), None);
+        assert_eq!(
+            sandbox_dir(None, &file, beside),
+            Some(beside.join("../sandboxes"))
+        );
+        // A variable that is set but empty chooses nothing.
+        assert_eq!(
+            sandbox_dir(Some(" ".into()), &file, beside),
+            Some(beside.join("../sandboxes"))
+        );
+        let machine = if cfg!(windows) { r"D:\sb" } else { "/sb" };
+        assert_eq!(
+            sandbox_dir(Some(machine.into()), &file, beside),
+            Some(PathBuf::from(machine))
+        );
+        assert_eq!(
+            sandbox_dir(Some(machine.into()), &none, beside),
+            Some(PathBuf::from(machine))
+        );
+        // `~/` is the home folder, not a folder named `~` beside dgf.toml.
+        let home = folder("~/sandboxes", beside);
+        assert!(
+            home.is_absolute() && home.ends_with("sandboxes"),
+            "{home:?}"
+        );
+    }
 
     #[test]
     fn template_parses_to_defaults() {
@@ -294,6 +357,7 @@ dir = \"reports/history\"",
             "[mutate]\ntest_filter = \"FullyQualifiedName~Pricing\"\n\
              exclude_test_projects = [\"**/*.Acceptance.Tests.csproj\"]\n\
              max_minutes = 45\nsandbox = \"full\"\nlevel = \"basic\"\n\
+             sandbox_dir = \"~/dgf-sandbox\"\n\
              ignore_methods = [\"*Log*\"]\nignore_mutators = [\"string\"]",
         )
         .unwrap();
@@ -311,6 +375,7 @@ dir = \"reports/history\"",
         assert_eq!(config.mutate.exclude_test_projects.len(), 1);
         assert_eq!(config.mutate.max_minutes, Some(45.0));
         assert_eq!(config.mutate.sandbox, Some(SandboxMode::Full));
+        assert_eq!(config.mutate.sandbox_dir.as_deref(), Some("~/dgf-sandbox"));
         let many = parse("[mutate]\ntest_filter = [\"A:x\", \"B:y\"]").unwrap();
         assert_eq!(many.mutate.test_filter, ["A:x", "B:y"]);
     }

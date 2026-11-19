@@ -1,0 +1,29 @@
+# Known vulnerabilities in the crates Cargo.lock names (the RustSec advisory
+# database): when the dependencies change, and every week, since an advisory
+# can come out for a crate that has not changed here.
+name: audit
+
+on:
+  push:
+    branches: [main]
+    paths: ['**/Cargo.toml', 'Cargo.lock', '.github/workflows/audit.yml']
+  pull_request:
+    paths: ['**/Cargo.toml', 'Cargo.lock', '.github/workflows/audit.yml']
+  schedule:
+    - cron: '17 6 * * 1'   # Mondays
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit

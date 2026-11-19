@@ -75,4 +75,20 @@ cargo install --git https://github.com/bojanrmv/bt-dog-food dog-food-cli --locke
 cargo uninstall dog-food-cli                                                                # remove
 ```
 
+## Check what you installed
+
+Releases made after 0.1.4 can be checked. Each GitHub release has a `SHA256SUMS` file with the SHA-256 of every download and of every `dgf` binary, and a signed statement (a build provenance attestation) that those files were built by this repository's release workflow from that version's tag. The binary a .NET tool install puts on disk is the same file, so it can be checked too:
+
+```powershell
+$dgf = Get-ChildItem "$env:USERPROFILE\.dotnet\tools\.store\dgf" -Recurse -Filter dgf.exe | Select-Object -Last 1
+(Get-FileHash $dgf.FullName -Algorithm SHA256).Hash                      # the same as in SHA256SUMS
+gh attestation verify $dgf.FullName --repo bojanrmv/bt-dog-food          # needs the GitHub CLI
+```
+
+On Windows, the file's properties (Details) name the product, its version and where the source is.
+
+## Security software
+
+The binaries are not code-signed yet, and a new unsigned program that few machines have seen is what antivirus software distrusts most. If it stops `dgf`, or someone has to decide whether `dgf` may run: [for administrators and security teams](security-software.md) says what each command reads, writes and starts, which one folder `dgf mutate --run` builds and runs code in, how to check a copy, and how to report a false positive.
+
 Next: [set it up in a repository](setup-in-another-repo.md).

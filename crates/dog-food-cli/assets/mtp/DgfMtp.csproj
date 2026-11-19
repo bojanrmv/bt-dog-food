@@ -8,6 +8,12 @@
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <NoWarn>$(NoWarn);CS1591;CS8632</NoWarn>
     <RollForward>Major</RollForward>
+    <!-- What the file's properties show: every file a release ships says what it is part of. -->
+    <Product>dog-food (dgf)</Product>
+    <Company>Bojan Pavlovic</Company>
+    <Copyright>Copyright (c) Bojan Pavlovic. MIT license.</Copyright>
+    <AssemblyTitle>dog-food (dgf) test worker for Microsoft.Testing.Platform</AssemblyTitle>
+    <RepositoryUrl>https://github.com/bojanrmv/bt-dog-food</RepositoryUrl>
   </PropertyGroup>
   <ItemGroup>
     <!-- Microsoft's client for the Microsoft.Testing.Platform server mode, as source. -->

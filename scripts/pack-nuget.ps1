@@ -21,12 +21,12 @@ foreach ($dir in "native", "engine", "nupkg") {
 $native = New-Item -ItemType Directory -Force (Join-Path $package "native/$Rid")
 Copy-Item (Join-Path $repo "target/release/dgf.exe") $native -ErrorAction Stop
 
-dotnet publish (Join-Path $repo "crates/dog-food-dup/semantic") -c Release -o (Join-Path $package "engine") -p:SatelliteResourceLanguages=en -p:UseAppHost=false
+dotnet publish (Join-Path $repo "crates/dog-food-dup/semantic") -c Release -o (Join-Path $package "engine") -p:SatelliteResourceLanguages=en -p:UseAppHost=false "-p:Version=$version"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-dotnet publish (Join-Path $repo "crates/dog-food-cli/assets/mtp") -c Release -o (Join-Path $package "engine/mtp") -p:SatelliteResourceLanguages=en -p:UseAppHost=false
+dotnet publish (Join-Path $repo "crates/dog-food-cli/assets/mtp") -c Release -o (Join-Path $package "engine/mtp") -p:SatelliteResourceLanguages=en -p:UseAppHost=false "-p:Version=$version"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-dotnet publish (Join-Path $repo "crates/dog-food-cli/assets/worker") -c Release -o (Join-Path $package "engine/worker") -p:SatelliteResourceLanguages=en -p:UseAppHost=false
+dotnet publish (Join-Path $repo "crates/dog-food-cli/assets/worker") -c Release -o (Join-Path $package "engine/worker") -p:SatelliteResourceLanguages=en -p:UseAppHost=false "-p:Version=$version"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
 dotnet pack $package -c Release "-p:Version=$version" "-p:ToolPackageRuntimeIdentifiers=$Rid"

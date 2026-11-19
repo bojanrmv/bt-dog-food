@@ -96,6 +96,8 @@ pub struct Options {
     pub cache_dir: PathBuf,
     pub tests: TestSelection,
     pub sandbox: SandboxMode,
+    /// Where the sandboxes are kept, when not in the temp folder.
+    pub sandbox_dir: Option<PathBuf>,
     pub budget: Budget,
     pub timeouts: Timeouts,
     /// `dotnet build -m:N`.
@@ -598,6 +600,9 @@ const CUT_SHORT: u32 = 3;
 const PACK_TESTS: usize = 200;
 
 pub fn run(targets: &mut [Target], options: &Options) -> Result<RunResult, String> {
+    if let Some(dir) = &options.sandbox_dir {
+        sandbox::keep_in(dir, &options.root)?;
+    }
     number(targets);
     let mut result = RunResult {
         jobs: options.jobs,
@@ -2187,6 +2192,7 @@ mod tests {
             cache_dir: root.join(".cache"),
             tests: TestSelection::default(),
             sandbox: SandboxMode::Closure,
+            sandbox_dir: None,
             budget: Budget::default(),
             timeouts: Timeouts::default(),
             build_jobs: None,

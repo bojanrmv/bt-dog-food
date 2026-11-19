@@ -1,6 +1,6 @@
 //! The sandbox: a copy of the parts of the repository the tests need, in the
-//! temp folder, where the chosen functions get mutant switches. Your working
-//! tree is never touched.
+//! temp folder (or the folder `sandbox_dir` names), where the chosen
+//! functions get mutant switches. Your working tree is never touched.
 //!
 //! The copy is kept between runs and brought up to date file by file, so the
 //! build output in it stays and the next build only compiles what changed.
@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use dog_food_core::mutate::{schemata_probed, schemata_typed};
@@ -192,7 +193,57 @@ fn lock_file(dir: &Path) -> Result<std::fs::File, String> {
         .map_err(|err| format!("{}: {err}", path.display()))
 }
 
-/// `%TEMP%/dgf-mutate/<folder>-<hash of its path>-<kind>`: outside the
+/// The folder the user chose for the sandboxes, when one was chosen.
+static CHOSEN: OnceLock<PathBuf> = OnceLock::new();
+
+/// Keeps the sandboxes, and the test workers dgf builds, in `dir` from now
+/// on: for machines where programs may not build and run code in the temp
+/// folder. `dir` has to be outside the repository `root` is in, as
+/// [`sandbox_dir`] tells.
+pub fn keep_in(dir: &Path, root: &Path) -> Result<(), String> {
+    let repository = crate::git::repository(root).unwrap_or_else(|| root.to_path_buf());
+    if within(dir, &repository) || within(dir, root) {
+        return Err(format!(
+            "the sandbox folder {} is inside the repository, where a build in it finds the repository's settings twice: choose a folder outside {}",
+            dir.display(),
+            repository.display()
+        ));
+    }
+    std::fs::create_dir_all(dir).map_err(|err| {
+        format!(
+            "could not create the sandbox folder {}: {err}",
+            dir.display()
+        )
+    })?;
+    let _ = CHOSEN.set(real(dir).unwrap_or_else(|| absolute(dir)));
+    Ok(())
+}
+
+/// Whether `dir` is `folder` or in it. Windows does not tell `D:\Repo` from
+/// `d:\repo`.
+fn within(dir: &Path, folder: &Path) -> bool {
+    let key = |path: &Path| {
+        let text = absolute(path).to_string_lossy().replace('\\', "/");
+        PathBuf::from(if cfg!(windows) {
+            text.to_lowercase()
+        } else {
+            text
+        })
+    };
+    key(dir).starts_with(key(folder))
+}
+
+/// Where the sandboxes and the test workers dgf builds are kept: the chosen
+/// folder, else `dgf-mutate` in the temp folder.
+pub fn home() -> PathBuf {
+    CHOSEN
+        .get()
+        .cloned()
+        .unwrap_or_else(|| temp_root().join("dgf-mutate"))
+}
+
+/// `<home>/<folder>-<hash of its path>-<kind>`, where [`home`] is
+/// `%TEMP%/dgf-mutate` unless another folder was chosen: outside the
 /// repository, so its Directory.Build.props, global.json and package.json are
 /// not found twice, and short, so deep build output stays under Windows'
 /// 260-character path limit.
@@ -210,15 +261,13 @@ fn sandbox_dir(root: &Path, kind: Kind) -> PathBuf {
         .take(24)
         .collect();
     let hash = super::fnv(&[root.to_string_lossy().as_bytes()]) as u32;
-    temp_root()
-        .join("dgf-mutate")
-        .join(format!("{name}-{hash:08x}-{}", kind.folder()))
+    home().join(format!("{name}-{hash:08x}-{}", kind.folder()))
 }
 
 /// The temp folder by its full, real path: on Windows %TEMP% can be an 8.3
 /// short name (`C:\Users\BOJAN~1.PAV\...`), and tools that resolve the long
 /// name (Vite, Node) then fail to match paths under the short one.
-pub fn temp_root() -> PathBuf {
+fn temp_root() -> PathBuf {
     let temp = std::env::temp_dir();
     crate::discover::real(&temp).unwrap_or(temp)
 }
@@ -552,23 +601,8 @@ fn relink(target: &Path, at: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn link(target: &Path, at: &Path) -> Result<(), String> {
-    // cmd reads `/repos` in `D:/repos` (as git prints paths) as a switch.
-    let native = |p: &Path| p.to_string_lossy().replace('/', "\\");
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
-        .arg(native(at))
-        .arg(native(target))
-        .output()
-        .map_err(|err| err.to_string())?;
-    if status.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "could not link {}: {}",
-            at.display(),
-            String::from_utf8_lossy(&status.stderr)
-        ))
-    }
+    crate::junction::create(at, target)
+        .map_err(|err| format!("could not link {}: {err}", at.display()))
 }
 
 #[cfg(not(windows))]
@@ -763,6 +797,27 @@ mod tests {
                 "src/Shop/A.cs",
                 "src/Shop/Shop.csproj",
             ]
+        );
+    }
+
+    #[test]
+    fn a_sandbox_folder_inside_the_repository_is_refused() {
+        let root = tree(&[("src/A.cs", "a")]);
+        let inside = root.path().join("build/sandboxes");
+        let err = keep_in(&inside, root.path()).unwrap_err();
+        assert!(err.contains("inside the repository"), "{err}");
+        assert!(!inside.exists(), "nothing is created there");
+        assert!(keep_in(root.path(), root.path()).is_err());
+
+        assert!(within(Path::new("/r/a/b"), Path::new("/r/a")));
+        assert!(within(Path::new("/r/a/x/../b"), Path::new("/r/a")));
+        // A folder beside it whose name only starts the same is outside.
+        assert!(!within(Path::new("/r/a-sandbox"), Path::new("/r/a")));
+        assert!(!within(Path::new("/r"), Path::new("/r/a")));
+        assert_eq!(
+            within(Path::new("/R/A/b"), Path::new("/r/a")),
+            cfg!(windows),
+            "only Windows reads both spellings as one folder"
         );
     }
 

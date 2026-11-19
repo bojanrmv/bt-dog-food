@@ -1,9 +1,13 @@
 # Release: a version tag (v0.2.0, or v0.2.0-rc.1 for a prerelease) builds
 # dgf for every platform, packs the `dgf` .NET tool, installs it on Windows,
 # Linux and macOS and runs it, then, after approval in the `nuget`
-# environment, pushes it to nuget.org and creates the GitHub release.
+# environment, pushes it to nuget.org and creates the GitHub release, with
+# the checksums of the files and an attestation of where they were built.
 # Run by hand (workflow_dispatch), it does everything but publish.
 # See docs/releasing.md.
+#
+# Actions are named by commit, so a tag that is moved later changes nothing
+# here; the comment gives the version that commit is.
 name: release
 
 on:
@@ -20,7 +24,7 @@ jobs:
     outputs:
       version: ${{ steps.read.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: read
         name: The version in Cargo.toml, which a tag must match
         shell: bash
@@ -45,9 +49,10 @@ jobs:
           - { rid: osx-arm64,   os: macos-latest,     target: aarch64-apple-darwin }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       # Linux binaries are static (musl), so they run on any distribution.
       - if: runner.os == 'Linux'
@@ -64,7 +69,7 @@ jobs:
           mkdir -p out
           cp target/"$TARGET"/release/dgf target/"$TARGET"/release/dgf.exe out/ 2>/dev/null || true
           ls out/dgf*
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: native-${{ matrix.rid }}
           path: out/*
@@ -75,11 +80,11 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 10.0.x
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: native-*
           path: packaging/nuget/native
@@ -92,8 +97,8 @@ jobs:
           -p:UseAppHost=false -p:SatelliteResourceLanguages=en "-p:Version=$VERSION"
       - name: The test workers, so users need no build or feed for them
         run: |
-          dotnet publish crates/dog-food-cli/assets/mtp -c Release -o packaging/nuget/engine/mtp -p:UseAppHost=false -p:SatelliteResourceLanguages=en
-          dotnet publish crates/dog-food-cli/assets/worker -c Release -o packaging/nuget/engine/worker -p:UseAppHost=false -p:SatelliteResourceLanguages=en
+          dotnet publish crates/dog-food-cli/assets/mtp -c Release -o packaging/nuget/engine/mtp -p:UseAppHost=false -p:SatelliteResourceLanguages=en "-p:Version=$VERSION"
+          dotnet publish crates/dog-food-cli/assets/worker -c Release -o packaging/nuget/engine/worker -p:UseAppHost=false -p:SatelliteResourceLanguages=en "-p:Version=$VERSION"
       - name: Pack the dgf tool and dgf-dup-cs
         run: |
           dotnet pack packaging/nuget -c Release "-p:Version=$VERSION"
@@ -117,11 +122,21 @@ jobs:
             fi
           done
           ls -la archives
-      - uses: actions/upload-artifact@v4
+      # The SHA-256 of every download, and of every dgf binary by itself: the
+      # binary a .NET tool install puts on disk is that same file.
+      - name: Checksums
+        run: |
+          {
+            (cd archives && sha256sum -- *)
+            sha256sum -- "dgf-$VERSION"-*/dgf "dgf-$VERSION"-*/dgf.exe
+          } > SHA256SUMS
+          mv SHA256SUMS archives/SHA256SUMS
+          cat archives/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nupkg
           path: packaging/nuget/nupkg/*.nupkg
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: archives
           path: archives/*
@@ -136,11 +151,11 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 10.0.x
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nupkg
           path: nupkg
@@ -154,6 +169,12 @@ jobs:
           $dgf analyze crates --format markdown > /dev/null
           # The bundled C# engine: type-4 groups need it.
           $dgf dup crates/dog-food-dup/tests/corpus/csharp --tests --semantic --format agent | grep -q "type 4"
+      # A program file that does not name its product, author and version is
+      # anonymous to Windows and to security software: none of ours may be.
+      - name: The files say what they are
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-package.ps1 -Path "nupkg/dgf.win-x64.$env:VERSION.nupkg" -NoScan
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -162,22 +183,36 @@ jobs:
     environment: nuget          # approval before anything is published
     permissions:
       contents: write           # the GitHub release
-      id-token: write           # nuget.org trusted publishing
+      id-token: write           # nuget.org trusted publishing; signs the attestation
+      attestations: write       # where the files were built, for anyone to check
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 10.0.x
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nupkg
           path: nupkg
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: archives
           path: archives
-      - uses: NuGet/login@v1
+      # Before anything is published: a signed statement that the files in
+      # SHA256SUMS were built by this workflow from this tag. To check one:
+      #   gh attestation verify dgf.exe --repo <owner>/<repository>
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest
+        with:
+          subject-checksums: archives/SHA256SUMS
+      # The statement itself goes into the release, for checking a file on a
+      # machine that cannot ask GitHub for it (--bundle).
+      - name: The attestation as a download
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$BUNDLE" "archives/dgf-$VERSION.attestation.jsonl"
+      - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: login
         with:
           user: ${{ secrets.NUGET_USER }}
@@ -196,5 +231,10 @@ jobs:
         run: |
           prerelease=()
           if [[ "$VERSION" == *-* ]]; then prerelease=(--prerelease); fi
+          # Above GitHub's generated notes: how to check what was downloaded.
+          cat > notes.md <<NOTES
+          **Checking a download.** \`SHA256SUMS\` has the SHA-256 of every file here and of every \`dgf\` binary by itself: the one \`dotnet tool install -g dgf\` puts on disk is the same file. Each was built by this repository's release workflow from the tag \`v$VERSION\`, which \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\` confirms. More in [SECURITY.md](https://github.com/$GITHUB_REPOSITORY/blob/v$VERSION/SECURITY.md).
+
+          NOTES
           gh release create "v$VERSION" archives/* --repo "$GITHUB_REPOSITORY" \
-            --title "dgf $VERSION" --generate-notes "${prerelease[@]}"
+            --title "dgf $VERSION" --generate-notes --notes-file notes.md "${prerelease[@]}"

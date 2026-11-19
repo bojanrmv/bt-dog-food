@@ -2184,9 +2184,7 @@ fn built(
     what: &str,
 ) -> Result<PathBuf, String> {
     let version = super::fnv(&[source.as_bytes(), project.as_bytes()]);
-    let dir = super::sandbox::temp_root()
-        .join("dgf-mutate")
-        .join(format!("{name}-{version:016x}"));
+    let dir = super::sandbox::home().join(format!("{name}-{version:016x}"));
     let dll = dir.join("out").join(format!("{assembly}.dll"));
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     let lock = std::fs::File::create(dir.with_extension("lock")).map_err(|err| err.to_string())?;

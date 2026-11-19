@@ -39,6 +39,8 @@ mod coverage;
 mod discover;
 mod git;
 mod history;
+#[cfg(windows)]
+mod junction;
 mod limits;
 mod mutate;
 mod mutation;
@@ -880,6 +882,11 @@ fn mutation_options(args: &MutateArgs, settings: &Settings) -> mutation::Options
             exclude,
         },
         sandbox: args.sandbox.or(config.sandbox).unwrap_or_default(),
+        sandbox_dir: config::sandbox_dir(
+            std::env::var("DGF_SANDBOX_DIR").ok(),
+            config,
+            &settings.config_dir,
+        ),
         budget: mutation::Budget::minutes(args.max_minutes.or(config.max_minutes)),
         root,
     }
@@ -890,16 +897,12 @@ fn default_jobs() -> usize {
     std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1))
 }
 
-/// `[mutate] cache_dir` relative to dgf.toml (`~/` is the home folder), else
-/// `.dgf/mutation-cache` in the repository.
+/// `[mutate] cache_dir` (see [`config::folder`]), else `.dgf/mutation-cache`
+/// in the repository.
 fn cache_dir(root: &Path, settings: &Settings) -> PathBuf {
-    let Some(dir) = settings.config.mutate.cache_dir.as_deref() else {
-        return root.join(mutation::cache::DEFAULT_DIR);
-    };
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
-    match (dir.strip_prefix("~/"), home) {
-        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
-        _ => settings.config_dir.join(dir),
+    match settings.config.mutate.cache_dir.as_deref() {
+        Some(dir) => config::folder(dir, &settings.config_dir),
+        None => root.join(mutation::cache::DEFAULT_DIR),
     }
 }
 

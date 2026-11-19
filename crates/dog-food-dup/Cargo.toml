@@ -4,6 +4,9 @@ description = "Finds code that is the same apart from names and values, and says
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
 default-run = "dgf-dup"
 
 [[bin]]

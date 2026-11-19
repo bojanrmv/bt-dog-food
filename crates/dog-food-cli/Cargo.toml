@@ -4,6 +4,9 @@ description = "Command-line interface for dgf"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [[bin]]
 name = "dgf"
@@ -20,6 +23,10 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 quick-xml.workspace = true
+
+# dgf.exe's version resource and manifest: see build.rs.
+[target.'cfg(windows)'.build-dependencies]
+winresource = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 jsonschema = { version = "0.60.2", default-features = false }

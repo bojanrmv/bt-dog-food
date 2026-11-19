@@ -63,4 +63,8 @@ dotnet tool run dgf analyze
 - [Duplication](https://github.com/bojanrmv/bt-dog-food/blob/main/docs/duplication/README.md)
 - [Issues](https://github.com/bojanrmv/bt-dog-food/issues)
 
+## Is it safe to run
+
+`dgf` is open source, has no network code and asks for no administrator rights. Every release is built from its tag by the repository's release workflow, and carries checksums and a signed build attestation, so the binary this package installs can be checked: `gh attestation verify <path to dgf> --repo bojanrmv/bt-dog-food`. The binaries are not code-signed yet; if antivirus software stops `dgf`, see [for administrators and security teams](https://github.com/bojanrmv/bt-dog-food/blob/main/docs/security-software.md) and the [security policy](https://github.com/bojanrmv/bt-dog-food/blob/main/SECURITY.md).
+
 MIT licensed.

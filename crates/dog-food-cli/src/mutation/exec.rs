@@ -103,45 +103,55 @@ impl Spare {
     }
 }
 
-/// Test runners start processes of their own; stop all of them.
+/// Test runners start processes of their own; stop all of them. On Windows
+/// the `job` holds them all, whoever started them, and ends them in one
+/// call; without one only `child` itself is stopped.
 pub fn kill_tree(child: &mut Child, job: Option<&cpu::Job>) {
     let started = Instant::now();
     if let Some(job) = job {
         job.terminate();
     }
     let terminated = started.elapsed();
-    if cfg!(windows) {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .output();
-    }
-    let tree = started.elapsed();
     let _ = child.kill();
     let _ = child.wait();
     let total = started.elapsed();
     if total >= Duration::from_secs(1) {
         debug!(
             "stop",
-            "pid {}: stopping took {:.2} s (job {:.2} s, process tree {:.2} s, waiting for its end {:.2} s)",
+            "pid {}: stopping took {:.2} s (job {:.2} s, waiting for its end {:.2} s)",
             child.id(),
             total.as_secs_f64(),
             terminated.as_secs_f64(),
-            (tree - terminated).as_secs_f64(),
-            (total - tree).as_secs_f64()
+            (total - terminated).as_secs_f64()
         );
     }
 }
 
-/// Stops one process and what it started.
+/// Stops one process. What it started stays in its runner's job and ends
+/// with the runner.
+#[cfg(windows)]
 pub fn kill_pid(pid: u32) {
-    let pid = pid.to_string();
-    let _ = if cfg!(windows) {
-        Command::new("taskkill")
-            .args(["/PID", &pid, "/T", "/F"])
-            .output()
-    } else {
-        Command::new("kill").args(["-9", &pid]).output()
-    };
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+        fn TerminateProcess(process: isize, code: u32) -> i32;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    const PROCESS_TERMINATE: u32 = 0x0001;
+    // SAFETY: the handle is used only when Windows gave one, and closed once.
+    unsafe {
+        let process = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if process != 0 {
+            TerminateProcess(process, 1);
+            CloseHandle(process);
+        }
+    }
+}
+
+/// Stops one process.
+#[cfg(not(windows))]
+pub fn kill_pid(pid: u32) {
+    let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
 }
 
 /// Processor time of a process and everything it starts: on Windows a job
@@ -688,6 +698,49 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// `cmd` starts a PowerShell that holds a file open: stopping `cmd`
+    /// alone would leave the file held.
+    #[cfg(windows)]
+    #[test]
+    fn stopping_a_process_stops_what_it_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = dir.path().join("held.txt");
+        let mut command = Command::new("cmd");
+        command
+            .args(["/C", "powershell", "-NoProfile", "-Command"])
+            .arg("$f=[IO.File]::Open($env:DGF_HELD,4,3,0);while(1){sleep(1)}")
+            .env("DGF_HELD", &held)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let job = cpu::Job::of(&child).expect("Windows gave no job");
+        let is_held = || held.exists() && std::fs::File::open(&held).is_err();
+        let comes = |wanted: bool, seconds: u64| {
+            let until = Instant::now() + Duration::from_secs(seconds);
+            while is_held() != wanted && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            is_held() == wanted
+        };
+        let was_held = comes(true, 60);
+        kill_tree(&mut child, Some(&job));
+        let released = comes(false, 10);
+        // Whatever the outcome, nothing this test started stays behind.
+        job.terminate();
+        assert!(was_held, "the file was never held");
+        assert!(released, "what it started still runs");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn one_process_is_stopped_by_its_id() {
+        let mut command = Command::new("powershell");
+        command.args(["-NoProfile", "-Command", "while(1){sleep(1)}"]);
+        let mut child = command.spawn().unwrap();
+        kill_pid(child.id());
+        assert!(!child.wait().unwrap().success());
     }
 
     #[test]
