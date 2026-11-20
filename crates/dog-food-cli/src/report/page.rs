@@ -29,6 +29,26 @@ pub(crate) mod tests {
         }
     }
 
+    /// `Math.max(...list)` passes every item as an argument, and a call takes
+    /// only so many, so a page must work for a list of any length.
+    #[test]
+    fn no_page_spreads_a_list_into_max_or_min() {
+        let pages = [
+            ("template.html", include_str!("template.html")),
+            ("changes.html", include_str!("changes.html")),
+            ("history.html", include_str!("history.html")),
+            ("mutation.html", include_str!("mutation.html")),
+            ("common.js", COMMON),
+        ];
+        for (name, text) in pages {
+            let spread = |line: &&str| {
+                (line.contains("Math.max(") || line.contains("Math.min(")) && line.contains("...")
+            };
+            let found: Vec<&str> = text.lines().filter(spread).collect();
+            assert!(found.is_empty(), "{name}: {found:?}");
+        }
+    }
+
     #[test]
     fn fills_every_slot_and_escapes_script_ends() {
         let template = "<style>/*DGF_STYLE*/</style><script>/*DGF_COMMON*/\nconst D = /*DGF_DATA*/null;</script>";

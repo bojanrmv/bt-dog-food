@@ -5,6 +5,17 @@ const plural = (n, word) => `${Number(n).toLocaleString()} ${word}${n === 1 ? ""
 /* Within limits uses the accent, ignored is quiet, warn and fail use their status colors. */
 const color = status => `var(--${{ ok: "accent", ignored: "faint" }[status] || status})`;
 const signed = n => (n > 0 ? `+${n}` : n < 0 ? `−${-n}` : "±0");
+/* The largest of a list of any length, and never below `floor`. A list spread into Math.max fails when it is long: a call takes only so many arguments. */
+const most = (list, floor = 0) => list.reduce((a, b) => (b > a ? b : a), floor);
+/* Draws one part of a page. A part that fails says so in its own place, and the rest is still drawn. */
+function part(id, draw) {
+  try {
+    draw();
+  } catch (error) {
+    console.error(error);
+    $(id).innerHTML = `<p class="empty">This part could not be drawn (${esc(error.message)}). Please report it with the dgf version.</p>`;
+  }
+}
 
 /* Round axis steps (1, 2, 2.5, 5 × 10ⁿ), never below 1. */
 function niceTicks(max, count) {

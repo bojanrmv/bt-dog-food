@@ -134,9 +134,9 @@ const REPORT = /*DGF_DATA*/null;
   $("trends").innerHTML = panels.map((panel, i) => `<div class="panel"><h3>${esc(panel.title)}</h3><div class="chart" id="trend-${i}"></div></div>`).join("");
   panels.forEach((panel, i) => {
     const W = 520, H = 190, L = 40, R = 86, T = 14, B = 30, pw = W - L - R, ph = H - T - B;
-    let most = Math.max(1, ...panel.series.flatMap(([, get]) => runs.map(r => get(r.summary))));
-    if (panel.limits && N.limits.fail != null) most = Math.max(most, N.limits.fail + 1);
-    const ticks = niceTicks(most, 4), top = ticks[ticks.length - 1];
+    let highest = most(panel.series.flatMap(([, get]) => runs.map(r => get(r.summary))), 1);
+    if (panel.limits && N.limits.fail != null) highest = Math.max(highest, N.limits.fail + 1);
+    const ticks = niceTicks(highest, 4), top = ticks[ticks.length - 1];
     const x = j => runs.length === 1 ? L + pw / 2 : L + (j / (runs.length - 1)) * pw;
     const y = v => T + ph - (v / top) * ph;
     let body = "";

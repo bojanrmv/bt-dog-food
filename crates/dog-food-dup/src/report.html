@@ -198,6 +198,12 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
 <script>
 const DATA = /*DATA*/;
 
+/* Puts a list of any length into an element. `replaceChildren(...list)` fails on a long one: a call takes only so many arguments. */
+const fill = (box, nodes) => {
+  const all = document.createDocumentFragment();
+  nodes.forEach((node) => all.append(node));
+  box.replaceChildren(all);
+};
 const el = (tag, attrs = {}, ...children) => {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -341,8 +347,8 @@ function renderOverview() {
   select.value = state.project;
 }
 function bars(id, rows, name, value, unit, click, on) {
-  const max = Math.max(1, ...rows.map(value));
-  document.getElementById(id).replaceChildren(...rows.map((r) => el("li", {
+  const max = rows.map(value).reduce((a, b) => Math.max(a, b), 1);
+  fill(document.getElementById(id), rows.map((r) => el("li", {
     class: on(r) ? "on" : null, onclick: () => click(r), title: `${name(r)}: ${fmt(value(r))} ${unit}`,
   }, el("span", { class: "name", text: name(r) }), el("span", { class: "n", text: fmt(value(r)) }),
      el("div", { class: "track" }, el("div", { class: "fill", style: `width:${(value(r) / max * 100).toFixed(1)}%` })))));
@@ -389,7 +395,7 @@ function renderList() {
     return;
   }
   if (!rows.some((c) => c.id === state.selected)) state.selected = rows[0].id;
-  box.replaceChildren(...rows.map((c) => {
+  fill(box, rows.map((c) => {
     const k = kindOf(c);
     const fns = [...new Set(c.copies.map((x) => x.function || x.file.split("/").pop()))];
     const row = el("div", { class: "row" + (c.id === state.selected ? " on" : ""), role: "button", tabindex: "0", "data-id": c.id,

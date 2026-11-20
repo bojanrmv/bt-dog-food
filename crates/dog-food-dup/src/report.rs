@@ -459,3 +459,16 @@ fn template_lines(class: &CloneClass) -> Vec<String> {
     }
     shown
 }
+
+#[cfg(test)]
+mod tests {
+    /// A call takes only so many arguments, so the page must work for a
+    /// list of groups of any length.
+    #[test]
+    fn the_page_spreads_no_list_of_unknown_length_into_a_call() {
+        let page = include_str!("report.html");
+        assert!(!page.contains("replaceChildren(...rows"));
+        let spread = |line: &&str| line.contains("Math.max(") && line.contains("...");
+        assert_eq!(page.lines().filter(spread).count(), 0);
+    }
+}

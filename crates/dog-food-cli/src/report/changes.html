@@ -140,8 +140,8 @@ const REPORT = /*DGF_DATA*/null;
     }
     const rowH = 28, W = 1080, L = 340, R = 70, T = 34, B = 36;
     const H = T + shown.length * rowH + B, pw = W - L - R;
-    const most = Math.max(...shown.map(r => Math.max(r.before ?? 0, r.after ?? 0)), (FAIL ?? 0) + 1, (WARN ?? 0) + 1);
-    const ticks = niceTicks(most, 6), top = ticks[ticks.length - 1];
+    const highest = most(shown.map(r => Math.max(r.before ?? 0, r.after ?? 0)), Math.max((FAIL ?? 0) + 1, (WARN ?? 0) + 1));
+    const ticks = niceTicks(highest, 6), top = ticks[ticks.length - 1];
     const x = v => L + (v / top) * pw;
     let body = "";
     ticks.forEach(t => {
