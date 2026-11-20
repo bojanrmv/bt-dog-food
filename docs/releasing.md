@@ -41,19 +41,15 @@ dotnet tool update -g dgf
 dgf --version
 ```
 
-Then check the installed binary against the release, as a user can: [Check what you installed](install.md#check-what-you-installed).
-
 To try the build without publishing: Actions → release → **Run workflow**. It does everything but the publish step, and the packages are kept as the run's artifacts.
 
 To try the package on a Windows machine before a release:
 
 ```powershell
 ./scripts/pack-nuget.ps1
-./scripts/check-package.ps1    # what security software sees of it
+./scripts/check-package.ps1    # each file's product, version and hash, and a Microsoft Defender scan
 dotnet tool install -g dgf --add-source packaging/nuget/nupkg --version 0.2.0
 ```
-
-`check-package.ps1` lists every program file in the package with the product, author and version it names, whether it is signed and its SHA-256, and scans the package with Microsoft Defender. It fails when Defender finds something or one of our files does not say what it is. Run it before a release that changes what `dgf` does on a machine (the processes it starts, where it writes), and with `-Version` on a published one. A locally built `dgf.exe` is not the file a release ships, so a clean result here is a sign, not a proof.
 
 ## What a release publishes
 
@@ -63,26 +59,11 @@ dotnet tool install -g dgf --add-source packaging/nuget/nupkg --version 0.2.0
 | nuget.org `dgf.<platform>` | the native `dgf` binary for that platform, the C# engine in `engine/`, and the test worker in `engine/mtp/` |
 | nuget.org `dgf-dup-cs` | the C# engine alone, for those who install `dgf` with cargo |
 | GitHub release | per platform, an archive with `dgf`, the C# engine in `engine/` (with the test worker in `engine/mtp/`), the README and the license |
-| GitHub release, `SHA256SUMS` | the SHA-256 of every archive and of every `dgf` binary by itself |
-| GitHub release, `dgf-<version>.attestation.jsonl` | the attestation below as a file, for `gh attestation verify --bundle` |
-| GitHub attestations | for every file in `SHA256SUMS`, a signed statement that this workflow built it from the tag: `gh attestation verify <file> --repo <owner>/<repository>` |
+| GitHub release, `SHA256SUMS` and an attestation | the SHA-256 of every archive and `dgf` binary, and a signed statement that this workflow built them: `gh attestation verify <file> --repo <owner>/<repository>` |
 
 Platforms: Windows, Linux and macOS, each on x64 and arm64. The Linux binaries are static, so they run on any distribution.
 
 The package does not wrap `dgf` in .NET: the tool's command is the native binary itself, so it starts and runs as fast as one built with cargo. Installing it needs the .NET 10 SDK. Running it needs nothing, except the .NET 10 runtime for the C# engine of `dgf dup`, and the .NET SDK your project uses for mutation runs on C#. `dgf` finds the engine in `engine/` beside itself.
-
-## What keeps a release trustworthy
-
-A program that analyzes and builds other people's code has to be what its source says. The release does this for it:
-
-- **Nothing is published from a laptop.** The workflow builds from the tag, and the publish step waits for approval.
-- **Checksums and attestation.** The attestation is made before anything is published, so a release without one does not exist. [Install](install.md#check-what-you-installed) shows how a user checks a binary.
-- **Actions are named by commit**, with the version in a comment (`actions/checkout@11d5… # v4`), so a tag someone moves later changes nothing. To update one, replace the commit and the comment together: `gh api repos/actions/checkout/git/ref/tags/v4` gives the commit.
-- **Every file says what it is.** `crates/dog-food-cli/build.rs` gives `dgf.exe` a version resource and a manifest, from the author and repository in `Cargo.toml`; the .NET projects name the same product and author. Windows and antivirus software treat a program file without them as anonymous.
-- **Dependencies are audited.** The [audit workflow](../.github/workflows/audit.yml) checks `Cargo.lock` against the RustSec advisories when the dependencies change and every week. Run it before a release as well: `cargo install cargo-audit --locked`, then `cargo audit`.
-- **Not yet: code signing.** The binaries are unsigned: [code signing](code-signing.md) has the policy, the ways to a certificate and where the signing step goes.
-
-When antivirus software flags a release, [the page for administrators](security-software.md#when-antivirus-software-stops-it) says what to collect. Report it to the vendor as the developer (Microsoft: [microsoft.com/wdsi/filesubmission](https://www.microsoft.com/wdsi/filesubmission), "Software developer", "Incorrectly detected"), with the detection name and the file from the release.
 
 ## When a release is wrong
 

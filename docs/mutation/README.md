@@ -54,7 +54,7 @@ Mutants outside any function (constants, tables, property defaults) are reported
 - **TypeScript/JavaScript:** a `package.json` above the mutated files with `vitest` or `jest`, its `node_modules` installed, and Node 22.3 or newer. In an Angular workspace whose project uses `@angular/build:unit-test`, dgf runs `ng test <project>` instead, and type-checks the mutants with `tsc` against the project's `tsconfig.spec.json` first (Angular's builder rejects code that does not type-check, plain Vitest and Jest do not check types).
 - Tests that fail with no mutant active are left out with a note; the run stops when no test runs at all, or when half of them or more fail.
 - Rust functions are listed by `dgf mutate` but not run.
-- The sandbox is a folder in `%TEMP%/dgf-mutate` (see [How it works](how-it-works.md)); your working tree is never touched. [`sandbox_dir`](settings.md) puts it elsewhere, for a machine whose security software does not let programs build and run code in the temp folder. Projects that use files outside the repository folder will not build there.
+- The sandbox is a folder in `%TEMP%/dgf-mutate` (see [How it works](how-it-works.md)); your working tree is never touched. [`sandbox_dir`](settings.md) puts it elsewhere. Projects that use files outside the repository folder will not build there.
 - Results are cached in `.dgf/mutation-cache/` in the repository unless `cache_dir` says otherwise (add `.dgf/mutation-cache/` to `.gitignore`; the rest of `.dgf/` is meant to be committed).
 - Several `dgf mutate` runs can work at the same time, from one repository or from several worktrees: each takes a sandbox of its own, and they share the cache safely.
 

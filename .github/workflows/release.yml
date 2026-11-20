@@ -233,7 +233,7 @@ jobs:
           if [[ "$VERSION" == *-* ]]; then prerelease=(--prerelease); fi
           # Above GitHub's generated notes: how to check what was downloaded.
           cat > notes.md <<NOTES
-          **Checking a download.** \`SHA256SUMS\` has the SHA-256 of every file here and of every \`dgf\` binary by itself: the one \`dotnet tool install -g dgf\` puts on disk is the same file. Each was built by this repository's release workflow from the tag \`v$VERSION\`, which \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\` confirms. More in [SECURITY.md](https://github.com/$GITHUB_REPOSITORY/blob/v$VERSION/SECURITY.md).
+          To check a download: \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`, or compare its SHA-256 with \`SHA256SUMS\`.
 
           NOTES
           gh release create "v$VERSION" archives/* --repo "$GITHUB_REPOSITORY" \

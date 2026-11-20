@@ -162,7 +162,7 @@ The [VS Code extension](docs/integrations.md#vs-code) shows scores in the editor
 | | [Duplication](docs/duplication/README.md) | [Development](docs/development.md) |
 | | [Integrations](docs/integrations.md) | |
 
-Is it safe to run, and is this copy the real one: [security policy](SECURITY.md), [for administrators and security teams](docs/security-software.md), [code signing](docs/code-signing.md).
+What `dgf` does on a machine and how to check a download: [SECURITY.md](SECURITY.md).
 
 ## Repository
 
