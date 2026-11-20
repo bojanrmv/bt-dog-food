@@ -9,7 +9,7 @@ Every `dgf` command and option, and how they combine. `dgf <command> --help` pri
 - [`dgf history`](#dgf-history): trends from saved runs
 - [`dgf mutate`](#dgf-mutate): mutation testing
 - [`dgf duplication`](#dgf-duplication): code that can be united
-- [`dgf init`](#dgf-init), [`dgf hook`](#dgf-hook), [`dgf skill`](#dgf-skill): setup
+- [`dgf init`](#dgf-init), [`dgf hook`](#dgf-hook), [`dgf skill`](#dgf-skill), [`dgf vscode`](#dgf-vscode): setup
 - [Output formats](#output-formats), [exit codes](#exit-codes)
 
 ## How options combine
@@ -279,6 +279,17 @@ dgf skill install           # .claude/skills/dog-food/SKILL.md in this repositor
 dgf skill install --global  # ~/.claude/skills, for every project of this user
 dgf skill show              # print it
 ```
+
+## `dgf vscode`
+
+The [VS Code extension](integrations.md#vs-code) is built into `dgf`.
+
+```powershell
+dgf vscode                  # write it as a .vsix file in the temp folder
+dgf vscode -o dog-food.vsix # or to a file you name
+```
+
+It prints the `code --install-extension` command that installs the file. `dgf` does not run it: installing is left to you.
 
 ## Output formats
 

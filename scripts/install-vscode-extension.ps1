@@ -1,17 +1,11 @@
-# Packages editors/vscode as a .vsix and installs it into VS Code.
-# Needs Node.js (for npx) and the `code` command. Remove the extension with:
+# For work on the extension: builds dgf from this repository, has it write
+# the VS Code extension (`dgf vscode`) and installs that into VS Code.
+# Needs the `code` command. Remove the extension with:
 #   code --uninstall-extension dog-food.dog-food
 $ErrorActionPreference = "Stop"
-$extension = Join-Path $PSScriptRoot "../editors/vscode"
 $vsix = Join-Path ([IO.Path]::GetTempPath()) "dog-food-vscode.vsix"
 
-Push-Location $extension
-try {
-    npx --yes @vscode/vsce@3 package --no-dependencies --skip-license -o $vsix
-    if ($LASTEXITCODE -ne 0) { throw "packaging failed" }
-} finally {
-    Pop-Location
-}
+cargo run --quiet --manifest-path (Join-Path $PSScriptRoot "../Cargo.toml") -p dog-food-cli -- vscode --output $vsix
+if ($LASTEXITCODE -ne 0) { throw "writing the extension failed" }
 code --install-extension $vsix --force
 if ($LASTEXITCODE -ne 0) { throw "installing failed" }
-Write-Host "Installed. Reload VS Code (Ctrl+Shift+P, 'Developer: Reload Window') to start it."

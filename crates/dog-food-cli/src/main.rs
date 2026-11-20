@@ -46,6 +46,7 @@ mod mutate;
 mod mutation;
 mod report;
 mod setup;
+mod vscode;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -99,6 +100,12 @@ enum Command {
     },
     /// Create a commented dgf.toml in the current folder
     Init,
+    /// Write the VS Code extension as a .vsix file, and print the command that installs it
+    Vscode {
+        /// Where to write the file [default: the temp folder]
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
     /// Duplicated code that can be united: copies, near misses, reordered
     /// statements and C# that does the same thing written differently and
     /// repeated queries (the same as `dgf-dup`)
@@ -331,6 +338,7 @@ fn main() -> ExitCode {
         Command::Hook { action } => hook(action),
         Command::Skill { action } => skill(action),
         Command::Init => init(),
+        Command::Vscode { output } => vscode(output),
         Command::Duplication(args) => return duplication(args),
     };
     result.unwrap_or_else(|(code, message)| {
@@ -1106,6 +1114,15 @@ fn hook(action: HookAction) -> Result<ExitCode, Failure> {
             sayln!("Removed {}", path.display());
         }
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `dgf vscode`: dgf writes the file and starts nothing; installing it is the user's command.
+fn vscode(output: Option<PathBuf>) -> Result<ExitCode, Failure> {
+    let path = vscode::write(output).map_err(io)?;
+    sayln!("Wrote the VS Code extension to {}", path.display());
+    sayln!("Install it:  {}", vscode::install_command(&path));
+    sayln!("Then reload VS Code (Ctrl+Shift+P, \"Developer: Reload Window\").");
     Ok(ExitCode::SUCCESS)
 }
 

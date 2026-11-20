@@ -72,6 +72,6 @@ Add to `.gitignore` (but do NOT ignore all of `.dgf/`: `.dgf/history/` and `.dgf
 3. With coverage: the functions with the highest CRAP scores.
 4. What you excluded and why; any `warning:` lines (files with syntax errors).
 5. Suggested `warn` / `fail` limits. If many functions would fail, suggest `dgf baseline` or path overrides rather than refactoring everything.
-6. Optional next steps: `dgf hook install` (blocks commits that make code worse), the VS Code extension (`scripts/install-vscode-extension.ps1` in a clone of the dog-food repository).
+6. Optional next steps: `dgf hook install` (blocks commits that make code worse), the VS Code extension (`dgf vscode`).
 
 Do not refactor code, add `dgf-ignore` comments, run `dgf baseline` or commit anything unless the user asks. When asked to commit: `dgf.toml`, the `.gitignore` change, `.claude/skills/dog-food/` and `.dgf/`.

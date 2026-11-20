@@ -13,13 +13,13 @@ The extension runs the `dgf` command line tool, which must be installed (`dotnet
 
 ## Install
 
-From the dog-food repository, with Node.js and the `code` command available:
-
 ```powershell
-./scripts/install-vscode-extension.ps1
+dgf vscode      # writes the extension as a .vsix file and prints the command that installs it
 ```
 
-It packages this folder and runs `code --install-extension`. Reload VS Code afterwards. Remove it with `code --uninstall-extension dog-food.dog-food`.
+Run the printed `code --install-extension` command, then reload VS Code. The extension is built into `dgf` and has its version, so the two always match. Remove it with `code --uninstall-extension dog-food.dog-food`.
+
+When working on the extension, `./scripts/install-vscode-extension.ps1` does both steps with the `dgf` it builds from the repository.
 
 ## Settings
 

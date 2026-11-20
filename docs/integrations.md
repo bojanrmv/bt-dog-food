@@ -11,13 +11,13 @@
 - **Problems panel** entries for functions above `warn` (warning) or `fail` (error), with the decision breakdown;
 - **status bar**: the most complex function in the open file.
 
-Install from this repository:
+Install it:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install-vscode-extension.ps1
+dgf vscode      # writes the extension as a .vsix file and prints the command that installs it
 ```
 
-It packages the folder with `vsce` (through `npx`) and runs `code --install-extension`. Reload VS Code afterwards. Remove it with `code --uninstall-extension dog-food.dog-food`. Settings: `dogFood.path` (the `dgf` executable), `dogFood.codeLens`, `dogFood.codeLensMinimum`, `dogFood.duplicationLens`.
+Run the printed `code --install-extension` command, then reload VS Code. The extension is built into `dgf` and has its version, so the two always match. Remove it with `code --uninstall-extension dog-food.dog-food`. Settings: `dogFood.path` (the `dgf` executable), `dogFood.codeLens`, `dogFood.codeLensMinimum`, `dogFood.duplicationLens`.
 
 The extension uses the workspace folder's `dgf.toml`, so editor, CLI and CI agree.
 

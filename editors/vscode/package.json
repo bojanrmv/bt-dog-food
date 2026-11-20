@@ -2,7 +2,7 @@
   "name": "dog-food",
   "displayName": "dog-food",
   "description": "Complexity, CRAP, duplication and mutation testing from a side bar and a dashboard, and complexity above every function (C#, TypeScript/JavaScript, Rust). Runs the dgf command line tool.",
-  "version": "0.2.3",
+  "version": "0.0.0",
   "publisher": "dog-food",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/bojanrmv/bt-dog-food" },
