@@ -30,12 +30,13 @@ const FILES: &[(&str, &[u8])] = files![
     "lib/settings.js",
     "lib/side.js",
     "media/dgf.svg",
+    "media/icon.png",
 ];
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension=".js" ContentType="application/javascript"/><Default Extension=".json" ContentType="application/json"/><Default Extension=".md" ContentType="text/markdown"/><Default Extension=".svg" ContentType="image/svg+xml"/><Default Extension=".vsixmanifest" ContentType="text/xml"/></Types>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension=".js" ContentType="application/javascript"/><Default Extension=".json" ContentType="application/json"/><Default Extension=".md" ContentType="text/markdown"/><Default Extension=".png" ContentType="image/png"/><Default Extension=".svg" ContentType="image/svg+xml"/><Default Extension=".vsixmanifest" ContentType="text/xml"/></Types>
 "#;
 
 /// Writes the extension to `output`, or to the temp folder, and says where.
@@ -113,6 +114,7 @@ fn manifest(package: &str) -> Result<String, String> {
   <Assets>
     <Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true"/>
     <Asset Type="Microsoft.VisualStudio.Services.Content.Details" Path="extension/README.md" Addressable="true"/>
+    <Asset Type="Microsoft.VisualStudio.Services.Icons.Default" Path="extension/{icon}" Addressable="true"/>
   </Assets>
 </PackageManifest>
 "#,
@@ -122,6 +124,7 @@ fn manifest(package: &str) -> Result<String, String> {
         title = field("/displayName"),
         description = field("/description"),
         engine = field("/engines/vscode"),
+        icon = field("/icon"),
     ))
 }
 
@@ -291,6 +294,7 @@ mod tests {
             r#"<Identity Language="en-US" Id="dog-food" Version="{VERSION}" Publisher="dog-food"/>"#
         );
         assert!(find("extension.vsixmanifest").contains(&identity));
+        assert!(find("extension.vsixmanifest").contains(r#"Path="extension/media/icon.png""#));
     }
 
     #[test]

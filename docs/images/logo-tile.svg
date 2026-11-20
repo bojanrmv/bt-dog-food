@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="t">
+  <title id="t">dog-food</title>
+  <!-- The logo on a tile, for an app icon: the shapes of logo.svg in the colours for a dark ground. -->
+  <rect width="128" height="128" rx="28" fill="#121823"/>
+  <g transform="translate(14.4 15.6) scale(1.55)">
+    <ellipse cx="11.5" cy="28" rx="5.6" ry="7" transform="rotate(-24 11.5 28)" fill="#4cc38a"/>
+    <ellipse cx="24" cy="14.5" rx="6" ry="7.6" transform="rotate(-9 24 14.5)" fill="#4cc38a"/>
+    <ellipse cx="40" cy="14.5" rx="6" ry="7.6" transform="rotate(9 40 14.5)" fill="#f2b544"/>
+    <ellipse cx="52.5" cy="28" rx="5.6" ry="7" transform="rotate(24 52.5 28)" fill="#ff6b5e"/>
+    <path d="M32 28.5c-9.4 0-17.5 7.4-17.5 16.3 0 6.4 4.8 10.2 10.6 10.2 3.2 0 4.6-1.3 6.9-1.3s3.700 1.3 6.900 1.3c5.800 0 10.600-3.800 10.600-10.200 0-8.900-8.100-16.300-17.500-16.300z" fill="#4c6ef5"/>
+    <path d="M19.500 44.500h6.200l3.100-6.400 5 12.300 3.300-7.700 1.300 1.800h6.100" fill="none" stroke="#ffffff" stroke-width="2.800" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

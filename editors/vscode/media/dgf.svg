@@ -1,6 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M3 20h18"/>
-  <rect x="5" y="12" width="3" height="5"/>
-  <rect x="10.5" y="8" width="3" height="9"/>
-  <rect x="16" y="4" width="3" height="13"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 64 64">
+  <!-- The logo in one colour, as VS Code draws side bar icons: the pulse is cut out of the pad. -->
+  <defs>
+    <mask id="pad">
+      <rect width="64" height="64" fill="#fff"/>
+      <path d="M19.5 44.5h6.200l3.100-6.400 5 12.300 3.300-7.700 1.300 1.800h6.100" fill="none" stroke="#000" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+  <g fill="currentColor">
+    <ellipse cx="11.5" cy="28" rx="5.6" ry="7" transform="rotate(-24 11.5 28)"/>
+    <ellipse cx="24" cy="14.5" rx="6" ry="7.6" transform="rotate(-9 24 14.5)"/>
+    <ellipse cx="40" cy="14.5" rx="6" ry="7.6" transform="rotate(9 40 14.5)"/>
+    <ellipse cx="52.5" cy="28" rx="5.6" ry="7" transform="rotate(24 52.5 28)"/>
+    <path mask="url(#pad)" d="M32 28.5c-9.4 0-17.5 7.4-17.500 16.300 0 6.400 4.800 10.200 10.600 10.200 3.200 0 4.600-1.300 6.900-1.300s3.700 1.300 6.900 1.300c5.800 0 10.600-3.800 10.600-10.200 0-8.900-8.100-16.300-17.500-16.300z"/>
+  </g>
 </svg>

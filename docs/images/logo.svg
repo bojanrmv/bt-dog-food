@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="t">
+  <title id="t">dog-food</title>
+  <!-- Four toes as four readings: two within the limits, one above warn, one above fail. -->
+  <ellipse cx="11.5" cy="28" rx="5.6" ry="7" transform="rotate(-24 11.5 28)" fill="#2f9e6e"/>
+  <ellipse cx="24" cy="14.5" rx="6" ry="7.6" transform="rotate(-9 24 14.5)" fill="#2f9e6e"/>
+  <ellipse cx="40" cy="14.5" rx="6" ry="7.6" transform="rotate(9 40 14.5)" fill="#e8a013"/>
+  <ellipse cx="52.5" cy="28" rx="5.6" ry="7" transform="rotate(24 52.5 28)" fill="#e5533f"/>
+  <!-- The pad, with a pulse across it. -->
+  <path d="M32 28.5c-9.4 0-17.5 7.4-17.5 16.3 0 6.4 4.8 10.2 10.6 10.2 3.2 0 4.6-1.3 6.9-1.3s3.700 1.3 6.900 1.3c5.800 0 10.600-3.800 10.600-10.200 0-8.900-8.100-16.300-17.500-16.300z" fill="#3b5bdb"/>
+  <path d="M19.500 44.500h6.200l3.100-6.400 5 12.300 3.300-7.700 1.300 1.800h6.100" fill="none" stroke="#ffffff" stroke-width="2.800" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
