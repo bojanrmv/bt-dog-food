@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 800" width="960" height="800" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <title>Two renamed copies become one template with holes</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+    <style>
+      .box { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; }
+      .syn { fill: #eff6ff; stroke: #60a5fa; stroke-width: 1.5; }
+      .out { fill: #ecfdf5; stroke: #34d399; stroke-width: 1.5; }
+      .title { font-size: 15px; font-weight: 600; fill: #0f172a; }
+      .head { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; }
+      .text { font-size: 12.5px; fill: #475569; }
+      .small { font-size: 11px; fill: #64748b; }
+      .code { font-family: Consolas, Menlo, "DejaVu Sans Mono", monospace; font-size: 12px; fill: #0f172a; }
+      .d { fill: #c026d3; font-weight: 700; }
+      .p { fill: #7b8aa0; }
+      .line { stroke: #64748b; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+      .rule { stroke: #cbd5e1; stroke-width: 1; fill: none; }
+    </style>
+  </defs>
+  <rect width="960" height="800" rx="14" fill="#ffffff"/>
+  <text class="title" x="24" y="36">Two renamed copies become one template</text>
+  <rect x="774" y="26" width="10" height="10" rx="2" fill="#c026d3"/>
+  <text class="text" x="936" y="36" text-anchor="end">differs between the copies</text>
+
+  <!-- the two copies -->
+  <rect class="box" x="24" y="56" width="444" height="170" rx="10"/>
+  <text class="head" x="40" y="80" fill="#475569">COPY 1 · Billing.PlanTotal · LINES 5-10</text>
+  <text class="code" x="40" y="106">var <tspan class="d">total</tspan> = <tspan class="d">order</tspan>.<tspan class="d">Price</tspan> * <tspan class="d">order</tspan>.<tspan class="d">Months</tspan>;</text>
+  <text class="code" x="40" y="126">var <tspan class="d">discount</tspan> = <tspan class="d">total</tspan> * <tspan class="d">order</tspan>.<tspan class="d">Discount</tspan> / 100;</text>
+  <text class="code" x="40" y="146">var net = <tspan class="d">total</tspan> - <tspan class="d">discount</tspan>;</text>
+  <text class="code" x="40" y="166">var <tspan class="d">tax</tspan> = net * <tspan class="d">0.2m</tspan>;</text>
+  <text class="code" x="40" y="186">Log.Info("total", net + <tspan class="d">tax</tspan>);</text>
+  <text class="code" x="40" y="206">return net + <tspan class="d">tax</tspan>;</text>
+
+  <rect class="box" x="492" y="56" width="444" height="170" rx="10"/>
+  <text class="head" x="508" y="80" fill="#475569">COPY 2 · Billing.SeatTotal · LINES 15-20</text>
+  <text class="code" x="508" y="106">var <tspan class="d">sum</tspan> = <tspan class="d">booking</tspan>.<tspan class="d">Fee</tspan> * <tspan class="d">booking</tspan>.<tspan class="d">Nights</tspan>;</text>
+  <text class="code" x="508" y="126">var <tspan class="d">rebate</tspan> = <tspan class="d">sum</tspan> * <tspan class="d">booking</tspan>.<tspan class="d">Rebate</tspan> / 100;</text>
+  <text class="code" x="508" y="146">var net = <tspan class="d">sum</tspan> - <tspan class="d">rebate</tspan>;</text>
+  <text class="code" x="508" y="166">var <tspan class="d">vat</tspan> = net * <tspan class="d">0.1m</tspan>;</text>
+  <text class="code" x="508" y="186">Log.Info("total", net + <tspan class="d">vat</tspan>);</text>
+  <text class="code" x="508" y="206">return net + <tspan class="d">vat</tspan>;</text>
+
+  <path class="line" d="M246,226 V262"/>
+  <path class="line" d="M714,226 V246 H540 V262"/>
+  <text class="text" x="258" y="250">every name and literal becomes a placeholder</text>
+
+  <!-- step 1: shapes -->
+  <rect class="syn" x="24" y="266" width="576" height="180" rx="10"/>
+  <text class="head" x="40" y="290" fill="#2563eb">1 · STATEMENTS BECOME SHAPES</text>
+  <text class="small" x="424" y="290" text-anchor="end">tokens</text>
+  <text class="code" x="40" y="318">var <tspan class="p">$name</tspan> = <tspan class="p">$name</tspan>.<tspan class="p">$name</tspan> * <tspan class="p">$name</tspan>.<tspan class="p">$name</tspan>;</text>
+  <text class="code" x="40" y="338">var <tspan class="p">$name</tspan> = <tspan class="p">$name</tspan> * <tspan class="p">$name</tspan>.<tspan class="p">$name</tspan> / <tspan class="p">$number</tspan>;</text>
+  <text class="code" x="40" y="358">var <tspan class="p">$name</tspan> = <tspan class="p">$name</tspan> - <tspan class="p">$name</tspan>;</text>
+  <text class="code" x="40" y="378">var <tspan class="p">$name</tspan> = <tspan class="p">$name</tspan> * <tspan class="p">$number</tspan>;</text>
+  <text class="code" x="40" y="398"><tspan class="p">$name</tspan>.<tspan class="p">$name</tspan>(<tspan class="p">$text</tspan>, <tspan class="p">$name</tspan> + <tspan class="p">$name</tspan>);</text>
+  <text class="code" x="40" y="418">return <tspan class="p">$name</tspan> + <tspan class="p">$name</tspan>;</text>
+  <text class="code" x="424" y="318" text-anchor="end">11</text>
+  <text class="code" x="424" y="338" text-anchor="end">11</text>
+  <text class="code" x="424" y="358" text-anchor="end">7</text>
+  <text class="code" x="424" y="378" text-anchor="end">7</text>
+  <text class="code" x="424" y="398" text-anchor="end">11</text>
+  <text class="code" x="424" y="418" text-anchor="end">5</text>
+  <path d="M438,306 H446 V424 H438" fill="none" stroke="#60a5fa" stroke-width="1.5"/>
+  <text class="text" x="458" y="352">the seed:</text>
+  <text class="text" x="458" y="370">52 tokens, 6 lines</text>
+  <text class="small" x="458" y="388">(at least 50 and 5)</text>
+
+  <path class="line" d="M601,356 H620"/>
+
+  <!-- step 2: the group -->
+  <rect class="syn" x="624" y="266" width="312" height="180" rx="10"/>
+  <text class="head" x="640" y="290" fill="#2563eb">2 · SAME SHAPES, ONE GROUP</text>
+  <rect x="634" y="300" width="292" height="64" rx="8" fill="none" stroke="#60a5fa" stroke-width="1.2" stroke-dasharray="4 3"/>
+  <text class="text" x="646" y="322">PlanTotal</text>
+  <text class="text" x="646" y="352">SeatTotal</text>
+  <g stroke="#475569" stroke-width="0.8">
+    <rect x="730" y="306" width="22" height="22" rx="4" fill="#93c5fd"/>
+    <rect x="758" y="306" width="22" height="22" rx="4" fill="#a5b4fc"/>
+    <rect x="786" y="306" width="22" height="22" rx="4" fill="#fcd34d"/>
+    <rect x="814" y="306" width="22" height="22" rx="4" fill="#6ee7b7"/>
+    <rect x="842" y="306" width="22" height="22" rx="4" fill="#f9a8d4"/>
+    <rect x="870" y="306" width="22" height="22" rx="4" fill="#cbd5e1"/>
+    <rect x="730" y="336" width="22" height="22" rx="4" fill="#93c5fd"/>
+    <rect x="758" y="336" width="22" height="22" rx="4" fill="#a5b4fc"/>
+    <rect x="786" y="336" width="22" height="22" rx="4" fill="#fcd34d"/>
+    <rect x="814" y="336" width="22" height="22" rx="4" fill="#6ee7b7"/>
+    <rect x="842" y="336" width="22" height="22" rx="4" fill="#f9a8d4"/>
+    <rect x="870" y="336" width="22" height="22" rx="4" fill="#cbd5e1"/>
+  </g>
+  <text class="text" x="640" y="388">A square is one statement's shape hash.</text>
+  <text class="text" x="640" y="406">Seeds with the same hashes are grouped,</text>
+  <text class="text" x="640" y="424">so no two copies are ever compared.</text>
+
+  <path class="line" d="M480,446 V482"/>
+  <text class="text" x="492" y="470">the copies' tokens, position by position</text>
+
+  <!-- step 3: template and holes -->
+  <rect class="syn" x="24" y="486" width="912" height="214" rx="10"/>
+  <text class="head" x="40" y="510" fill="#2563eb">3 · ANTI-UNIFICATION: ONE TEMPLATE, A HOLE WHERE THE COPIES DIFFER</text>
+  <text class="code" x="40" y="540">var <tspan class="d">⟨1⟩</tspan> = <tspan class="d">⟨2⟩</tspan>.<tspan class="d">⟨3⟩</tspan> * <tspan class="d">⟨2⟩</tspan>.<tspan class="d">⟨4⟩</tspan>;</text>
+  <text class="code" x="40" y="560">var <tspan class="d">⟨5⟩</tspan> = <tspan class="d">⟨1⟩</tspan> * <tspan class="d">⟨2⟩</tspan>.<tspan class="d">⟨6⟩</tspan> / 100;</text>
+  <text class="code" x="40" y="580">var net = <tspan class="d">⟨1⟩</tspan> - <tspan class="d">⟨5⟩</tspan>;</text>
+  <text class="code" x="40" y="600">var <tspan class="d">⟨7⟩</tspan> = net * <tspan class="d">⟨8⟩</tspan>;</text>
+  <text class="code" x="40" y="620">Log.Info("total", net + <tspan class="d">⟨7⟩</tspan>);</text>
+  <text class="code" x="40" y="640">return net + <tspan class="d">⟨7⟩</tspan>;</text>
+  <text class="text" x="40" y="666">One hole for each distinct set of differences:</text>
+  <text class="text" x="40" y="684">⟨2⟩ is order | booking everywhere it appears.</text>
+
+  <path class="rule" d="M456,524 V688"/>
+  <text class="small" x="480" y="540" font-weight="700">hole</text>
+  <text class="small" x="528" y="540" font-weight="700">kind</text>
+  <text class="small" x="612" y="540" font-weight="700">PlanTotal</text>
+  <text class="small" x="712" y="540" font-weight="700">SeatTotal</text>
+  <text class="small" x="800" y="540" font-weight="700">shared version</text>
+  <path class="rule" d="M480,547 H920"/>
+  <g class="code">
+    <text x="480" y="564" class="code d">⟨1⟩</text><text x="612" y="564">total</text><text x="712" y="564">sum</text>
+    <text x="480" y="581" class="code d">⟨2⟩</text><text x="612" y="581">order</text><text x="712" y="581">booking</text>
+    <text x="480" y="598" class="code d">⟨3⟩</text><text x="612" y="598">Price</text><text x="712" y="598">Fee</text>
+    <text x="480" y="615" class="code d">⟨4⟩</text><text x="612" y="615">Months</text><text x="712" y="615">Nights</text>
+    <text x="480" y="632" class="code d">⟨5⟩</text><text x="612" y="632">discount</text><text x="712" y="632">rebate</text>
+    <text x="480" y="649" class="code d">⟨6⟩</text><text x="612" y="649">Discount</text><text x="712" y="649">Rebate</text>
+    <text x="480" y="666" class="code d">⟨7⟩</text><text x="612" y="666">tax</text><text x="712" y="666">vat</text>
+    <text x="480" y="683" class="code d">⟨8⟩</text><text x="612" y="683">0.2m</text><text x="712" y="683">0.1m</text>
+  </g>
+  <g class="text">
+    <text x="528" y="564">local</text><text x="800" y="564" fill="#94a3b8">only renamed</text>
+    <text x="528" y="581">name</text><text x="800" y="581">a parameter</text>
+    <text x="528" y="598">member</text><text x="800" y="598">a value or a selector</text>
+    <text x="528" y="615">member</text><text x="800" y="615">a value or a selector</text>
+    <text x="528" y="632">local</text><text x="800" y="632" fill="#94a3b8">only renamed</text>
+    <text x="528" y="649">member</text><text x="800" y="649">a value or a selector</text>
+    <text x="528" y="666">local</text><text x="800" y="666" fill="#94a3b8">only renamed</text>
+    <text x="528" y="683">value</text><text x="800" y="683">a parameter</text>
+  </g>
+
+  <!-- the finding -->
+  <rect class="out" x="24" y="716" width="912" height="60" rx="10"/>
+  <text class="head" x="40" y="738" fill="#059669">THE FINDING</text>
+  <text class="text" x="40" y="760">2 copies of 6 lines, type 2: renamed. Unite: keep one function and call it from the other, taking ⟨2⟩ ⟨3⟩ ⟨4⟩ ⟨6⟩ ⟨8⟩ as parameters.</text>
+</svg>

@@ -4,6 +4,10 @@
 
 Every step is exact on the syntax tree (tree-sitter), with no AI and no guessing. It runs on all cores and scans 2,000 files in a few seconds.
 
+Two renamed copies, followed through steps 1 and 2:
+
+![Two renamed copies become one template: each statement becomes its shape, runs with the same shapes form a group, and anti-unification gives the template with a hole wherever the copies differ](../images/duplication-renamed.svg)
+
 ## 1. Statements become shapes
 
 Each statement becomes its shape: keywords, operators and structure, with names and literals replaced by placeholders. Renamed copies have the same shapes.
@@ -21,12 +25,16 @@ Each statement becomes its shape: keywords, operators and structure, with names 
 - A candidate pair is aligned in two steps: statements by shape (a shortest edit script, Myers' algorithm), then tokens only inside statements that differ and are at least 70% alike.
 - A pair whose matched tokens are at least 80% of the two bodies' tokens together (2 × matched / (a + b)) is a near miss. Connected pairs form a group around the body most like the others.
 
+![A near miss: two function bodies aligned statement by statement, one with a statement added; 2 × 52 matched tokens out of 52 + 62 is 91% alike](../images/duplication-near-miss.svg)
+
 ## 4. Reordered and mixed-in copies
 
 - Statements of two blocks are paired by shape, renaming locals consistently. Members and called functions keep their names.
 - A pair is kept only when the data flows the same way: each name it reads comes, in both copies, from partnered statements or from outside the copy.
 - The largest set of paired statements linked by what they define and read is the copy. Statements that only look alike, such as a list of independent calls, are not one.
 - The report lists the copy's lines and the statements in between, which need moving out of the way before extracting it.
+
+![A reordered copy: five statements paired by shape across two functions, in another order and with a logging call in between, kept because the data flows the same way in both](../images/duplication-reordered.svg)
 
 ## 5. Long expressions
 

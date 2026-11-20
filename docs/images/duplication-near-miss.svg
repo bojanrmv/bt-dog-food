@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 372" width="960" height="372" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <title>A near miss: two function bodies aligned statement by statement</title>
+  <defs>
+    <style>
+      .box { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; }
+      .syn { fill: #eff6ff; stroke: #60a5fa; stroke-width: 1.5; }
+      .title { font-size: 15px; font-weight: 600; fill: #0f172a; }
+      .head { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; }
+      .text { font-size: 12.5px; fill: #475569; }
+      .small { font-size: 11px; fill: #64748b; }
+      .code { font-family: Consolas, Menlo, "DejaVu Sans Mono", monospace; font-size: 12px; fill: #0f172a; }
+      .d { fill: #c026d3; font-weight: 700; }
+      .add { fill: #047857; font-weight: 700; }
+      .tie { stroke: #94a3b8; stroke-width: 1.2; fill: none; }
+    </style>
+  </defs>
+  <rect width="960" height="372" rx="14" fill="#ffffff"/>
+  <text class="title" x="24" y="36">A near miss: two bodies aligned statement by statement</text>
+  <rect x="774" y="26" width="10" height="10" rx="2" fill="#c026d3"/>
+  <text class="text" x="936" y="36" text-anchor="end">differs between the copies</text>
+
+  <rect class="box" x="24" y="56" width="392" height="216" rx="10"/>
+  <text class="head" x="40" y="80" fill="#475569">Billing.PlanTotal · 52 TOKENS</text>
+  <text class="code" x="40" y="110">var total = order.Price * order.Months;</text>
+  <text class="code" x="40" y="134">var discount = total * order.Discount / 100;</text>
+  <text class="code" x="40" y="158">var net = total - discount;</text>
+  <rect x="34" y="169" width="372" height="22" rx="4" fill="none" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="4 3"/>
+  <text class="small" x="220" y="184" text-anchor="middle">nothing here</text>
+  <text class="code" x="40" y="206">var tax = net * 0.2m;</text>
+  <text class="code" x="40" y="230">Log.<tspan class="d">Info</tspan>("total", net + tax);</text>
+  <text class="code" x="40" y="254">return net + tax;</text>
+
+  <rect class="box" x="544" y="56" width="392" height="216" rx="10"/>
+  <text class="head" x="560" y="80" fill="#475569">Billing.TrialTotal · 62 TOKENS</text>
+  <text class="code" x="560" y="110">var total = order.Price * order.Months;</text>
+  <text class="code" x="560" y="134">var discount = total * order.Discount / 100;</text>
+  <text class="code" x="560" y="158">var net = total - discount;</text>
+  <rect x="554" y="169" width="372" height="22" rx="4" fill="#d1fae5" stroke="#34d399" stroke-width="1.2"/>
+  <text class="code" x="560" y="184">if (net &lt; 10) net = 10;</text>
+  <text class="code" x="560" y="206">var tax = net * 0.2m;</text>
+  <text class="code" x="560" y="230">Log.<tspan class="d">Warn</tspan>("total", net + tax);</text>
+  <text class="code" x="560" y="254">return net + tax;</text>
+
+  <!-- the alignment: matched tokens for each pair of statements -->
+  <text class="small" x="480" y="80" text-anchor="middle">matched tokens</text>
+  <g class="tie">
+    <path d="M420,106 H452 M508,106 H540"/>
+    <path d="M420,130 H452 M508,130 H540"/>
+    <path d="M420,154 H452 M508,154 H540"/>
+    <path d="M420,202 H452 M508,202 H540"/>
+    <path d="M420,226 H452 M508,226 H540"/>
+    <path d="M420,250 H452 M508,250 H540"/>
+  </g>
+  <g class="code" text-anchor="middle">
+    <text x="480" y="110">= 11</text>
+    <text x="480" y="134">= 11</text>
+    <text x="480" y="158">= 7</text>
+    <text x="480" y="184" class="code add">+ 10 added</text>
+    <text x="480" y="206">= 7</text>
+    <text x="480" y="230">= 11</text>
+    <text x="480" y="254">= 5</text>
+  </g>
+
+  <rect class="syn" x="24" y="292" width="912" height="56" rx="10"/>
+  <text class="head" x="40" y="314" fill="#2563eb">ALIKE = 2 × MATCHED / (BOTH BODIES' TOKENS) = 2 × 52 / (52 + 62) = 91%</text>
+  <text class="text" x="40" y="336">At least 80% is a near miss. The finding: template of the 6 shared statements, ⟨1⟩ call: Info | Warn, TrialTotal adds line 18.</text>
+</svg>

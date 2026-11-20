@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 424" width="960" height="424" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <title>A reordered copy: statements paired by shape and kept by data flow</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+    <style>
+      .box { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; }
+      .syn { fill: #eff6ff; stroke: #60a5fa; stroke-width: 1.5; }
+      .title { font-size: 15px; font-weight: 600; fill: #0f172a; }
+      .head { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; }
+      .text { font-size: 12.5px; fill: #475569; }
+      .small { font-size: 11px; fill: #64748b; }
+      .code { font-family: Consolas, Menlo, "DejaVu Sans Mono", monospace; font-size: 12px; fill: #0f172a; }
+      .d { fill: #c026d3; font-weight: 700; }
+      .off { fill: #94a3b8; }
+      .pair { stroke: #3b82f6; stroke-width: 1.6; fill: none; }
+      .node { fill: #ffffff; stroke: #60a5fa; stroke-width: 1.5; }
+      .line { stroke: #64748b; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="960" height="424" rx="14" fill="#ffffff"/>
+  <text class="title" x="24" y="36">Another order, other code in between: paired by shape, kept by data flow</text>
+
+  <rect class="box" x="24" y="56" width="384" height="202" rx="10"/>
+  <text class="head" x="40" y="80" fill="#475569">Orders.SaveOrder · LINES 5-9</text>
+  <text class="code" x="40" y="110">var total = <tspan class="d">order</tspan>.Price * <tspan class="d">order</tspan>.Months;</text>
+  <text class="code" x="40" y="136">var tax = total * 0.2m;</text>
+  <text class="code" x="40" y="162">var label = <tspan class="d">order</tspan>.Customer.Name.Trim();</text>
+  <text class="code" x="40" y="188">var row = new Row(label, total + tax);</text>
+  <text class="code" x="40" y="214">Audit.Write(row);</text>
+
+  <rect class="box" x="552" y="56" width="384" height="202" rx="10"/>
+  <text class="head" x="568" y="80" fill="#475569">Orders.SaveQuote · LINES 14, 16-19</text>
+  <text class="code" x="568" y="110">var label = <tspan class="d">quote</tspan>.Customer.Name.Trim();</text>
+  <rect x="560" y="121" width="368" height="22" rx="4" fill="none" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="4 3"/>
+  <text class="code off" x="568" y="136">Log.Debug("building the quote");</text>
+  <text class="small" x="920" y="136" text-anchor="end">not in the copy</text>
+  <text class="code" x="568" y="162">var total = <tspan class="d">quote</tspan>.Price * <tspan class="d">quote</tspan>.Months;</text>
+  <text class="code" x="568" y="188">var tax = total * 0.2m;</text>
+  <text class="code" x="568" y="214">var row = new Row(label, total + tax);</text>
+  <text class="code" x="568" y="240">Audit.Write(row);</text>
+
+  <!-- the pairs -->
+  <text class="small" x="480" y="80" text-anchor="middle">same shape</text>
+  <g class="pair">
+    <path d="M412,106 L548,158"/>
+    <path d="M412,132 L548,184"/>
+    <path d="M412,158 L548,106"/>
+    <path d="M412,184 L548,210"/>
+    <path d="M412,210 L548,236"/>
+  </g>
+  <g fill="#3b82f6">
+    <circle cx="412" cy="106" r="3"/><circle cx="548" cy="158" r="3"/>
+    <circle cx="412" cy="132" r="3"/><circle cx="548" cy="184" r="3"/>
+    <circle cx="412" cy="158" r="3"/><circle cx="548" cy="106" r="3"/>
+    <circle cx="412" cy="184" r="3"/><circle cx="548" cy="210" r="3"/>
+    <circle cx="412" cy="210" r="3"/><circle cx="548" cy="236" r="3"/>
+  </g>
+
+  <!-- the data flow both copies share -->
+  <rect class="syn" x="24" y="278" width="912" height="122" rx="10"/>
+  <text class="head" x="40" y="302" fill="#2563eb">THE SAME DATA FLOW IN BOTH COPIES</text>
+  <text class="text" x="40" y="328">An arrow runs from where a value</text>
+  <text class="text" x="40" y="346">is defined to where it is read.</text>
+  <text class="text" x="40" y="372">The pairs are kept: every arrow</text>
+  <text class="text" x="40" y="390">joins partners in both copies.</text>
+
+  <rect class="node" x="330" y="316" width="90" height="28" rx="14"/>
+  <text class="code" x="375" y="334" text-anchor="middle">total</text>
+  <rect class="node" x="480" y="316" width="90" height="28" rx="14"/>
+  <text class="code" x="525" y="334" text-anchor="middle">tax</text>
+  <rect class="node" x="630" y="316" width="90" height="28" rx="14"/>
+  <text class="code" x="675" y="334" text-anchor="middle">row</text>
+  <rect class="node" x="780" y="316" width="136" height="28" rx="14"/>
+  <text class="code" x="848" y="334" text-anchor="middle">Audit.Write(row)</text>
+  <rect class="node" x="480" y="358" width="90" height="28" rx="14"/>
+  <text class="code" x="525" y="376" text-anchor="middle">label</text>
+
+  <path class="line" d="M420,330 H476"/>
+  <path class="line" d="M570,330 H626"/>
+  <path class="line" d="M720,330 H776"/>
+  <path class="line" d="M375,316 C395,290 655,290 675,312"/>
+  <path class="line" d="M570,372 H655 Q675,372 675,348"/>
+</svg>
