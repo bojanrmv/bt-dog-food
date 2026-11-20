@@ -13,7 +13,7 @@ const { Side } = require("./lib/side");
 const { Dashboard } = require("./lib/dashboard");
 
 function activate(context) {
-  const output = vscode.window.createOutputChannel("dog-food");
+  const output = vscode.window.createOutputChannel("Dog Food");
   const runs = new Runs(context, output);
   const side = new Side(runs);
   const view = vscode.window.createTreeView("dogFood.view", { treeDataProvider: side });
@@ -114,7 +114,7 @@ function selected(uri, uris) {
 
 async function open(runs, file, line = 1, endLine) {
   const found = runs.locate(file);
-  if (!found) return void vscode.window.showWarningMessage(`dog-food: ${file} was not found.`);
+  if (!found) return void vscode.window.showWarningMessage(`Dog Food: ${file} was not found.`);
   const first = Math.max(line, 1) - 1;
   // A copy is selected whole, up to the start of the line after it.
   const selection = new vscode.Range(first, 0, endLine || first, 0);

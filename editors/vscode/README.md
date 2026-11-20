@@ -1,10 +1,10 @@
-# dog-food for VS Code
+# Dog Food for VS Code
 
 Runs `dgf` from the editor, for C#, TypeScript/JavaScript and Rust:
 
-- **Side bar** (the dog-food icon): run complexity, changes, duplication or mutation tests, and see what each found. A click on a finding opens the code. **Scope** chooses what they look at: the whole workspace, or files and folders.
+- **Side bar** (the paw icon): run complexity, changes, duplication or mutation tests, and see what each found. A click on a finding opens the code. **Scope** chooses what they look at: the whole workspace, or files and folders.
 - **Dashboard**: `dgf`'s report pages in an editor tab, one tab per analysis. A click on a location opens the code.
-- **Explorer**: right-click files or folders, then **dog-food**, to analyze just those.
+- **Explorer**: right-click files or folders, then **Dog Food**, to analyze just those.
 - **In the editor**: above each function, its scores and where its code is duplicated (a click opens the copy); Problems for functions above the limits in `dgf.toml`; and the file's most complex function in the status bar.
 
 Mutation tests of the whole workspace test only the functions the branch changed; choose files or folders to test all of theirs. A running analysis has a stop button on its row.

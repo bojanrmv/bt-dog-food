@@ -46,7 +46,7 @@ class Duplicates {
     if (state.run) return void (state.again = true);
     const started = Date.now();
     state.run = dgf.start(program(), ["duplication", "--format", "json"], { cwd: folder });
-    vscode.window.setStatusBarMessage("$(sync~spin) dog-food: looking for copies", state.run.done.catch(() => {}));
+    vscode.window.setStatusBarMessage("$(sync~spin) Dog Food: looking for copies", state.run.done.catch(() => {}));
     try {
       const report = dgf.report(await state.run.done);
       state.index = copies.index(report, folder);

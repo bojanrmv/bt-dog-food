@@ -60,7 +60,7 @@ class Runs {
   async run(kind) {
     const state = this.states[kind];
     const cwd = this.folder();
-    if (!cwd) return void vscode.window.showWarningMessage("dog-food: open a folder first.");
+    if (!cwd) return void vscode.window.showWarningMessage("Dog Food: open a folder first.");
     if (state.running) return;
     const args = this.arguments(kind, "json", cwd);
     this.output.appendLine(`> dgf ${args.join(" ")}`);

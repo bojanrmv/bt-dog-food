@@ -1,6 +1,6 @@
 {
   "name": "dog-food",
-  "displayName": "dog-food",
+  "displayName": "Dog Food",
   "description": "Complexity, CRAP, duplication and mutation testing from a side bar and a dashboard, and complexity above every function (C#, TypeScript/JavaScript, Rust). Runs the dgf command line tool.",
   "version": "0.0.0",
   "publisher": "dog-food",
@@ -21,23 +21,23 @@
   ],
   "contributes": {
     "viewsContainers": {
-      "activitybar": [{ "id": "dogFood", "title": "dog-food", "icon": "media/dgf.svg" }]
+      "activitybar": [{ "id": "dogFood", "title": "Dog Food", "icon": "media/dgf.svg" }]
     },
     "views": {
       "dogFood": [{ "id": "dogFood.view", "name": "Analyses" }]
     },
     "commands": [
-      { "command": "dogFood.run", "title": "Run Analysis", "category": "dog-food", "icon": "$(play)" },
-      { "command": "dogFood.runAll", "title": "Run Complexity, Changes and Duplication", "category": "dog-food", "icon": "$(run-all)" },
-      { "command": "dogFood.stop", "title": "Stop", "category": "dog-food", "icon": "$(debug-stop)" },
-      { "command": "dogFood.dashboard", "title": "Open Dashboard", "category": "dog-food", "icon": "$(graph)" },
-      { "command": "dogFood.chooseScope", "title": "Choose What to Analyze", "category": "dog-food" },
-      { "command": "dogFood.analyzeFile", "title": "Analyze Current File", "category": "dog-food" },
-      { "command": "dogFood.complexityOf", "title": "Complexity", "category": "dog-food" },
-      { "command": "dogFood.duplicationOf", "title": "Duplication", "category": "dog-food" },
-      { "command": "dogFood.mutationOf", "title": "Mutation Tests", "category": "dog-food" }
+      { "command": "dogFood.run", "title": "Run Analysis", "category": "Dog Food", "icon": "$(play)" },
+      { "command": "dogFood.runAll", "title": "Run Complexity, Changes and Duplication", "category": "Dog Food", "icon": "$(run-all)" },
+      { "command": "dogFood.stop", "title": "Stop", "category": "Dog Food", "icon": "$(debug-stop)" },
+      { "command": "dogFood.dashboard", "title": "Open Dashboard", "category": "Dog Food", "icon": "$(graph)" },
+      { "command": "dogFood.chooseScope", "title": "Choose What to Analyze", "category": "Dog Food" },
+      { "command": "dogFood.analyzeFile", "title": "Analyze Current File", "category": "Dog Food" },
+      { "command": "dogFood.complexityOf", "title": "Complexity", "category": "Dog Food" },
+      { "command": "dogFood.duplicationOf", "title": "Duplication", "category": "Dog Food" },
+      { "command": "dogFood.mutationOf", "title": "Mutation Tests", "category": "Dog Food" }
     ],
-    "submenus": [{ "id": "dogFood.explorer", "label": "dog-food" }],
+    "submenus": [{ "id": "dogFood.explorer", "label": "Dog Food" }],
     "menus": {
       "view/title": [
         { "command": "dogFood.runAll", "when": "view == dogFood.view", "group": "navigation@1" },
@@ -61,7 +61,7 @@
       ]
     },
     "configuration": {
-      "title": "dog-food",
+      "title": "Dog Food",
       "properties": {
         "dogFood.path": {
           "type": "string",

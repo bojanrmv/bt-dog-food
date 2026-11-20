@@ -6,7 +6,7 @@
 
 - **side bar**: run complexity, changes, duplication or mutation tests on the whole workspace or on chosen files and folders, and see what each found; a click opens the code;
 - **dashboard**: the [report pages](dashboards.md) in an editor tab, one tab per analysis;
-- **explorer**: right-click files or folders, then **dog-food**, to analyze just those;
+- **explorer**: right-click files or folders, then **Dog Food**, to analyze just those;
 - **scores above each function**: `complexity 7 · cognitive 9 · warn`, plus coverage and CRAP when `dgf.toml` lists coverage reports, and where its code is duplicated: `duplicated in Pricing.cs:40 (Shipping)`;
 - **Problems panel** entries for functions above `warn` (warning) or `fail` (error), with the decision breakdown;
 - **status bar**: the most complex function in the open file.

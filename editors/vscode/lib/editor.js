@@ -98,7 +98,7 @@ function diagnostic(f) {
   const message = `${f.name}: cyclomatic complexity ${f.complexity} is above the ${fail ? "fail" : "warn"} limit ${limit} (cognitive ${f.cognitive}). ${decisions(f)}`;
   const range = new vscode.Range(f.startLine - 1, 0, f.startLine - 1, 200);
   const item = new vscode.Diagnostic(range, message, fail ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning);
-  item.source = "dog-food";
+  item.source = "Dog Food";
   return item;
 }
 
@@ -163,7 +163,7 @@ function showStatus(document) {
 
 function reportError(error) {
   if (error.code === "ENOENT") {
-    if (!warnedMissing) vscode.window.showWarningMessage("dog-food: `dgf` was not found. Install it, or set dogFood.path.");
+    if (!warnedMissing) vscode.window.showWarningMessage("Dog Food: `dgf` was not found. Install it, or set dogFood.path.");
     warnedMissing = true;
     return;
   }

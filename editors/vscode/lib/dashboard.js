@@ -30,7 +30,7 @@ class Dashboard {
 
   reveal() {
     if (this.panel) return this.panel.reveal();
-    this.panel = vscode.window.createWebviewPanel("dogFood.dashboard", "dog-food", vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
+    this.panel = vscode.window.createWebviewPanel("dogFood.dashboard", "Dog Food", vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
     this.panel.onDidDispose(() => (this.panel = null));
     this.panel.webview.onDidReceiveMessage(message => this.received(message));
   }
@@ -43,7 +43,7 @@ class Dashboard {
   async render() {
     const kind = this.kind;
     const options = { dark: DARK.includes(vscode.window.activeColorTheme.kind), kind, kinds: model.KINDS };
-    this.panel.title = `dog-food: ${model.KINDS[kind].title}`;
+    this.panel.title = `Dog Food: ${model.KINDS[kind].title}`;
     const html = await this.build(kind).then(
       report => page.prepare(report, options),
       error => page.message(this.runs.problem(error), options)
