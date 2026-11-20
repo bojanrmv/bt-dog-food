@@ -32,6 +32,9 @@ jobs:
       # which on Linux race for it. One command first finishes the setup.
       - run: dotnet nuget list source
       - run: cargo test
+      - name: The VS Code extension
+        working-directory: editors/vscode
+        run: node --test
 
   complexity:
     runs-on: ubuntu-latest

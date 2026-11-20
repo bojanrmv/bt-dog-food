@@ -1,145 +1,124 @@
-// dog-food for VS Code: scores above each function, problems for functions
-// above the limits in dgf.toml, and commands that open the HTML reports.
+// dog-food for VS Code: a side bar that runs the analyses and lists what they
+// find, a dashboard of dgf's report pages, and scores in the editor.
 // It runs the `dgf` command line tool; it has no other dependencies.
 "use strict";
 
 const vscode = require("vscode");
-const { execFile } = require("child_process");
-const os = require("os");
 const path = require("path");
-
-const LANGUAGES = ["csharp", "typescript", "typescriptreact", "javascript", "javascriptreact", "rust"];
-const results = new Map();
-const lensChanged = new vscode.EventEmitter();
-let diagnostics;
-let statusItem;
-let warnedMissing = false;
+const os = require("os");
+const model = require("./lib/model");
+const editor = require("./lib/editor");
+const { Runs } = require("./lib/runs");
+const { Side } = require("./lib/side");
+const { Dashboard } = require("./lib/dashboard");
 
 function activate(context) {
-  diagnostics = vscode.languages.createDiagnosticCollection("dog-food");
-  statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
-  statusItem.command = "dogFood.openReport";
-  const selector = LANGUAGES.map(language => ({ language, scheme: "file" }));
+  const output = vscode.window.createOutputChannel("dog-food");
+  const runs = new Runs(context, output);
+  const side = new Side(runs);
+  const view = vscode.window.createTreeView("dogFood.view", { treeDataProvider: side });
+  const dashboard = new Dashboard(runs, pagesFolder(context));
+  const command = (id, action) => vscode.commands.registerCommand(id, action);
+
+  editor.activate(context, output);
   context.subscriptions.push(
-    diagnostics,
-    statusItem,
-    vscode.languages.registerCodeLensProvider(selector, { onDidChangeCodeLenses: lensChanged.event, provideCodeLenses: lenses }),
-    vscode.workspace.onDidSaveTextDocument(analyze),
-    vscode.workspace.onDidOpenTextDocument(analyze),
-    vscode.window.onDidChangeActiveTextEditor(editor => showStatus(editor && editor.document)),
-    vscode.commands.registerCommand("dogFood.analyzeFile", () => analyzeActive()),
-    vscode.commands.registerCommand("dogFood.openReport", () => openReport("analyze", "dgf-report.html")),
-    vscode.commands.registerCommand("dogFood.openChanges", () => openReport("changes", "dgf-changes.html")),
-    vscode.commands.registerCommand("dogFood.openHistory", () => openReport("history", "dgf-history.html"))
+    output,
+    view,
+    // A finished run opens its row, and redraws its page if that is the one shown.
+    runs.finished.event(kind => view.reveal(side.nodes[kind], { expand: true, select: false }).then(undefined, () => {})),
+    runs.finished.event(kind => dashboard.refresh(kind)),
+    vscode.window.onDidChangeActiveColorTheme(() => dashboard.refresh()),
+    command("dogFood.run", async target => run(runs, kindOf(target) || (await pickKind()))),
+    command("dogFood.runAll", () => Promise.all(["complexity", "changes", "duplication"].map(kind => runs.run(kind)))),
+    command("dogFood.stop", target => runs.stop(kindOf(target))),
+    command("dogFood.dashboard", target => dashboard.show(kindOf(target))),
+    command("dogFood.chooseScope", () => chooseScope(runs)),
+    command("dogFood.open", (file, line, endLine) => open(runs, file, line, endLine)),
+    command("dogFood.complexityOf", onSelection(runs, "complexity")),
+    command("dogFood.duplicationOf", onSelection(runs, "duplication")),
+    command("dogFood.mutationOf", onSelection(runs, "mutation"))
   );
-  vscode.workspace.textDocuments.forEach(analyze);
+  return { runs, side, dashboard };
 }
 
-function settings() {
-  return vscode.workspace.getConfiguration("dogFood");
+/* Report pages go to the workspace's own storage, so two windows do not share them. */
+function pagesFolder(context) {
+  return context.storageUri ? context.storageUri.fsPath : path.join(os.tmpdir(), "dgf-vscode");
 }
 
-/* dgf.toml is found from the folder dgf runs in, so run it in the workspace folder. */
-function folderOf(document) {
-  const folder = vscode.workspace.getWorkspaceFolder(document.uri);
-  return folder ? folder.uri.fsPath : path.dirname(document.uri.fsPath);
+/* An analysis as a command gets it: its name, or its row in the side bar. */
+function kindOf(target) {
+  return typeof target === "string" ? target : target && target.kind;
 }
 
-function run(args, cwd) {
-  return new Promise((resolve, reject) => {
-    execFile(settings().get("path") || "dgf", args, { cwd, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
-      // Exit code 1 only means a function is above the fail limit; the output is complete.
-      if (error && error.code !== 1) reject(Object.assign(new Error(stderr || error.message), { code: error.code }));
-      else resolve(stdout);
-    });
+function run(runs, kind) {
+  return kind ? runs.run(kind) : undefined;
+}
+
+async function pickKind() {
+  const items = model.RUNNABLE.map(kind => ({ label: model.KINDS[kind].title, detail: model.KINDS[kind].hint, kind }));
+  const picked = await vscode.window.showQuickPick(items, { placeHolder: "Which analysis?" });
+  return picked && picked.kind;
+}
+
+async function chooseScope(runs) {
+  const choices = [
+    { label: "Whole workspace", paths: () => [] },
+    { label: "The open file", paths: openFile },
+    { label: "Choose folders…", paths: () => browse(runs, true) },
+    { label: "Choose files…", paths: () => browse(runs, false) },
+  ];
+  const choice = await vscode.window.showQuickPick(choices, { placeHolder: "What should the analyses look at?" });
+  const paths = choice && (await choice.paths());
+  if (paths) runs.setScope(paths);
+}
+
+function openFile() {
+  const uri = activeFile();
+  return uri && [uri.fsPath];
+}
+
+function activeFile() {
+  const active = vscode.window.activeTextEditor;
+  return active && active.document.uri.scheme === "file" ? active.document.uri : undefined;
+}
+
+/* A dialog picks files or folders, not both: Windows and Linux have no dialog for both. */
+async function browse(runs, folders) {
+  const folder = runs.folder();
+  const picked = await vscode.window.showOpenDialog({
+    canSelectFolders: folders,
+    canSelectFiles: !folders,
+    canSelectMany: true,
+    defaultUri: folder ? vscode.Uri.file(folder) : undefined,
+    openLabel: "Analyze",
   });
+  return picked && picked.map(uri => uri.fsPath);
 }
 
-async function analyze(document) {
-  if (!LANGUAGES.includes(document.languageId) || document.uri.scheme !== "file") return;
-  try {
-    const output = await run(["analyze", document.uri.fsPath, "--format", "json"], folderOf(document));
-    store(document, JSON.parse(output).functions);
-  } catch (error) {
-    reportError(error);
-  }
+/* From the explorer's menu: the selected files and folders become what is looked at, and one analysis runs. */
+function onSelection(runs, kind) {
+  return async (uri, uris) => {
+    const chosen = selected(uri, uris);
+    if (!chosen.length) return;
+    runs.setScope(chosen);
+    await vscode.commands.executeCommand("dogFood.view.focus");
+    await runs.run(kind);
+  };
 }
 
-function analyzeActive() {
-  const editor = vscode.window.activeTextEditor;
-  if (editor) analyze(editor.document);
+function selected(uri, uris) {
+  const picked = uris && uris.length ? uris : [uri || activeFile()];
+  return picked.filter(each => each && each.scheme === "file").map(each => each.fsPath);
 }
 
-function store(document, functions) {
-  results.set(document.uri.toString(), functions);
-  diagnostics.set(document.uri, functions.filter(f => f.status === "warn" || f.status === "fail").map(diagnostic));
-  lensChanged.fire();
-  showStatus(vscode.window.activeTextEditor && vscode.window.activeTextEditor.document);
-}
-
-function diagnostic(f) {
-  const fail = f.status === "fail";
-  const limit = fail ? f.limits.fail : f.limits.warn;
-  const message = `${f.name}: cyclomatic complexity ${f.complexity} is above the ${fail ? "fail" : "warn"} limit ${limit} (cognitive ${f.cognitive}). ${decisions(f)}`;
-  const range = new vscode.Range(f.startLine - 1, 0, f.startLine - 1, 200);
-  const item = new vscode.Diagnostic(range, message, fail ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning);
-  item.source = "dog-food";
-  return item;
-}
-
-function decisions(f) {
-  const parts = Object.entries(f.breakdown).map(([kind, count]) => `${kind} ×${count}`);
-  return parts.length ? `Decisions: ${parts.join(", ")}.` : "";
-}
-
-function lenses(document) {
-  if (!settings().get("codeLens")) return [];
-  const minimum = settings().get("codeLensMinimum") || 1;
-  const functions = results.get(document.uri.toString()) || [];
-  return functions.filter(f => f.complexity >= minimum).map(lens);
-}
-
-function lens(f) {
-  const marks = { fail: " · FAIL", warn: " · warn", ignored: " · ignored" };
-  const coverage = f.coverage == null ? "" : ` · ${Math.round(f.coverage * 100)}% covered · CRAP ${f.crap.toFixed(1)}`;
-  const title = `complexity ${f.complexity} · cognitive ${f.cognitive}${coverage}${marks[f.status] || ""}`;
-  const range = new vscode.Range(f.startLine - 1, 0, f.startLine - 1, 0);
-  return new vscode.CodeLens(range, { title, tooltip: decisions(f) || "No branches", command: "" });
-}
-
-/* The most complex function in the open file, in the status bar. */
-function showStatus(document) {
-  const functions = document ? results.get(document.uri.toString()) : null;
-  if (!functions || !functions.length) {
-    statusItem.hide();
-    return;
-  }
-  const worst = functions.reduce((a, b) => (b.complexity > a.complexity ? b : a));
-  const icon = { fail: "$(error)", warn: "$(warning)" }[worst.status] || "$(pulse)";
-  statusItem.text = `${icon} dgf ${worst.complexity}`;
-  statusItem.tooltip = `Most complex: ${worst.name} (${worst.complexity}). Click for the workspace report.`;
-  statusItem.show();
-}
-
-async function openReport(command, file) {
-  const folder = (vscode.workspace.workspaceFolders || [])[0];
-  if (!folder) return vscode.window.showWarningMessage("Open a folder to build a dog-food report.");
-  const output = path.join(os.tmpdir(), file);
-  try {
-    await run([command, "--format", "html", "-o", output], folder.uri.fsPath);
-    await vscode.env.openExternal(vscode.Uri.file(output));
-  } catch (error) {
-    vscode.window.showErrorMessage(`dog-food: ${error.message.trim()}`);
-  }
-}
-
-function reportError(error) {
-  if (error.code === "ENOENT") {
-    if (!warnedMissing) vscode.window.showWarningMessage("dog-food: `dgf` was not found. Install it, or set dogFood.path.");
-    warnedMissing = true;
-    return;
-  }
-  console.error(`dog-food: ${error.message}`);
+async function open(runs, file, line = 1, endLine) {
+  const found = runs.locate(file);
+  if (!found) return void vscode.window.showWarningMessage(`dog-food: ${file} was not found.`);
+  const first = Math.max(line, 1) - 1;
+  // A copy is selected whole, up to the start of the line after it.
+  const selection = new vscode.Range(first, 0, endLine || first, 0);
+  await vscode.window.showTextDocument(vscode.Uri.file(found), { selection });
 }
 
 function deactivate() {}

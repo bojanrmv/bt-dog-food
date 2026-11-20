@@ -148,7 +148,7 @@ More: [duplication](docs/duplication/README.md): reading a finding, the review d
 
 Exit codes: 0 within the limits, 1 above them, 2 a usage error, 3 a missing path, 4 a mutation run out of time.
 
-The [VS Code extension](docs/integrations.md#vs-code) shows scores in the editor; `dgf skill install` teaches [Claude Code](docs/integrations.md#ai-assistants) to use `dgf`; the analysis is also a [Rust library](docs/integrations.md#rust-library).
+The [VS Code extension](docs/integrations.md#vs-code) runs the analyses from a side bar and shows scores in the editor; `dgf skill install` teaches [Claude Code](docs/integrations.md#ai-assistants) to use `dgf`; the analysis is also a [Rust library](docs/integrations.md#rust-library).
 
 ## Documentation
 

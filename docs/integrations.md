@@ -2,12 +2,14 @@
 
 ## VS Code
 
-`editors/vscode` is a small extension (plain JavaScript, no dependencies) that runs `dgf` when a file is opened and saved:
+`editors/vscode` is a small extension (plain JavaScript, no dependencies) that runs `dgf`:
 
-- **scores above each function**: `complexity 7 · cognitive 9 · warn`, plus coverage and CRAP when `dgf.toml` lists coverage reports;
+- **side bar**: run complexity, changes, duplication or mutation tests on the whole workspace or on chosen files and folders, and see what each found; a click opens the code;
+- **dashboard**: the [report pages](dashboards.md) in an editor tab, one tab per analysis;
+- **explorer**: right-click files or folders, then **dog-food**, to analyze just those;
+- **scores above each function**: `complexity 7 · cognitive 9 · warn`, plus coverage and CRAP when `dgf.toml` lists coverage reports, and where its code is duplicated: `duplicated in Pricing.cs:40 (Shipping)`;
 - **Problems panel** entries for functions above `warn` (warning) or `fail` (error), with the decision breakdown;
-- **status bar**: the most complex function in the open file;
-- **commands** (Ctrl+Shift+P, "dog-food"): open the workspace, changes or history report in the browser, or re-analyze the current file.
+- **status bar**: the most complex function in the open file.
 
 Install from this repository:
 
@@ -15,7 +17,7 @@ Install from this repository:
 powershell -ExecutionPolicy Bypass -File scripts/install-vscode-extension.ps1
 ```
 
-It packages the folder with `vsce` (through `npx`) and runs `code --install-extension`. Reload VS Code afterwards. Remove it with `code --uninstall-extension dog-food.dog-food`. Settings: `dogFood.path` (the `dgf` executable), `dogFood.codeLens`, `dogFood.codeLensMinimum`.
+It packages the folder with `vsce` (through `npx`) and runs `code --install-extension`. Reload VS Code afterwards. Remove it with `code --uninstall-extension dog-food.dog-food`. Settings: `dogFood.path` (the `dgf` executable), `dogFood.codeLens`, `dogFood.codeLensMinimum`, `dogFood.duplicationLens`.
 
 The extension uses the workspace folder's `dgf.toml`, so editor, CLI and CI agree.
 
