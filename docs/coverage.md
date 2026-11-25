@@ -56,6 +56,16 @@ crap_fail = 60   # optional: fail the run
 
 The CRAP status combines with the complexity status: the worse of the two wins. Functions with `// dgf-ignore` or accepted by the baseline stay `ignored`.
 
+## Coverage per file
+
+`dgf coverage` prints the line and branch coverage of each file from the same reports, the lines that never ran, and the lines that ran with only some of their branches. With `--changes` it covers only what the branch changed, and `--floor 90` makes it exit with code 1 when a file is below 90% on either. See the [command reference](commands.md#dgf-coverage).
+
+```powershell
+dgf coverage TestResults --changes --floor 90
+```
+
+It matches a file more strictly than `analyze --coverage` does: the report's path must be the end of the file's path, or the two must share the file's whole path inside the repository. A file that only shares its name with one in the reports is not matched.
+
 ## How functions and reports are matched
 
 - Coverage is per line. A function's coverage is the share of its *instrumented* lines (the lines the report lists) that ran at least once. Functions with no instrumented line show `–`.

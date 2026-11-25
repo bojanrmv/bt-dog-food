@@ -169,6 +169,10 @@ jobs:
           $dgf analyze crates --format markdown > /dev/null
           # The bundled C# engine: type-4 groups need it.
           $dgf dup crates/dog-food-dup/tests/corpus/csharp --tests --semantic --format agent | grep -q "type 4"
+          # The lookup commands read the source files as they are.
+          $dgf outline crates/dog-food-core/src/model.rs | grep -q "pub struct FileReport"
+          $dgf show crates/dog-food-core/src/model.rs:FileReport | grep -q "has_errors"
+          $dgf refs FileReport --in crates/dog-food-core/src | grep -q " def "
       # A program file that does not name its product, author and version is
       # anonymous to Windows and to security software: none of ours may be.
       - name: The files say what they are
