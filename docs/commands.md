@@ -342,8 +342,11 @@ The Claude Code skill teaches the agent to run `dgf` and act on what it reports.
 ```powershell
 dgf skill install           # .claude/skills/dog-food/SKILL.md in this repository
 dgf skill install --global  # ~/.claude/skills, for every project of this user
-dgf skill show              # print it
+dgf skill install --workflow  # also the four stages of a piece of work
+dgf skill show              # print it; `dgf skill show dgf-clean` prints a stage
 ```
+
+`--workflow` adds [four skills](integrations.md#workflow-skills) that take a piece of work from a request to hardened tests: `dgf-spec`, `dgf-build`, `dgf-clean` and `dgf-harden`.
 
 ## `dgf vscode`
 

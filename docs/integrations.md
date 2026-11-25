@@ -52,6 +52,17 @@ dgf skill show               # print it
 
 The skill tells Claude Code when to use `dgf` (complexity questions, refactoring, before finishing a change in a repo with `dgf.toml`), which commands to run with `--format agent`, how to read every column, and how to reduce complexity without gaming the score: guard clauses, extracting helpers, lookup tables, verifying with `dgf changes` and the tests, and never adding `dgf-ignore` or raising limits without asking. The text is [crates/dog-food-cli/assets/SKILL.md](../crates/dog-food-cli/assets/SKILL.md); it is compiled into `dgf`, so the installed skill always matches the installed tool.
 
+### Workflow skills
+
+`dgf skill install --workflow` also installs four skills, one per stage of a piece of work. Each starts with no memory of the one before: they hand over through one file, `.dgf/work/<name>.md`, which holds the spec and a log entry per stage.
+
+| Skill | Stage | Its gate |
+| --- | --- | --- |
+| `/dgf-spec <request>` | settles every open question and writes the spec | every rule has an example; no open questions |
+| `/dgf-build <name>` | makes the spec's rules true, with tests | every rule has a passing test; nothing new above `fail` in `dgf changes` |
+| `/dgf-clean <name>` | reshapes the change without changing behaviour | `dgf changes` clean, CRAP under the limit, every copy from `dgf dup --changes` united or explained |
+| `/dgf-harden <name>` | makes the tests on the changed lines check what they run | every survivor of `dgf mutate --changes` killed or named equivalent |
+
 Other agents (Copilot, Cursor, Codex) can be pointed at the same file or at `dgf --help` and `--format agent`.
 
 ## Rust library

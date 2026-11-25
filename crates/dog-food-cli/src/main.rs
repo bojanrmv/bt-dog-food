@@ -142,9 +142,16 @@ enum SkillAction {
         /// Install for every project of this user (~/.claude/skills) instead
         #[arg(long)]
         global: bool,
+        /// Also install the four stages of a piece of work: dgf-spec, dgf-build, dgf-clean, dgf-harden
+        #[arg(long)]
+        workflow: bool,
     },
-    /// Print the skill
-    Show,
+    /// Print a skill
+    Show {
+        /// Which one: dog-food, dgf-spec, dgf-build, dgf-clean or dgf-harden
+        #[arg(default_value = "dog-food")]
+        name: String,
+    },
 }
 
 #[derive(clap::Args)]
@@ -1142,17 +1149,31 @@ fn vscode(output: Option<PathBuf>) -> Result<ExitCode, Failure> {
 
 /// `dgf skill install|show`
 fn skill(action: SkillAction) -> Result<ExitCode, Failure> {
-    let SkillAction::Install { global } = action else {
-        say!("{}", setup::SKILL);
-        return Ok(ExitCode::SUCCESS);
+    let (global, workflow) = match action {
+        SkillAction::Show { name } => return show_skill(&name),
+        SkillAction::Install { global, workflow } => (global, workflow),
     };
     let cwd = std::env::current_dir().map_err(|err| io(err.to_string()))?;
     let root = git::root(&cwd).unwrap_or(cwd);
-    let path = setup::install_skill(&root, global).map_err(io)?;
-    sayln!(
-        "Installed the dog-food skill at {}",
-        display_path(&path.to_string_lossy())
-    );
+    for path in setup::install_skills(&root, global, workflow).map_err(io)? {
+        let name = path.parent().and_then(Path::file_name).unwrap_or_default();
+        sayln!(
+            "Installed the {} skill at {}",
+            name.to_string_lossy(),
+            display_path(&path.to_string_lossy())
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn show_skill(name: &str) -> Result<ExitCode, Failure> {
+    let known = setup::skill_names().join(", ");
+    let text = setup::skill(name).ok_or_else(|| {
+        usage(format!(
+            "there is no skill named {name}; there are: {known}"
+        ))
+    })?;
+    say!("{text}");
     Ok(ExitCode::SUCCESS)
 }
 
