@@ -248,9 +248,14 @@ fn operators<'t>(node: Node<'t>, op: Node<'t>, src: &[u8], found: &mut Vec<Found
     }
     for replacement in *replacements {
         match chained_nullish(node, op) {
-            Some(left) => {
-                found.extend(parenthesized_left(mutator, node, left, op, replacement, src))
-            }
+            Some(left) => found.extend(parenthesized_left(
+                mutator,
+                node,
+                left,
+                op,
+                replacement,
+                src,
+            )),
             None => found.push(Found::part(mutator, node, op, *replacement)),
         }
     }
