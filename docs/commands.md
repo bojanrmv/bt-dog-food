@@ -9,6 +9,8 @@ Every `dgf` command and option, and how they combine. `dgf <command> --help` pri
 - [`dgf history`](#dgf-history): trends from saved runs
 - [`dgf mutate`](#dgf-mutate): mutation testing
 - [`dgf duplication`](#dgf-duplication): code that can be united
+- [`dgf outline`, `dgf show`, `dgf refs`](#looking-code-up-dgf-outline-dgf-show-dgf-refs): look code up without reading whole files
+- [`dgf coverage`](#dgf-coverage): line and branch coverage per file
 - [`dgf init`](#dgf-init), [`dgf hook`](#dgf-hook), [`dgf skill`](#dgf-skill), [`dgf vscode`](#dgf-vscode): setup
 - [Output formats](#output-formats), [exit codes](#exit-codes)
 
@@ -252,6 +254,69 @@ dgf dup --format html -o dup.html         # the review dashboard
 
 All of it is explained in [duplication/](duplication/README.md).
 
+## Looking code up: `dgf outline`, `dgf show`, `dgf refs`
+
+Three commands that answer "what is in this file", "show me that function" and "who uses this name" in one call, for an AI assistant or a person. They read the files as they are now: no build, no index, so they work in any checkout or worktree. Each takes many targets at once, prints plain text with the line number on every row, and stops at `--max-lines` rows with a line that says what it left out.
+
+```powershell
+dgf outline src/Orders/OrderHandler.cs web/src/app/cart      # types and members, one line each, no bodies
+dgf outline --changes                                         # the files this branch changed
+dgf outline "src/**/*Handler.cs" --public --match "Handle"   # a glob, without private members, only matching ones
+dgf show src/Cart.cs:Total web/price.ts:120 src/Item.cs:1-40 # a declaration by name, the one around a line, a range
+dgf show Cart.Total --in src                                  # by name, wherever it is declared
+dgf show src/Cart.cs:Total --signature                        # its first line and the comment above it
+dgf refs PricingOptions Cart.Total --in src                   # every line that uses the name, with the declaration around it
+```
+
+`dgf outline` prints, per file, every namespace, type and member as `<first line>-<last line>  <signature>`, indented under what it is in. Bodies are left out, so functions inside functions are not listed.
+
+`dgf show` prints code with `<line number><tab>` in front of each line. `FILE:Name` gives every declaration of that name in the file (all overloads), `FILE:Type.Member` only the one in that type, `FILE:LINE` the member around the line. A target that names nothing gets a line of its own with the nearest names, and the others still print.
+
+`dgf refs` goes by the name alone, from the syntax tree: comments and strings are not matched, and a different declaration with the same name is listed too. Each row is the line number, `def` when the name is declared there, the declaration the line is in, and the line itself; files that declare the name come first and test files last.
+
+| Option | On | Meaning | Default |
+| --- | --- | --- | --- |
+| `--max-lines <N>` | all | Rows or lines of code to print, shared between the targets; 0 = no limit | 200, 400 for `show` |
+| `--exclude <PATTERN>`, `--no-config` | all | As for the other commands; a file named outright is always read | |
+| `--changes`, `--base <REF>` | `outline` | The source files the branch and its uncommitted edits changed | off; base as for `dgf changes` |
+| `--match <REGEX>` | `outline` | Only declarations whose signature matches, with the types they are in | all |
+| `--public` | `outline` | Leave out private declarations (C#: `private` or no modifier in a class; TypeScript: `private`, `#name`, or not exported; Rust: no `pub`) | off |
+| `--in <DIR>` | `show`, `refs` | Where a name is looked for | `.` |
+| `--signature` | `show` | Only the first line of each declaration and the comment above it | off |
+| `--context <N>` | `show` | Lines to add before and after | 0 |
+
+They exit with 0 when at least one target was found, else 1.
+
+## `dgf coverage`
+
+Line and branch coverage per file, read from the reports your tests already write (Cobertura, OpenCover, LCOV): the numbers, the lines that never ran, and the lines that ran with only some of their branches.
+
+```powershell
+dgf coverage TestResults --changes --floor 90     # the files this branch changed; exit 1 when one is below 90%
+dgf coverage coverage/lcov.info --functions       # every source file in the report, with a row per function
+```
+
+```
+coverage: 2 changed source files against main (1a2b3c4) (1 changed test files left out), 1 reports
+  line%  branch%  file
+   83.3     50.0  src/Cart.cs  BELOW 90
+                    not run: 17
+                    branches partly taken: 15 (1/2)
+      -        -  src/Shipping.cs  not in the reports  BELOW 90
+total: 83.3% of lines (5/6), 50.0% of branches (1/2); 1 files with functions are not in the reports (no test ran them, or their project was not measured) and are not counted
+floor 90: fail, 2 files are below it on lines or branches
+```
+
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `[REPORTS]...` | Coverage reports or folders to search for them | `[coverage] paths` in `dgf.toml` |
+| `--changes`, `--base <REF>` | Only the source files the branch and its uncommitted edits changed | every source file the reports have |
+| `--floor <PERCENT>` | Exit with code 1 when a file is below this on lines or on branches | no floor |
+| `--functions` | Also a row per function | off |
+| `--max-lines <N>` | Files to list, the worst covered first; 0 = all | 200 |
+
+Test code is left out, and so is what the `exclude` list of `dgf.toml` names. A changed file with functions that no report has counts as below the floor; a file without functions (an interface, a list of constants) does not. A file is matched to a report entry by its path, not by its name alone, so `src/Program.cs` is never read as `tests/Program.cs`. Branch counts are the report's own: a C# report counts the branches the compiler makes for `await`, `using` and `?.` as well.
+
 ## `dgf init`
 
 Writes a commented `dgf.toml` in the current folder with the common settings explained; `crap_warn`, `crap_fail` and `[changes] warn` are in [configuration](configuration.md). It refuses to overwrite an existing one.
@@ -308,7 +373,7 @@ It prints the `code --install-extension` command that installs the file. `dgf` d
 | Code | Meaning |
 | --- | --- |
 | 0 | Nothing above the `fail` limit (for `changes`: no new or worse function above it) |
-| 1 | Something is above the `fail` limit, the mutation score is below `--fail-under`, or `dgf dup` crossed `--fail-above` or `--fail-on-copies`. The report is still complete. |
+| 1 | Something is above the `fail` limit, the mutation score is below `--fail-under`, `dgf dup` crossed `--fail-above` or `--fail-on-copies`, or a file is below `dgf coverage --floor`. The report is still complete. For `outline`, `show` and `refs`: nothing that was asked for was found. |
 | 2 | Usage or settings error: unknown option, invalid `dgf.toml`, not a git repository for `changes`, a format the command does not support |
 | 3 | A path to scan or the history folder does not exist, or a report could not be written. A missing `--coverage` path exits with 2. |
 | 4 | `dgf mutate --max-minutes` ran out before every mutant was tested |

@@ -36,12 +36,14 @@ mod baseline;
 mod changes;
 mod config;
 mod coverage;
+mod covered;
 mod discover;
 mod git;
 mod history;
 #[cfg(windows)]
 mod junction;
 mod limits;
+mod lookup;
 mod mutate;
 mod mutation;
 mod report;
@@ -88,6 +90,14 @@ enum Command {
     Baseline(BaselineArgs),
     /// Mutation testing: choose functions, list their mutants, or run them against the tests
     Mutate(MutateArgs),
+    /// The shape of files without their bodies: every type and member on one line, with its lines
+    Outline(lookup::outline::Args),
+    /// The code of named declarations, or of the declaration around a line, from several files at once
+    Show(lookup::show::Args),
+    /// Where a name is used, with the declaration each use is in
+    Refs(lookup::refs::Args),
+    /// Line and branch coverage per file, from coverage reports
+    Coverage(covered::Args),
     /// Install or remove a git pre-commit hook that runs `dgf changes --staged`
     Hook {
         #[command(subcommand)]
@@ -335,6 +345,10 @@ fn main() -> ExitCode {
         Command::History(args) => overview(args),
         Command::Baseline(args) => accept(args),
         Command::Mutate(args) => mutation(args),
+        Command::Outline(args) => lookup::outline::run(args),
+        Command::Show(args) => lookup::show::run(args),
+        Command::Refs(args) => lookup::refs::run(args),
+        Command::Coverage(args) => covered::run(args),
         Command::Hook { action } => hook(action),
         Command::Skill { action } => skill(action),
         Command::Init => init(),

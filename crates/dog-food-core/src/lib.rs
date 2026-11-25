@@ -17,6 +17,7 @@ pub mod coverage;
 mod lang;
 mod model;
 pub mod mutate;
+pub mod outline;
 pub mod progress;
 mod walker;
 

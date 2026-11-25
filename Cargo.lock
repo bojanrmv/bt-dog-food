@@ -241,6 +241,7 @@ dependencies = [
  "jsonschema",
  "quick-xml",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

@@ -10,7 +10,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 pub const DEFAULT_EXCLUDES: &[&str] = &["*.d.ts", "*.g.cs", "*.Designer.cs"];
 
 /// Exclude patterns in .gitignore syntax, each set relative to its own folder.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Excludes {
     matchers: Vec<Gitignore>,
 }

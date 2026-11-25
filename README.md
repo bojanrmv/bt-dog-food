@@ -95,6 +95,19 @@ COMPLEXITY  COGNITIVE  STATUS   COVERAGE    CRAP  FUNCTION          LOCATION
 
 More: [metrics](docs/metrics.md) · [coverage and CRAP](docs/coverage.md) · [limits and dgf.toml](docs/configuration.md)
 
+### Looking code up
+
+For an AI assistant, or you: what is in a file, the code of a function, and who uses a name, each in one call, straight from the source files.
+
+```powershell
+dgf outline src/Shop/Pricing.cs               # every type and member with its lines, no bodies
+dgf show src/Shop/Pricing.cs:Shipping         # that function, with line numbers
+dgf refs Shipping --in src                    # every line that uses the name
+dgf coverage TestResults --changes --floor 90 # line and branch coverage of what the branch changed
+```
+
+More: [command reference](docs/commands.md#looking-code-up-dgf-outline-dgf-show-dgf-refs)
+
 ### Branch checks
 
 `dgf changes` compares your branch and uncommitted edits with its base branch, and fails only on functions that are new or got worse, so old code can stay as it is.

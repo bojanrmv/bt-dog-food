@@ -27,6 +27,20 @@ Limits live in `dgf.toml` (`[limits] warn`, `fail`, per-path `[[limits.overrides
 
 If `dgf` is not found in PowerShell, run `$env:Path = "$env:USERPROFILE\.dotnet\tools;$env:USERPROFILE\.cargo\bin;$env:Path"`. Exit code 1 only means something is above `fail`; the output is still complete. Exit code 2 is a usage or `dgf.toml` error: read the message. With `--format agent` the last line says the same (`exit: N (meaning)`), and `warning:` lines under the first lines (base fallback, a dgf.toml that differs from the base branch's) change what the counts mean: read them before trusting the result. `dgf mutate --format agent` starts with a `scope:` block (the dgf.toml it follows and what its excludes left out, the base and how it was chosen, how far HEAD is behind it, and after `--run` the test projects that ran): check it first.
 
+## Looking code up (one call, many targets)
+
+Before reading a file or grepping, use these: each takes several targets in one call and prints line numbers you can edit by. They read the files as they are, in any worktree.
+
+| Instead of | Run |
+|---|---|
+| Reading a whole file to see what is in it | `dgf outline src/A.cs src/B.ts` (every type and member with its lines, no bodies; `--changes` for the files the branch touched, `--match <regex>`, `--public`) |
+| `grep -n` then `sed -n 'a,bp'` per function | `dgf show src/A.cs:Handle src/B.ts:load src/C.cs:120` (by name, `Type.Member`, the member around a line, or `FILE:FROM-TO`; `--signature` for the first line and its comment) |
+| Looking for where something is declared | `dgf show Handle --in src` |
+| `grep -rn Name` then reading around each hit | `dgf refs Name Other --in backend` (each line with the declaration it is in; comments and strings are not matched; by name only, so a common name lists other declarations too) |
+| A script that reads the coverage file | `dgf coverage <report or folder> --changes --floor 90` (line and branch % per changed file, the lines not run, exit 1 below the floor; `--functions` per function) |
+
+Always put every target you need in the one call. Output stops at `--max-lines` (200; 400 for `show`) and says what it left out and how to get it. A target that is not found gets a line with the nearest names; the rest still print.
+
 ## Reading `--format agent` output
 
 ```
