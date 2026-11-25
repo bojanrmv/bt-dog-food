@@ -200,3 +200,24 @@ b`)
     // mutant: arrow s -> undefined
     .filter((s) => s);
 }
+
+// `a ?? b && c` does not parse: the second `??` of a chain becomes `&&`
+// with its left side in parentheses, and is left alone when that side
+// spans lines.
+// mutant: block {... -> {}
+export function label(a?: string, b?: string, c?: string): string {
+  // mutant: logical ?? -> &&
+  // mutant: logical a ?? b ?? -> (a ?? b) &&
+  // mutant: string "" -> "dgf was here!"
+  // mutant: logical a ?? b ?? c ?? -> (a ?? b ?? c) &&
+  const first = a ?? b ?? c ?? "";
+  // mutant: logical ?? -> &&
+  const second = a ??
+    b ?? c;
+  // mutant: logical a ?? b ?? -> (a ?? b) &&
+  a ?? b ?? save(c);
+  // mutant: arithmetic + -> -
+  // mutant: logical ?? -> &&
+  // mutant: logical ?? -> &&
+  return first + ((a ?? b) ?? second);
+}

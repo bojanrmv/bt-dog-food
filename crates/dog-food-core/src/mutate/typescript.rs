@@ -225,27 +225,82 @@ const OPERATORS: &[(&str, &[&str], &str)] = &[
     ("??", &["&&"], "logical"),
 ];
 
-fn binary<'t>(node: Node<'t>, _src: &[u8], found: &mut Vec<Found<'t>>) {
+fn binary<'t>(node: Node<'t>, src: &[u8], found: &mut Vec<Found<'t>>) {
     let Some(op) = node.child_by_field_name("operator") else {
         return;
     };
     if is_arithmetic(op.kind()) && has_text_operand(node) {
         return;
     }
-    operators(node, op, found);
+    operators(node, op, src, found);
     if is_boolean(op.kind()) && !is_condition_test(node) {
         boolean_expression(node, found);
     }
 }
 
-fn operators<'t>(node: Node<'t>, op: Node<'t>, found: &mut Vec<Found<'t>>) {
+fn operators<'t>(node: Node<'t>, op: Node<'t>, src: &[u8], found: &mut Vec<Found<'t>>) {
     let Some((_, replacements, mutator)) = OPERATORS.iter().find(|(o, _, _)| *o == op.kind())
     else {
         return;
     };
-    for replacement in *replacements {
-        found.push(Found::part(mutator, node, op, *replacement));
+    if starts_nullish_statement(node, op) {
+        return;
     }
+    for replacement in *replacements {
+        match chained_nullish(node, op) {
+            Some(left) => {
+                found.extend(parenthesized_left(mutator, node, left, op, replacement, src))
+            }
+            None => found.push(Found::part(mutator, node, op, *replacement)),
+        }
+    }
+}
+
+/// The first `??` of a chain that starts a statement, as in `a ?? b ?? c();`.
+/// Its switch goes around the whole statement (see [`expression_site`]), so
+/// the mutated copy would be `a && b ?? c();`, which does not parse.
+fn starts_nullish_statement(node: Node, op: Node) -> bool {
+    let chained = node
+        .parent()
+        .is_some_and(|parent| chained_nullish(parent, op) == Some(node));
+    op.kind() == "??"
+        && chained
+        && enclosing_expression_statement(node)
+            .is_some_and(|statement| statement.start_byte() == node.start_byte())
+}
+
+/// The left operand of the second `??` in `a ?? b ?? c`: another `??`
+/// without parentheses. `a ?? b && c` does not parse, so the `&&` mutant
+/// needs them around `a ?? b`.
+fn chained_nullish<'t>(node: Node<'t>, op: Node<'t>) -> Option<Node<'t>> {
+    let left = node.child_by_field_name("left")?;
+    let is_nullish = |n: Node| {
+        n.kind() == "binary_expression"
+            && n.child_by_field_name("operator")
+                .is_some_and(|o| o.kind() == "??")
+    };
+    (op.kind() == "??" && is_nullish(node) && is_nullish(left)).then_some(left)
+}
+
+/// The mutant of `op` that also puts parentheses around `left`, replacing
+/// from the start of `left` to the end of `op`. None when `left` spans
+/// lines: the replacement is copied onto one line as it is, where a line
+/// comment or a template's line break inside it would change its meaning.
+fn parenthesized_left<'t>(
+    mutator: &'static str,
+    node: Node<'t>,
+    left: Node<'t>,
+    op: Node<'t>,
+    replacement: &str,
+    src: &[u8],
+) -> Option<Found<'t>> {
+    if left.start_position().row != left.end_position().row {
+        return None;
+    }
+    let operand = text(left, src);
+    let mut found = Found::part(mutator, node, op, format!("({operand}) {replacement}"));
+    found.start = left.start_byte();
+    Some(found)
 }
 
 fn is_arithmetic(op: &str) -> bool {

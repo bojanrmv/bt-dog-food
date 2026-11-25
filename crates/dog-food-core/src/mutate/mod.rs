@@ -1019,6 +1019,23 @@ class K {
     }
 
     #[test]
+    fn a_chained_nullish_mutant_is_parenthesized_in_the_switched_code() {
+        let src = "const pick = (a?: string, b?: string) => a ?? b ?? '';
+";
+        let found = mutate(src, Language::TypeScript, &Settings::default()).unwrap();
+        let logical: Vec<&Mutant> = found
+            .mutants
+            .iter()
+            .filter(|m| m.mutator == "logical")
+            .collect();
+        let switched = schemata(src, Language::TypeScript, &logical, &|id| format!("on{id}"));
+        assert!(switched.contains("? ((a ?? b) && '')"), "{switched}");
+        assert!(switched.contains("? (a && b)"), "{switched}");
+        // `??` next to `&&` or `||` without parentheses does not parse.
+        assert!(!switched.contains("?? b && ''"), "{switched}");
+    }
+
+    #[test]
     fn a_typescript_switch_keeps_the_type_of_the_original() {
         let src = "const make = (a: number) => a + 1;\n";
         let found = mutate(src, Language::TypeScript, &Settings::default()).unwrap();
