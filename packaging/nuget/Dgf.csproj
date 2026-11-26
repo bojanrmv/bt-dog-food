@@ -36,7 +36,7 @@
     <ToolPackageRuntimeIdentifiers Condition="'$(ToolPackageRuntimeIdentifiers)' == ''">$(RuntimeIdentifiers)</ToolPackageRuntimeIdentifiers>
 
     <PackageId>dgf</PackageId>
-    <Version Condition="'$(Version)' == ''">0.1.7</Version>
+    <Version Condition="'$(Version)' == ''">0.1.8</Version>
     <Authors>Bojan Pavlovic</Authors>
     <Company>Bojan Pavlovic</Company>
     <Product>dog-food (dgf)</Product>

@@ -2,6 +2,12 @@
 
 What each version changed for people who use `dgf`. A version is not released without a section here: CI and the release workflow check it, and the section becomes the notes of the GitHub release ([releasing](docs/releasing.md)). Links inside a section are full URLs, because the release page shows it too.
 
+## 0.1.8
+
+Nothing changes in what `dgf` does: this version is 0.1.7 with release notes.
+
+- Every release now has notes. They are in `CHANGELOG.md` and on the release's page on GitHub, and a version without them is not released.
+
 ## 0.1.7
 
 New:
