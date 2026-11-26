@@ -189,7 +189,7 @@ What `dgf` does on a machine and how to check a download: [SECURITY.md](SECURITY
 | [`editors/vscode`](editors/vscode) | the VS Code extension |
 | [`docs`](docs) | the guides above |
 
-Building, testing and adding a language: [docs/development.md](docs/development.md). Versions and making a release: [docs/releasing.md](docs/releasing.md). The repository holds itself to its own [dgf.toml](dgf.toml) (warn above 5, fail above 6) in [CI](.github/workflows/ci.yml).
+Building, testing and adding a language: [docs/development.md](docs/development.md). Versions and making a release: [docs/releasing.md](docs/releasing.md). What each version changed: [CHANGELOG.md](CHANGELOG.md). The repository holds itself to its own [dgf.toml](dgf.toml) (warn above 5, fail above 6) in [CI](.github/workflows/ci.yml).
 
 ## License
 

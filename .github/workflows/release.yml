@@ -35,6 +35,21 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Before the build: no version is released without its notes.
+      - name: The version's notes in CHANGELOG.md
+        shell: bash
+        env:
+          VERSION: ${{ steps.read.outputs.version }}
+        run: |
+          if ! pwsh ./scripts/release-notes.ps1 -Version "$VERSION" > release-notes.md; then
+            echo "::error::CHANGELOG.md has no section for $VERSION: write what changed for users, then tag again"
+            exit 1
+          fi
+          cat release-notes.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-notes
+          path: release-notes.md
 
   binaries:
     needs: version
@@ -203,6 +218,9 @@ jobs:
         with:
           name: archives
           path: archives
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-notes
       # Before anything is published: a signed statement that the files in
       # SHA256SUMS were built by this workflow from this tag. To check one:
       #   gh attestation verify dgf.exe --repo <owner>/<repository>
@@ -235,10 +253,11 @@ jobs:
         run: |
           prerelease=()
           if [[ "$VERSION" == *-* ]]; then prerelease=(--prerelease); fi
-          # Above GitHub's generated notes: how to check what was downloaded.
-          cat > notes.md <<NOTES
-          To check a download: \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`, or compare its SHA-256 with \`SHA256SUMS\`.
-
-          NOTES
+          # The version's section of CHANGELOG.md, then how to check what was
+          # downloaded; GitHub adds the link that compares it with the last one.
+          {
+            cat release-notes.md
+            printf '\n\nTo check a download: `gh attestation verify <file> --repo %s`, or compare its SHA-256 with `SHA256SUMS`.\n\n' "$GITHUB_REPOSITORY"
+          } > notes.md
           gh release create "v$VERSION" archives/* --repo "$GITHUB_REPOSITORY" \
             --title "dgf $VERSION" --generate-notes --notes-file notes.md "${prerelease[@]}"

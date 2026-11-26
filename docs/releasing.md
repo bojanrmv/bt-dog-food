@@ -19,22 +19,31 @@ A prerelease (`0.3.0-rc.1`) goes to nuget.org as a prerelease: nobody gets it un
 
 There is no fixed schedule: release when something users want has landed. Fixes for reported problems go out as patches soon after they land.
 
+## Release notes
+
+Every version has a section in [CHANGELOG.md](../CHANGELOG.md), headed `## 0.2.0`, that says what changed for users: what is new, what is fixed, and what they have to change. It is written for someone who uses `dgf`, not for someone who reads its code. A prerelease (`0.3.0-rc.1`) uses the section of the version it leads to.
+
+A version without that section is not released: CI fails on the commit that changes the version, and the release workflow stops at a tag before it builds anything. The section becomes the notes of the GitHub release.
+
 ## Making a release
 
 ```powershell
 # 1. The version, in the root Cargo.toml ([workspace.package] version)
 cargo check                                  # updates Cargo.lock to match
+
+# 2. The notes: a "## 0.2.0" section at the top of CHANGELOG.md
+./scripts/release-notes.ps1                  # prints it, or says it is missing
 git commit -am "release 0.2.0"
 git push
 
-# 2. The tag starts the release
+# 3. The tag starts the release
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-3. In GitHub Actions, the `release` run builds, packs and tests (about 15 minutes), then waits at **publish**. Approve it (Review deployments → `nuget`).
-4. It pushes to nuget.org and creates the GitHub release with GitHub's generated notes (merged pull requests and a compare link; commits made directly to main are not listed). Edit the notes there.
-5. Check it as a user would. nuget.org takes a few minutes to index a new version:
+4. In GitHub Actions, the `release` run builds, packs and tests (about 15 minutes), then waits at **publish**. Approve it (Review deployments → `nuget`).
+5. It pushes to nuget.org and creates the GitHub release, with the version's section of `CHANGELOG.md` as its notes.
+6. Check it as a user would. nuget.org takes a few minutes to index a new version:
 
 ```powershell
 dotnet tool update -g dgf
